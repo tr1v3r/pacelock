@@ -10,9 +10,11 @@
 3. Use private networking, TLS, least-privilege authentication, dedicated quota
    keys and `maxmemory-policy noeviction`. Configure Redis persistence/replication
    according to the application's tolerance for lost admissions.
-4. Set client `MaxRetries: -1` and `ContextTimeoutEnabled: true`; set connection,
-   read/write, pool and request deadlines to the application's latency budget.
-   Audit Cluster redirects, middleware, hooks and proxies for command replay.
+4. Set `MaxRetries: -1`, and also `MaxRedirects: -1` for Cluster. Set
+   `ContextTimeoutEnabled: true` and connection, read/write, pool and request
+   deadlines to the application's latency budget. Constructors reject unsafe
+   retry options on concrete go-redis clients; see the retry contract below.
+   Audit middleware, hooks, custom clients/factories and proxies for command replay.
 5. Decide the backend-failure policy explicitly. Returning an unavailable response
    is usually preferable when exceeding provider quotas is unacceptable. Any
    fail-open policy knowingly permits traffic outside the shared quota contract.
@@ -26,6 +28,44 @@
 No quota or idempotency policy is hidden in an environment variable inside the
 SDK. Environment variables in this repository configure examples/tests only.
 
+## Client retries and Cluster availability
+
+Clients must be initialized with go-redis constructors; zero-value client structs
+are unsupported. For these initialized concrete `*redis.Client` and
+`*redis.ClusterClient` instances, `New` and `NewWithOptions` inspect options locally.
+Unsafe settings return `ErrInvalid` and a nil limiter, without a network request
+or changing caller-owned settings. Use a
+dedicated client configured before construction; do not mutate its options later.
+For go-redis v9.17.3, the checked values are the **normalized** options:
+
+- Standalone: `Client.Options().MaxRetries == 0`, obtained by passing
+  `MaxRetries: -1` to `redis.NewClient`. Omitting it enables ordinary retries and
+  is rejected.
+- Cluster: `ClusterClient.Options().MaxRedirects == 0` and `MaxRetries == -1`.
+  Pass both `MaxRedirects: -1` and `MaxRetries: -1` explicitly. go-redis also
+  normalizes an omitted Cluster `MaxRetries` to `-1`, which is accepted; an omitted
+  `MaxRedirects` enables the outer loop and is rejected.
+
+The Cluster outer loop retries some network failures as well as redirects.
+Leaving it enabled can debit a non-idempotent `Allow` twice, or hide a first debit
+behind a later quota denial. Disabling it is therefore required, even when the
+application normally uses `AllowOnce`.
+
+This also disables transparent `MOVED`/`ASK` retries. Normal routing uses the slot
+map, but resharding/failover or a stale map can surface an error on the current
+call. These backend errors remain `Unknown`, not quota denials or proof of no
+debit. Plan for this availability tradeoff; do not restore retries as a workaround.
+For an uncertain `AllowOnce`, recover the same retained ID under a fresh deadline;
+for `Allow`, apply the application's explicit failure policy. Slot-map discovery
+and refresh require the Cluster ACL grant documented in [security](../SECURITY.md).
+
+Custom `redis.Scripter` implementations and wrappers, hooks, Cluster `NewClient`
+factories and external proxies cannot be fully verified by constructor option
+checks. Their owners must preserve the no-ambiguous-replay contract. A successful
+constructor is not an end-to-end exactly-once guarantee. Pacelock itself only
+falls back from `EVALSHA` to `EVAL` for a `NOSCRIPT` cache miss; it does not retry an
+ambiguous transport failure.
+
 ## Metrics and diagnosis
 
 Use `NewWithOptions(..., Options{Observer: ...})` to export operation latency and
@@ -38,8 +78,9 @@ or raw errors. Wrap the observer in application code if panic recovery is needed
 `ErrInvalid` is a local input problem. `ErrPolicyMismatch` suggests inconsistent
 rollout or uncoordinated policy migration. `ErrState` suggests corrupted/wrong-type
 state, invalid replies or an unsupported clock jump: inspect, alert and preserve
-state. The typed outcome distinguishes detected pre-write checks from ambiguous
-post-dispatch/reply failures. `ErrBackend` preserves the original error chain.
+state. Always check `OutcomeOf(err)`: `ErrState` alone does not establish that no
+debit happened. The typed outcome distinguishes detected pre-write checks from
+ambiguous post-dispatch/reply failures. `ErrBackend` preserves the original error chain.
 
 ## Incident recovery
 

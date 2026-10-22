@@ -31,9 +31,15 @@ are not a joint transaction.
 
 ## Install and use
 
+This README documents the pre-release `dev` line. Install that line explicitly:
+
 ```sh
-go get github.com/tr1v3r/pacelock
+go get github.com/tr1v3r/pacelock@dev
 ```
+
+The default `@latest` currently selects an older API and does not include all APIs
+shown here. Keep the resolved pseudo-version in your application's `go.mod` for
+reproducible builds; `@dev` moves as development continues and is not a stable release.
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -66,6 +72,30 @@ if !decision.Allowed {
 `Allow` consumes capacity for this attempt and is **not idempotent**. Business
 failure after admission does not refund capacity. The limiter neither owns nor
 closes the Redis client. Constructors do not connect or change client settings.
+Use go-redis constructors to initialize clients; zero-value client structs are
+unsupported. For these initialized concrete `*redis.Client` / `*redis.ClusterClient`
+instances, `New` and `NewWithOptions` reject unsafe retry settings locally with
+`ErrInvalid`. Configure the client before passing it in; do not mutate its options
+afterward.
+
+For Cluster, replace the client construction above with:
+
+```go
+client := redis.NewClusterClient(&redis.ClusterOptions{
+    Addrs: []string{"localhost:17000", "localhost:17001", "localhost:17002"},
+    MaxRetries: -1,
+    MaxRedirects: -1,
+    ContextTimeoutEnabled: true,
+})
+defer client.Close()
+```
+
+`MaxRetries` alone does not disable Cluster's outer retry loop; `MaxRedirects: -1`
+is also required. This disables transparent `MOVED`/`ASK` retries too: topology
+changes can surface errors instead of being retried. See [operations](docs/operations.md)
+for the availability tradeoff. Custom `redis.Scripter` wrappers, hooks, Cluster
+`NewClient` factories and proxies remain the caller's responsibility to audit;
+constructor checks cannot prove that these layers never replay commands.
 
 Every instance must use the same namespace, domain, quota names and effective
 policies. Include all applicable account/model/tenant quotas in every call; omitted
@@ -120,7 +150,9 @@ errors expose `*pacelock.Error` with `Op` and `Outcome`:
 | `Lookup`: missing | No retained complete result was found | Preserve uncertainty about previous execution |
 
 A `NotCharged` result never clears uncertainty from an earlier call. On **any**
-error, ignore the decision. `OutcomeOf` is conservative for unrecognized errors.
+error, ignore the decision. `ErrState` alone does not mean no debit: a malformed
+reply after a debit also returns it. Check `OutcomeOf(err)`; it is conservative for
+unrecognized errors.
 
 `Validate(rules...)` checks bounds offline. `NewWithOptions` accepts an optional
 `Observer` that runs once per `Allow`, `AllowOnce` or `Lookup` call. Events expose
@@ -143,8 +175,9 @@ panics propagate. Do not label metrics with error text or user identifiers. See
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.
-- Disable ordinary client retries (`MaxRetries: -1`). Only `NOSCRIPT` falls back
-  from `EVALSHA` to `EVAL`. Audit hooks, proxies and Cluster redirects separately.
+- Disable client retries (`MaxRetries: -1`; also `MaxRedirects: -1` for Cluster).
+  Only `NOSCRIPT` falls back from `EVALSHA` to `EVAL`. Constructor validation is
+  not a substitute for auditing custom clients, hooks, factories and proxies.
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot
   undo Redis writes. The SDK creates no goroutines and imposes no hidden timeout.
 - Use dedicated keys, primary routing, TLS/authentication and Redis `noeviction`.

@@ -18,7 +18,7 @@ func TestRedisCluster(t *testing.T) {
 	if addresses == "" {
 		t.Skip("set PACELOCK_REDIS_CLUSTER_ADDRS for real Cluster integration")
 	}
-	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, ContextTimeoutEnabled: true})
+	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1, ContextTimeoutEnabled: true})
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -82,7 +82,7 @@ func TestRedisCluster(t *testing.T) {
 	}
 	// Different clients competing on one slot must still debit one admission.
 	l, _ := New(c, "pacelock-test", prefix+"-concurrent")
-	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1})
+	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1})
 	defer other.Close()
 	l2 := &Limiter{client: other, prefix: l.prefix}
 	keys = append(keys, l.key("q"), l.attemptKey("same"))

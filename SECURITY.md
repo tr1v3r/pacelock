@@ -17,9 +17,18 @@ synthetic identifiers, expected impact and any suggested mitigation privately.
 ## Deployment boundary
 
 Use authentication, TLS and private networking. Restrict keys to a dedicated
-application prefix. Production command requirements are `EVALSHA`, `EVAL`, `GET`,
-`SET` and `TIME` plus the go-redis connection-handshake commands your configuration
-uses (for example `HELLO`, `AUTH`, `CLIENT`, `PING` and `SELECT` when applicable).
+application prefix. For standalone Redis, the admission/lookup command grants are
+`+evalsha +eval +get +set +time`, plus the go-redis connection-handshake commands
+that your configuration uses (for example `HELLO`, `AUTH`, `CLIENT`, `PING` and
+`SELECT` when applicable).
+
+For go-redis Cluster routing, also grant **`+cluster|slots`** on every node to allow
+slot-map discovery and refresh. Quote `'+cluster|slots'` when passing it through a
+shell so `|` is not treated as a pipe. Without it, the standalone grants are not
+sufficient for Cluster. Do not grant all of `+cluster` just to allow slot discovery.
+`COMMAND` is not required for Pacelock's current EVALSHA/EVAL routing path; only add
+permissions for other commands if your integration actually requires them.
+
 The normal runtime does not need `ACL`, `CONFIG`, `FLUSHALL`, `KEYS` or `SCAN`.
 Those administrative privileges belong only to isolated test/operations tooling.
 
