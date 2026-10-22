@@ -5,17 +5,23 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         go: ['1.24.x', 'stable']
+        redis: ['7.0-alpine', '7-alpine', '8-alpine']
     services:
       redis:
-        image: redis:7-alpine
+        image: redis:${{ matrix.redis }}
         ports: ['6379:6379']
-        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+        options: --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,7 +29,43 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
       - run: test -z "$(gofmt -l .)"
+      - run: go mod verify
       - run: go vet ./...
-      - run: go test -race -count=1 -cover ./...
+      - run: go test -race -count=1 -coverprofile=coverage.out ./...
         env:
           PACELOCK_REDIS_ADDR: localhost:6379
+      - run: go test -run '^$' -bench BenchmarkValidate -benchtime=100ms -benchmem .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-go-${{ matrix.go }}-redis-${{ matrix.redis }}
+          path: coverage.out
+          retention-days: 14
+  cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: docker compose up -d --wait
+      - run: go test -race -count=1 ./...
+        env:
+          PACELOCK_REDIS_ADDR: localhost:16379
+          PACELOCK_REDIS_CLUSTER_ADDRS: localhost:17000,localhost:17001,localhost:17002
+      - if: failure()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .
+      - run: go test -run '^$' -fuzz FuzzRecord -fuzztime 20s .
