@@ -1,6 +1,6 @@
 # Pacelock 设计说明
 
-状态：基础实现已完成；文末 LLM 生命周期能力为提案，尚无对应 API。
+状态：已实现已知消耗的联合准入、有保留期限的幂等准入与结果查询；输出预留及用量校正仍为提案。商用加固契约见 [commercial-readiness.md](commercial-readiness.md)。
 
 ## 目标与边界
 
@@ -13,6 +13,10 @@
 ```go
 New(client redis.Scripter, namespace, domain string) (*Limiter, error)
 (*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
+(*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
+(*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
+Validate(rules ...Rule) error
+NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error)
 ```
 
 一次请求传入 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost。
@@ -20,11 +24,11 @@ New(client redis.Scripter, namespace, domain string) (*Limiter, error)
 - Rate、Period、Burst、Cost 必须为正；Cost 不得超过 Burst，否则这个请求永远不能通过该策略，直接返回 ErrInvalid。
 - 同次调用不得出现重复 Name；不会偷偷合并重复额度。
 - namespace 和 domain 非空、最多 256 字节；额度名称同样最多 256 字节。
-- Limiter 持有调用者提供的并发安全客户端，不负责关闭。调用者必须提供实际非空客户端；不能传入包含 nil 指针的接口值。
+- Limiter 持有调用者提供的并发安全客户端，不负责关闭。调用者必须提供实际非空客户端；包含 nil 指针的接口值也会返回 ErrInvalid。nil context 或未初始化 Limiter 同样会返回错误，不再 panic。
 - 正常执行时，全部维度通过才写入全部状态；任一维度不足则不写任何状态。
 - Decision.Allowed=false 且 err=nil 只代表额度不足；Redis 故障不伪装成限流。
 - RetryAfter 为本次观察下各维度等待时间的最大值。其他请求可能抢占额度，不保证等到该时间必定通过。
-- 不存储请求身份，不防重复扣减，不提供反向退款。
+- Allow 不存储请求身份，不防重复扣减；AllowOnce 提供保留期内的准入去重。两者都不提供反向退款。
 
 对同一额度漏传规则或使用不同 domain，会绕开共享限制。调用层必须负责规则覆盖和命名一致性。
 
@@ -64,7 +68,7 @@ value = TAT_microseconds:effective_interval_microseconds:Burst
 
 TTL 为 `ceil((newTAT - now) / 1ms)`，最少 1ms；状态完全恢复后即可删除。拒绝不刷新 TTL。Period 和 Burst × I 都限制在 24 小时以内，防止无界债务与持续时间溢出。TAT 使用整微秒并以整数格式序列化，避免 Lua 默认 tostring 丢失高位精度；服务端时钟还须处于 IEEE-754 精确整数范围内。
 
-复杂度是每次 O(维度数)；单次最多 32 维，避免任意长脚本阻塞 Redis。没有做吞吐量承诺，尚无基准数据。
+复杂度是每次 O(维度数)；单次最多 32 维，避免任意长脚本阻塞 Redis。不作通用吞吐量承诺；可复现基准及实测环境见 [verification.md](verification.md)。
 
 Redis 的脚本原子执行保证其他请求不会插入中间。它**不保证运行时错误回滚**：若写阶段出现内存或权限等错误，应按未知结果处理，不能假定完全没扣减。所有预期的参数、状态和策略检查都在写入前完成。建议专用 Redis、noeviction、稳定 ACL、监控内存与复制延迟。
 
@@ -107,6 +111,24 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 调用者可以先进行非阻塞并发尝试，再执行 Pacelock 准入；额度不足或异常时立即释放并发 permit。不要在持有 permit 时长时间等待限流恢复。即使这样，Redis 调用期间也会短暂占用并发容量；如果先扣速率再获取并发，则并发失败可能浪费额度。首版明确接受由调用层选择该顺序，不提供伪原子的组合封装。
 
+## 已实现：有保留期限的幂等准入与查询
+
+`AllowOnce` 的 ID 在 namespace/domain 内生效，绑定有序的额度名称、有效发射间隔、Burst、Cost 和保留期限。相同有效策略的不同 Rate/Period 表达可重放，但规则重排或其他参数变化返回 ErrConflict。保留期限为 1ms～24h 的整毫秒，重放和查询不延长 TTL。
+
+记录与额度同槽，使用独立的 `attempt:sha256(id)` 后缀。脚本先读记录：完整记录直接重放；参数不符报冲突；处理中记录报 ErrOutcomeUnknown。无记录时检查所有额度、编码结果，然后先写处理中标记，再写入允许的额度，最后用 KEEPTTL 保存完整结果。拒绝也保存，因此同一 ID 不会随恢复时间改变决策。
+
+处理中标记解决运行时错误后重复扣减的问题，但不能消除部分写入。测试通过 Redis ACL selectors 允许脚本访问全部键、仅允许写第一个额度，在第二个额度触发真实运行时错误，验证同 ID 重试不会再次扣减。
+
+`Lookup` 使用主节点路由，返回保留的原始决策；RetryAfter 是原始观测值。缺失不证明从未扣减：记录可能过期、被删除、被淘汰或在故障切换中丢失，原命令也可能仍在执行。幂等窗口仅覆盖记录存续期，不保证全时段 exactly-once，更不保证上游执行恰好一次。
+
+准入传输恢复复用同一 ID；每次真正的新上游调用使用新 ID。业务执行需要自己的协调机制，不能见到 Replayed 或查到 Allowed 就再次调用模型。
+
+## 已实现：错误与观测
+
+准入错误包装为 `*Error`，保留 errors.Is/As 与底层错误链。Outcome 为 NotCharged 或 Unknown；前者只说明本次调用未扣减，不消除先前尝试的不确定性。返回协议损坏、传输错误、运行时错误和处理中记录均保守标记 Unknown。任何错误下忽略 Decision。
+
+`NewWithOptions` 提供可选 Observer，同步执行且不创建后台 goroutine。事件包含操作、耗时、结果、规则数、重放标识和错误。调用方负责回调并发安全与指标低基数；panic 向外传播。SDK 不引入具体遥测运行时依赖。
+
 ## 后续设计：LLM 生命周期（未实现）
 
 ### 1. 预留与实际用量校正
@@ -123,19 +145,15 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 本地丢连接时保留未知状态，不直接释放全部预算。明确输入/输出/缓存 token 的口径后再做适配器。
 
-### 3. 幂等准入与 attempt 身份
-
-区分“同一次准入因网络异常重发”和“业务重新发起一次真实模型调用”。前者复用 admission ID，后者使用新的 attempt ID 并重新消耗额度。
-
-未来需在同槽脚本中将决策和幂等记录一并提交，校验同 ID 的参数指纹，定义 TTL、冲突、拒绝结果缓存与过期重放语义。去重记录过期后就无法保证防重放，不能声称全时段 exactly-once。
-
 ### 演进顺序
 
-先稳定已知 Cost 的联合准入和故障契约；再实现幂等身份与结果查询；然后设计有账本依据的预留/校正；最后加入供应商适配。等待队列、调度公平性和计费系统保持独立。
+已完成已知 Cost 的联合准入、故障契约及有保留期限的幂等身份与结果查询。后续先设计有守恒依据的预留/校正，再加入供应商适配。等待队列、调度公平性和计费系统保持独立。
 
 ## 验证与参考
 
-已有测试覆盖参数与精度边界、联合拒绝不扣减、两个独立 Redis 客户端的加权竞争、策略冲突、状态损坏、过期恢复、命名隔离和派发前取消。CI 运行真实 Redis 与 Go race detector。尚未验证 Redis Cluster/failover、OOM/网络丢响应、生产吞吐及 LLM 供应商兼容性。
+测试覆盖参数与精度边界、联合拒绝不扣减、跨客户端加权竞争、策略冲突、状态损坏、过期恢复、命名隔离、派发前取消、并发幂等、拒绝重放、响应丢失后的恢复及 ACL 部分写入。还有三主节点 Cluster 路由、随机 token bucket 模型对照、模糊测试和性能基准。CI 配置真实 Redis 与 Go race detector。
+
+本地验证记录见 [verification.md](verification.md)。未承诺生产故障切换持久性、OOM 下的可用性、生产吞吐或 LLM 供应商兼容性；这些需要目标部署验证。
 
 - [Redis Lua scripting](https://redis.io/docs/latest/develop/programmability/eval-intro/)
 - [Go-Redis script execution](https://github.com/redis/go-redis/blob/v9.17.3/script.go)

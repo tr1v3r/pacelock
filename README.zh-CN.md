@@ -3,29 +3,28 @@
 [![CI](https://github.com/tr1v3r/pacelock/actions/workflows/ci.yml/badge.svg)](https://github.com/tr1v3r/pacelock/actions/workflows/ci.yml)
 [English](README.md)
 
-**面向 LLM API 的 Go 分布式限流库。**
+**基于 Go 和 Redis 的多维加权原子限流库。**
 
-Pacelock 使用 Redis 和加权 GCRA，让多个服务实例共同遵守一份额度。一次准入可以同时检查请求数和 token 数：全部通过才扣减，任一维度不足则拒绝，所有维度都不扣减。
+Pacelock 协调多个服务实例的共享额度。一次准入可以同时扣减请求数、已知输入 token 和租户额度：全部通过才扣减；任一额度不足则全部不扣减。LLM API 是主要场景，底层支持任意已知的正数消耗。
 
-当前是基础实现，API 尚处于实验阶段，不是完整的 LLM 网关。要求 Go 1.24+、Redis 7+。CI 验证 Redis 7；键设计满足 Redis Cluster 同槽要求，但暂未覆盖 Cluster 集成测试。
+API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约和有保留期限的幂等能力，不实现 LLM 网关或计费账本。编译/运行最低要求为 Go 1.24+、Redis 7+；生产构建应使用仍在安全维护的 Go 分支及其最新修补版。已验证配置见[兼容性说明](docs/compatibility.md)和[验证记录](docs/verification.md)。
 
-## 已实现
+## 能力
 
-- 加权 GCRA：消耗一次请求或已知数量的 token。
-- 一次调用最多 32 个具名额度的原子准入。
-- 跨进程共享状态、Redis 服务端时间、空闲状态自动过期。
-- 返回 `Allowed`、建议等待时间 `RetryAfter` 和所有阻塞维度名称。
-- 校验超过突发容量的消耗，以及活跃状态的策略冲突。
+- 加权 GCRA，一次调用 1～32 个具名额度的原子准入。
+- Redis 服务端时间、跨实例共享状态、容量完全恢复后自动过期。
+- 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
+- 有保留期限的幂等准入、参数冲突检测和结果查询。
+- 可程序化判断的扣减结果、离线规则校验和同步观测回调。
+- 真实 Redis/Cluster、race、模型对照、模糊测试、故障注入和基准测试。
 
-当前没有队列、阻塞式 `Wait`、并发限制、分词、预留、退款、流式用量校正或幂等重放。[Airlock](https://github.com/tr1v3r/airlock) 处理并发准入，Pacelock 处理随时间恢复的消耗额度；组合使用不代表两者操作原子化。
+不包含队列、阻塞式 `Wait`、分词、输出预留、退款、流式用量校正或并发许可管理。[Airlock](https://github.com/tr1v3r/airlock) 处理正在执行的工作数量；Pacelock 处理随时间恢复的消耗。两者不构成联合事务。
 
-## 安装
+## 安装与使用
 
 ```sh
 go get github.com/tr1v3r/pacelock
 ```
-
-## 使用
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -39,61 +38,99 @@ limiter, err := pacelock.New(client, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
-decision, err := limiter.Allow(ctx,
-    pacelock.Rule{
-        Name: "model-a:rpm", Rate: 60, Period: time.Minute,
-        Burst: 10, Cost: 1,
-    },
-    pacelock.Rule{
-        Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute,
-        Burst: 12000, Cost: 1500,
-    },
-)
+rules := []pacelock.Rule{
+    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
+    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+}
+decision, err := limiter.Allow(ctx, rules...)
 if err != nil {
-    return err // 后端异常；可能无法确定是否已经扣减。
+    // 忽略 decision。OutcomeOf(err) 为 NotCharged 或 Unknown。
+    // 业务明确选择故障策略，不盲目重试。
+    return err
 }
 if !decision.Allowed {
-    // 使用 RetryAfter 和 Limited 拒绝请求，或安排稍后重试。
-    // RetryAfter 不会为下一次调用预留容量。
+    // 拒绝请求，或由外部调度器参考 RetryAfter 和 Limited 安排新尝试。
+    // RetryAfter 不会预留未来容量。
 }
 ```
 
-[完整可运行示例](examples/llm/main.go)：
+`Allow` 为本次尝试消耗容量，**不具备幂等性**。准入后业务失败不会退还容量。Limiter 不拥有或关闭 Redis 客户端；构造函数不建立连接、不修改客户端配置。
 
-```sh
-REDIS_ADDR=localhost:6379 go run ./examples/llm
+所有实例必须使用相同的 namespace、domain、额度名称和有效策略。每次调用都要包含适用的账号、模型和租户规则；库无法推断漏传的规则。不同 namespace/domain 相互独立。
+
+## 幂等准入与恢复
+
+```go
+// 派发前，将准入 ID 与一次业务尝试一起持久保存。
+receipt, err := limiter.AllowOnce(ctx, admissionID, 10*time.Minute, rules...)
+if err != nil {
+    return err
+}
+// receipt.Decision 是原始决策；receipt.Replayed 标识是否重放。
+// Replayed=true 不代表可以再次执行上游请求。
 ```
 
-共同执行限流的实例必须使用相同的 namespace、domain、额度名称和有效策略。如果同时受供应商和租户额度约束，每次调用都要带上这些规则；库无法推断漏传的规则。不同 namespace/domain 相互独立。示例只扣除已知输入 token，不控制输出 TPM，也不会自动匹配供应商的计费或限流口径。
+响应不确定时，使用新的 context 查询：
 
-## 语义与运行边界
+```go
+decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
+```
 
-- `Rate / Period` 是恢复速率；`Burst` 是总瞬时容量，不是额外容量。Cost 必须为正，且不超过 Burst。
-- GCRA 约束的是速率与突发包络，不是精确的固定分钟或滑动分钟计数器。参数需要符合供应商实际额度规则。
-- 发射间隔向上取整到整微秒；Period 和突发容量完全恢复所需时间均不超过 24 小时。极高速率可能因取整而显著降低有效速率。
-- 策略身份为有效发射间隔与 Burst。状态尚存在时不一致会返回 `ErrPolicyMismatch`；这用于发现部署冲突，不是永久配置存储。额度完全恢复后状态过期。
-- 一个 domain 的键都落在 Redis Cluster 的同一槽。按原子判定需求划分 domain；全部放在一个 domain 会集中到一个分片。
-- 禁用客户端自动重试（`MaxRetries: -1`）。Pacelock 只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。中间件、hooks、代理和集群路由可能另外引入重放；准入操作**不具备幂等性**。
-- 派发前取消不会扣减。派发后丢失响应、超时或取消可能导致扣减结果未知，不应盲目重试或退款。任何错误下都应忽略 Decision，由业务明确决定故障策略。
-- 使用独立的额度键与 Redis `noeviction`。淘汰、人工删除、时钟跳变、故障切换丢数据都可能削弱限制。脚本隔离不等于崩溃持久性或运行时错误回滚，本库也不是计费账本。
+- ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
+- 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
+- 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
+- 扣减额度前先写入“处理中”标记。运行时错误可能留下部分扣减和该标记；后续重试返回 `ErrOutcomeUnknown`，不会再次扣减。不要删除标记或自动退款。
+- `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
+- 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
-## 设计与后续方向
+## 错误与观测
 
-[设计说明](docs/design.md) 包含 GCRA 公式、Redis 状态、原子性边界、错误语义与 LLM 扩展设想：
+使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrOutcomeUnknown`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
 
-1. 请求/token 联合额度：已实现已知 Cost 的准入。
-2. 输出 token 预留与实际用量校正：设计提案。
-3. 幂等准入与显式 attempt 身份：设计提案。
+| 结果 | 含义 | 业务处理 |
+|---|---|---|
+| `Allowed=false`、无错误 | 额度不足；没有扣减额度 | 拒绝或调度新尝试 |
+| `NotCharged` 错误 | 确定本次调用未扣减 | 修正参数/策略或处理取消 |
+| `Unknown` 错误 | 可能已经扣减，也可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
+| `Lookup` 未找到 | 没有找到仍保留的完整结果 | 保留对先前执行结果的不确定性 |
 
-## 验证
+`NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。`OutcomeOf` 对不认识的错误保守地返回 Unknown。
+
+`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`AllowOnce` 或 `Lookup` 调用触发一次。事件包含操作、耗时、结果、规则数、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](examples/idempotency/main.go)。
+
+## 额度与运行契约
+
+- `Rate / Period` 是恢复速度；`Burst` 是总瞬时容量，不是额外容量。`0 < Cost <= Burst`；Period 和突发容量完全恢复的时间均不超过 24 小时。发射间隔向上取整到微秒，极高速率的有效速度会保守降低。
+- GCRA 约束速率与突发包络，不是精确的固定/滑动分钟计数器。需要明确建模供应商规则；已知输入 token 不控制输出 TPM；字符数、字节数和 SSE chunk 数不等于 token 数。
+- 策略身份为有效间隔和 Burst。活跃状态策略变化返回 `ErrPolicyMismatch`。这是部署保护，不是配置存储。
+- 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
+- 禁用普通客户端重试（`MaxRetries: -1`）。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。需单独审计 hooks、代理和 Cluster 重定向。
+- 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
+- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Lua 执行隔离不等于运行时错误回滚或崩溃持久性；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
+
+参见[运维与故障恢复](docs/operations.md)、[设计及扩展提案](docs/design.md)和[兼容性说明](docs/compatibility.md)。
+
+## 示例与验证
 
 ```sh
+# 一次性单机 Redis 和三主节点 Cluster（需要 Docker Compose）。
+docker compose up -d --wait
+REDIS_ADDR=localhost:16379 go run ./examples/llm
+REDIS_ADDR=localhost:16379 go run ./examples/idempotency
+
 go test ./...
 go vet ./...
-# 未设置该变量时，真实 Redis 集成测试会跳过。
-PACELOCK_REDIS_ADDR=localhost:6379 go test -race -count=1 ./...
+PACELOCK_REDIS_ADDR=localhost:16379 \
+PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
+  go test -race -count=1 -cover ./...
+# 故障测试需要专用的单机测试 Redis，允许创建 ACL 用户。
+# 未设置集成环境变量时，集成测试会跳过。
+go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .
+go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .
+PACELOCK_REDIS_ADDR=localhost:16379 go test -run '^$' -bench . -benchmem .
+docker compose down
 ```
 
-CI 使用 Redis 7，运行 Go 1.24 和 stable Go 的集成测试。覆盖多维拒绝、跨客户端加权竞争、策略冲突、损坏状态、过期恢复、命名空间隔离和派发前取消。
+CI 覆盖 Go 1.24/stable、Redis 7.0/7/8 和三主节点 Cluster。基准结果依赖部署环境，不承诺通用吞吐量或故障切换 SLO。参见[贡献与发布检查](CONTRIBUTING.md)和[安全策略](SECURITY.md)。
 
 MIT 许可证。
