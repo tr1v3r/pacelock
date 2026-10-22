@@ -34,7 +34,14 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 docker compose down
 ```
 
-Integration tests create and delete only their own namespaced keys. ACL fault
+The default integration suite includes `TestRedisConcurrency` on standalone Redis
+and Cluster. CI repeats it with `-race -shuffle=on -count=3` and requires the
+expected backends via `PACELOCK_REQUIRED_REDIS_BACKENDS`. See
+[the concurrency matrix](docs/concurrency-testing.md) for invariants and reproduction.
+
+Integration tests create and delete only their own namespaced keys. The cold-cache
+contention test runs `SCRIPT FLUSH` on every test master (affecting the server-wide
+script cache); use dedicated disposable fixtures, never a shared Redis service. ACL fault
 tests also create/delete a temporary Redis user. Use disposable test services,
 never production. The Cluster fixture has three masters and no replicas; it
 validates routing/atomicity, not failover availability or durability.

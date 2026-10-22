@@ -214,6 +214,15 @@ func TestRedisPendingAfterWriteFailure(t *testing.T) {
 	if _, found, err := l.Lookup(ctx, "partial"); !errors.Is(err, ErrOutcomeUnknown) || found {
 		t.Fatalf("%v %v", found, err)
 	}
+	contentionWave(t, 200, func(ctx context.Context, i int) {
+		if i%2 == 0 {
+			if _, err := l.AllowOnce(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
+				t.Errorf("concurrent partial-write recovery: %v", err)
+			}
+		} else if _, found, err := l.Lookup(ctx, "partial"); found || !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
+			t.Errorf("concurrent pending lookup: found=%t err=%v", found, err)
+		}
+	})
 	if admin.Get(ctx, l.key("first")).Val() != before {
 		t.Fatal("pending record permitted repeat debit")
 	}

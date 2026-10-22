@@ -131,6 +131,9 @@ PACELOCK_REDIS_ADDR=localhost:16379 go test -run '^$' -bench . -benchmem .
 docker compose down
 ```
 
-CI 覆盖 Go 1.24/stable、Redis 7.0/7/8 和三主节点 Cluster。基准结果依赖部署环境，不承诺通用吞吐量或故障切换 SLO。参见[贡献与发布检查](CONTRIBUTING.md)和[安全策略](SECURITY.md)。
+CI 覆盖 Go 1.24/stable、Redis 7.0/7/8 和三主节点 Cluster。
+默认测试包含 100/500/1000 个同时调用、最多 32 个额度维度、加权与共享额度、租户隔离、幂等竞争、取消、连接池耗尽、响应丢失恢复和四进程竞争。
+CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次。
+参见[并发测试契约与复现方法](docs/concurrency-testing.md)。基准结果依赖部署环境，不承诺通用吞吐量或故障切换 SLO。参见[贡献与发布检查](CONTRIBUTING.md)和[安全策略](SECURITY.md)。
 
 MIT 许可证。
