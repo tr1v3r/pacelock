@@ -1,0 +1,24 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/tr1v3r/pacelock
+cpu: Apple M3 Pro
+BenchmarkValidate/rules=1-12         	19465990	        18.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidate/rules=4-12         	 4964138	        70.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidate/rules=32-12        	  536972	       645.2 ns/op	    1832 B/op	       3 allocs/op
+BenchmarkRedis/allow/rules=1-12      	    2348	    141277 ns/op	     862 B/op	      20 allocs/op
+BenchmarkRedis/deny/rules=1-12       	    2790	    138506 ns/op	     856 B/op	      22 allocs/op
+BenchmarkRedis/once/rules=1-12       	    2371	    145320 ns/op	    1788 B/op	      53 allocs/op
+BenchmarkRedis/replay/rules=1-12     	    2365	    155449 ns/op	    1740 B/op	      52 allocs/op
+BenchmarkRedis/lookup/rules=1-12     	    2216	    139179 ns/op	     850 B/op	      23 allocs/op
+BenchmarkRedis/allow/rules=4-12      	    2085	    172932 ns/op	    2291 B/op	      42 allocs/op
+BenchmarkRedis/deny/rules=4-12       	    2172	    166516 ns/op	    2377 B/op	      46 allocs/op
+BenchmarkRedis/once/rules=4-12       	    1896	    182335 ns/op	    3706 B/op	      99 allocs/op
+BenchmarkRedis/replay/rules=4-12     	    2184	    145854 ns/op	    3639 B/op	      98 allocs/op
+BenchmarkRedis/lookup/rules=4-12     	    2415	    148322 ns/op	    1056 B/op	      26 allocs/op
+BenchmarkRedis/allow/rules=32-12     	    1107	    301327 ns/op	   19293 B/op	     244 allocs/op
+BenchmarkRedis/deny/rules=32-12      	    1300	    262368 ns/op	   20243 B/op	     251 allocs/op
+BenchmarkRedis/once/rules=32-12      	    1005	    343064 ns/op	   25609 B/op	     506 allocs/op
+BenchmarkRedis/replay/rules=32-12    	    1749	    206531 ns/op	   25491 B/op	     504 allocs/op
+BenchmarkRedis/lookup/rules=32-12    	    2434	    142668 ns/op	    5073 B/op	      37 allocs/op
+PASS
+ok  	github.com/tr1v3r/pacelock	8.270s
