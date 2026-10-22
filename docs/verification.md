@@ -89,7 +89,8 @@ benchmarks with the application's workload and deployment before capacity planni
 
 ## Release/deployment gates that remain external
 
-- Remote CI must run after the branch is submitted; no remote run is claimed here.
+- The table above records local validation. Check the PR for remote results on
+  the current head; the local record is not a substitute for those checks.
 - Target deployment TLS/ACL, Redis failover, persistence, OOM, clock stability and
   sustained customer-load SLOs need environment-specific acceptance testing.
 - Repository branch protection and private vulnerability reporting are hosting
@@ -98,3 +99,12 @@ benchmarks with the application's workload and deployment before capacity planni
   explicitly unimplemented proposals, not advertised shipped functionality.
 - A stable version, support SLA, tag or commercial launch requires an explicit
   maintainer decision. These cannot be established by passing local tests.
+
+## PR security-tool compatibility follow-up
+
+The initial GitHub Linux/amd64 security job exposed a parser panic in
+`govulncheck v1.1.4` with Go 1.27.3 (`unexpected expr: *ast.KeyValueExpr`), despite
+the successful local macOS scan. CI and contribution commands now pin
+`govulncheck v1.9.0`. Running that tool with the Linux/amd64 analysis context and
+Go 1.27.3 completed with **No vulnerabilities found**. This updates development
+verification tooling only; the SDK runtime dependencies are unchanged.
