@@ -31,9 +31,16 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go mod verify
       - run: go vet ./...
-      - run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: Full suite including Redis concurrency contracts
+        run: go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
         env:
           PACELOCK_REDIS_ADDR: localhost:6379
+          PACELOCK_REQUIRED_REDIS_BACKENDS: standalone
+      - name: Repeat contention tests with randomized order
+        run: go test -race -shuffle=on -count=3 -timeout=5m -run '^TestRedisConcurrency$' .
+        env:
+          PACELOCK_REDIS_ADDR: localhost:6379
+          PACELOCK_REQUIRED_REDIS_BACKENDS: standalone
       - run: go test -run '^$' -bench BenchmarkValidate -benchtime=100ms -benchmem .
       - uses: actions/upload-artifact@v4
         with:
@@ -50,10 +57,18 @@ jobs:
           go-version: stable
           cache: true
       - run: docker compose up -d --wait
-      - run: go test -race -count=1 ./...
+      - name: Full suite including standalone and Cluster contention
+        run: go test -race -count=1 -timeout=5m ./...
         env:
           PACELOCK_REDIS_ADDR: localhost:16379
           PACELOCK_REDIS_CLUSTER_ADDRS: localhost:17000,localhost:17001,localhost:17002
+          PACELOCK_REQUIRED_REDIS_BACKENDS: standalone,cluster
+      - name: Repeat contention tests with randomized order
+        run: go test -race -shuffle=on -count=3 -timeout=5m -run '^TestRedisConcurrency$' .
+        env:
+          PACELOCK_REDIS_ADDR: localhost:16379
+          PACELOCK_REDIS_CLUSTER_ADDRS: localhost:17000,localhost:17001,localhost:17002
+          PACELOCK_REQUIRED_REDIS_BACKENDS: standalone,cluster
       - if: failure()
         run: docker compose logs --no-color
       - if: always()

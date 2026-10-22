@@ -175,7 +175,12 @@ PACELOCK_REDIS_ADDR=localhost:16379 go test -run '^$' -bench . -benchmem .
 docker compose down
 ```
 
-CI covers Go 1.24/stable, Redis 7.0/7/8, and a three-master Cluster. Benchmark
+CI covers Go 1.24/stable, Redis 7.0/7/8, and a three-master Cluster.
+The default suite includes synchronized bursts of 100/500/1000 callers, up to
+32 quota dimensions, weighted/shared quotas, tenant isolation, idempotency races,
+cancellation, pool exhaustion, lost-response recovery, and four-process contention.
+CI also repeats the concurrency suite three times with `-race` and randomized order.
+See [concurrency test contracts and reproduction](docs/concurrency-testing.md). Benchmark
 results depend on deployment; there is no universal throughput or failover SLO.
 See [contribution/release checks](CONTRIBUTING.md) and [security policy](SECURITY.md).
 
