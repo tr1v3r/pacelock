@@ -13,9 +13,10 @@ import (
 )
 
 // Compare the production Lua algorithm against a token-bucket oracle with exact
-// integer capacity. The algorithm uses a fixed microsecond clock; Redis expiry
-// still uses its real, command-scoped millisecond clock. Snapshot state and PTTL
-// in the same EVAL as admission, before even a 1ms key can naturally expire.
+// integer capacity. The algorithm uses a fixed microsecond clock, while Redis
+// expiry uses real time. Snapshot state in the same EVAL, before keys can expire.
+// Redis 7.0 uses dynamic mstime() for both SET PX and PTTL, even inside a script:
+// check the exact forwarded PX argument and bracket absolute expiry instead.
 // Cross-command expiry/refill is covered separately by TestRedisRefillAndExpiry.
 func TestRedisGCRAModel(t *testing.T) {
 	l, c := integration(t)
@@ -26,18 +27,42 @@ func TestRedisGCRAModel(t *testing.T) {
 		t.Fatal("production clock changed; update the model clock substitution")
 	}
 	fixedClock := strings.Replace(source, clock, fmt.Sprintf("local now = %d", now), 1)
-	// Do not replace SET or its PX argument: state persistence and the relative
-	// TTL are independently checked against the oracle below. Redis freezes
-	// expiration time within a script, so these reads cannot race natural expiry.
-	deterministic := redis.NewScript("local function admit()\n" + fixedClock + `
+	// The local facade records SET arguments but forwards them unchanged. The
+	// production source is untouched except for the algorithm clock above.
+	// Calibration SETs bracket the real expiry base on both Redis 7.0 (dynamic
+	// SET time) and newer Redis (command snapshot). Exact PX checks below ensure
+	// that an incorrect TTL cannot hide inside that measured time interval.
+	deterministic := redis.NewScript(`
+local nativeRedis = redis
+local calibrationKey = table.remove(KEYS)
+local function expiryBase()
+    nativeRedis.call('SET', calibrationKey, 'clock', 'PX', 60000)
+    return nativeRedis.call('PEXPIRETIME', calibrationKey) - 60000
+end
+local start = expiryBase()
+local writes = {}
+local function admit()
+    local redis = {
+        call = function(command, ...)
+            if string.upper(command) == 'SET' then
+                writes[#writes + 1] = {...}
+            end
+            return nativeRedis.call(command, ...)
+        end,
+        pcall = nativeRedis.pcall,
+        error_reply = nativeRedis.error_reply
+    }
+` + fixedClock + `
 end
 local decision = admit()
-local states, ttls = {}, {}
+local finish = expiryBase()
+nativeRedis.call('DEL', calibrationKey)
+local states, expiries = {}, {}
 for i = 1, #KEYS do
-    states[i] = redis.call('GET', KEYS[i])
-    ttls[i] = redis.call('PTTL', KEYS[i])
+    states[i] = nativeRedis.call('GET', KEYS[i])
+    expiries[i] = nativeRedis.call('PEXPIRETIME', KEYS[i])
 end
-return {decision, states, ttls}
+return {decision, states, expiries, writes, start, finish}
 `)
 	random := rand.New(rand.NewSource(20261023))
 	for iteration := 0; iteration < 250; iteration++ {
@@ -92,11 +117,14 @@ return {decision, states, ttls}
 		if err != nil {
 			t.Fatal(err)
 		}
-		reply, err := deterministic.Run(ctx, c, keys, args...).Slice()
+		// The wrapper removes this same-slot test key before running admission,
+		// preserving the production quota KEYS and ARGV exactly.
+		scriptKeys := append(append([]string(nil), keys...), l.key("model-clock"))
+		reply, err := deterministic.Run(ctx, c, scriptKeys, args...).Slice()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(reply) != 3 {
+		if len(reply) != 6 {
 			t.Fatalf("iteration=%d unexpected snapshot: %v", iteration, reply)
 		}
 		decisionReply := redis.NewCmd(ctx)
@@ -106,9 +134,12 @@ return {decision, states, ttls}
 			t.Fatal(err)
 		}
 		states, statesOK := reply[1].([]interface{})
-		ttls, ttlsOK := reply[2].([]interface{})
-		if !statesOK || !ttlsOK || len(states) != n || len(ttls) != n {
-			t.Fatalf("iteration=%d invalid state/TTL snapshot: %v", iteration, reply)
+		expiries, expiriesOK := reply[2].([]interface{})
+		writes, writesOK := reply[3].([]interface{})
+		start, startOK := reply[4].(int64)
+		finish, finishOK := reply[5].(int64)
+		if !statesOK || !expiriesOK || !writesOK || len(states) != n || len(expiries) != n || !startOK || !finishOK || start <= 0 || finish < start {
+			t.Fatalf("iteration=%d invalid state/expiry snapshot: %v", iteration, reply)
 		}
 		got, err := decodeDecision(values, namesOf(rules))
 		if err != nil || !reflect.DeepEqual(got, want) {
@@ -116,20 +147,31 @@ return {decision, states, ttls}
 		}
 		for i, r := range rules {
 			state, stateOK := states[i].(string)
-			ttl, ttlOK := ttls[i].(int64)
 			expected := before[i]
-			// Seeded states are persistent. A denial must change neither the value
-			// nor its expiry; an allowance must save the exact debt with ceil(ms).
-			expectedTTL := int64(-1)
 			if want.Allowed {
 				expected = fmt.Sprintf("%d:%d:%d", candidates[i], r.Period.Microseconds(), r.Burst)
-				expectedTTL = (candidates[i] - now + 999) / 1000
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
 			}
-			if !ttlOK || ttl != expectedTTL {
-				t.Fatalf("iteration=%d quota=%s ttl=%v want=%dms", iteration, r.Name, ttls[i], expectedTTL)
+			expiry, expiryOK := expiries[i].(int64)
+			if !want.Allowed {
+				// Seeded states are persistent; a denial must not write or expire them.
+				if len(writes) != 0 || !expiryOK || expiry != -1 {
+					t.Fatalf("iteration=%d quota=%s denial wrote state or expiry: writes=%v expiry=%v", iteration, r.Name, writes, expiries[i])
+				}
+				continue
+			}
+			if len(writes) != n {
+				t.Fatalf("iteration=%d got %d SETs, want exactly %d", iteration, len(writes), n)
+			}
+			expectedTTL := (candidates[i] - now + 999) / 1000
+			write, writeOK := writes[i].([]interface{})
+			if !writeOK || !reflect.DeepEqual(write, []interface{}{keys[i], expected, "PX", expectedTTL}) {
+				t.Fatalf("iteration=%d quota=%s SET arguments=%v want key/value/PX/%dms", iteration, r.Name, writes[i], expectedTTL)
+			}
+			if !expiryOK || expiry < start+expectedTTL || expiry > finish+expectedTTL {
+				t.Fatalf("iteration=%d quota=%s expiry=%v want measured [%d,%d]ms", iteration, r.Name, expiries[i], start+expectedTTL, finish+expectedTTL)
 			}
 		}
 	}
