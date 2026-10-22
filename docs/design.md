@@ -1,0 +1,142 @@
+# Pacelock 设计说明
+
+状态：基础实现已完成；文末 LLM 生命周期能力为提案，尚无对应 API。
+
+## 目标与边界
+
+多个实例调用同一个供应商账户时，各实例独立限流无法保证总量。Pacelock 把额度状态放在 Redis，使用一次 Lua 脚本完成联合准入。首版围绕已知消耗提供小而明确的接口，不执行工作、不管理队列、不统计批次完成、不持有并发 permit。
+
+与通用单维限流器相比，首版着重支持请求数与 token 数的联合准入，以及便于后续扩展的明确错误语义。Go-Redis 是有意引入的运行时依赖：复用连接池、认证、TLS、Cluster 路由和脚本缓存，不自行实现 Redis 协议。
+
+## 公开契约
+
+```go
+New(client redis.Scripter, namespace, domain string) (*Limiter, error)
+(*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
+```
+
+一次请求传入 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost。
+
+- Rate、Period、Burst、Cost 必须为正；Cost 不得超过 Burst，否则这个请求永远不能通过该策略，直接返回 ErrInvalid。
+- 同次调用不得出现重复 Name；不会偷偷合并重复额度。
+- namespace 和 domain 非空、最多 256 字节；额度名称同样最多 256 字节。
+- Limiter 持有调用者提供的并发安全客户端，不负责关闭。调用者必须提供实际非空客户端；不能传入包含 nil 指针的接口值。
+- 正常执行时，全部维度通过才写入全部状态；任一维度不足则不写任何状态。
+- Decision.Allowed=false 且 err=nil 只代表额度不足；Redis 故障不伪装成限流。
+- RetryAfter 为本次观察下各维度等待时间的最大值。其他请求可能抢占额度，不保证等到该时间必定通过。
+- 不存储请求身份，不防重复扣减，不提供反向退款。
+
+对同一额度漏传规则或使用不同 domain，会绕开共享限制。调用层必须负责规则覆盖和命名一致性。
+
+## GCRA 与加权消耗
+
+定义：
+
+- `I = ceil(Period / Rate)`，实现中以微秒为最小单位。
+- `B = Burst`，代表空闲时能立即消耗的总单位数。
+- `C = Cost`。
+- `TAT` 为理论到达时间，首次使用时取当前 Redis 时间。
+
+每次判定：
+
+```text
+candidate = max(TAT, now) + C * I
+retry     = max(0, candidate - B * I - now)
+allowed   = retry == 0
+```
+
+通过时保存 candidate；拒绝时保持原状态。每个额度只需常数大小的状态，不需要逐请求滑动日志。
+
+例如每秒 10 单位、Burst=20：空闲时可立即消耗 20 单位；随后每 100ms 恢复 1 单位。它不是“任意一秒最多 10 次”，也不是固定时间窗计数。供应商若使用不同窗口规则，需要保守配置或另加对应策略，不能宣称 GCRA 精确模拟所有 RPM/TPM 限制。
+
+## Redis 数据布局与原子性
+
+每个额度一个字符串键：
+
+```text
+pacelock:v1:{sha256(length(namespace):namespace + domain)}:sha256(Name)
+value = TAT_microseconds:effective_interval_microseconds:Burst
+```
+
+长度前缀避免 namespace/domain 连接歧义；哈希避免调用者输入干扰 Cluster hash tag。相同 domain 中所有额度同槽，所以可一次脚本判定。不同 domain 相互独立，也不能跨 domain 原子准入。
+
+脚本先读取 Redis TIME，再读取并校验全部状态、计算全部候选值，全部通过后才写入。活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。此校验仅在状态存在时有效；配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
+
+TTL 为 `ceil((newTAT - now) / 1ms)`，最少 1ms；状态完全恢复后即可删除。拒绝不刷新 TTL。Period 和 Burst × I 都限制在 24 小时以内，防止无界债务与持续时间溢出。TAT 使用整微秒并以整数格式序列化，避免 Lua 默认 tostring 丢失高位精度；服务端时钟还须处于 IEEE-754 精确整数范围内。
+
+复杂度是每次 O(维度数)；单次最多 32 维，避免任意长脚本阻塞 Redis。没有做吞吐量承诺，尚无基准数据。
+
+Redis 的脚本原子执行保证其他请求不会插入中间。它**不保证运行时错误回滚**：若写阶段出现内存或权限等错误，应按未知结果处理，不能假定完全没扣减。所有预期的参数、状态和策略检查都在写入前完成。建议专用 Redis、noeviction、稳定 ACL、监控内存与复制延迟。
+
+## Domain 与 LLM 额度建模
+
+假设一个供应商账户有共享 RPM/TPM，同时每个租户有自身 TPM：
+
+```text
+namespace: llm-service
+ domain:   provider-account-a
+ rules:    account:rpm        cost=1
+           model-a:input-tpm  cost=已知输入 token
+           tenant-42:tpm     cost=该租户的本次已知消耗
+```
+
+所有需要共同判定的额度必须处于同一 domain。若租户跨多个供应商账户共享全局额度，就必须把相关额度合并到共同 domain，或者接受外部协调方案；不能既任意分片又无成本获得跨槽原子性。一个热 domain 会成为单分片热点，这是明确的取舍。
+
+Cost 的单位由业务定义。库不把字符数、字节数或 SSE chunk 数当作 token，也不内置分词器。供应商如何处理 input、output、cached token 和 max_tokens，必须由适配层定义；当前示例只演示已知输入 token。
+
+## 故障、取消和重试
+
+| 结果 | 含义 | 调用者行为 |
+|---|---|---|
+| ErrInvalid | 本地参数无效，未派发 | 修正参数 |
+| ErrPolicyMismatch | 活跃策略冲突，本次未写入 | 修正部署或协调迁移 |
+| ErrState | 状态损坏或不支持的时钟范围；脚本检查在写入前 | 告警排查，不自动重置额度 |
+| Allowed=false，err=nil | 正常拒绝，无扣减 | 拒绝或按业务队列稍后重试 |
+| Allowed=true，err=nil | 本次全部额度扣减成功 | 执行对应业务尝试 |
+| 其他错误 | 包括超时、网络、取消、Redis 运行时错误；可能无法确认扣减 | 不盲目重放或退款，显式处理失败 |
+
+预先取消的 context 在本地返回；派发后取消无法撤销 Redis 已经完成的脚本。客户端设置 MaxRetries=-1 关闭普通自动重试，ContextTimeoutEnabled=true 使 context 截止时间参与客户端超时。仍需审计 hooks、代理及 Cluster 重定向行为，不能据此声称 exactly-once。
+
+Pacelock 在 NOSCRIPT 时从 EVALSHA 回退到 EVAL，这是缓存未命中的安全回退；不会自行重试不确定的传输错误。Redis failover 仍可能丢失已确认写入；持久化、复制和故障策略属于部署边界。
+
+Redis TIME 是所有实例的共同时间基准，但不是单调时钟。前跳会提前恢复额度，后跳可能延迟恢复，严重后跳会报状态错误。首版不承诺跨时钟跳变严格限流。
+
+## 与 Airlock 配合
+
+Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间恢复的消耗。二者没有联合事务。
+
+调用者可以先进行非阻塞并发尝试，再执行 Pacelock 准入；额度不足或异常时立即释放并发 permit。不要在持有 permit 时长时间等待限流恢复。即使这样，Redis 调用期间也会短暂占用并发容量；如果先扣速率再获取并发，则并发失败可能浪费额度。首版明确接受由调用层选择该顺序，不提供伪原子的组合封装。
+
+## 后续设计：LLM 生命周期（未实现）
+
+### 1. 预留与实际用量校正
+
+输出 token 数通常事先未知。计划区分已知输入、输出预算与最终观测用量，而非只给 Allow 增加一个负数 Cost。
+
+候选流程为 `Reserve → Commit/Reconcile`，取消或过期需要显式终态。必须定义预留期限、增量扣减、崩溃恢复、供应商未返回 usage 时的保守结算。预留并不代表后端一定执行，调用后断连也不代表后端停止产生 token。
+
+不能直接从当前 TAT 减去旧请求的差额：旧债务会随时间消退，且其他请求可能已在其后入账。退款可能错误地创造当前容量。实现前要选择有独立 reservation 身份的账本/时间桶或其他能证明守恒的模型，并说明它如何与 GCRA 状态共同更新。
+
+### 2. 流式处理
+
+区分模型生成、网络传输和最终 usage；SSE chunk 并非 token。减慢读取第三方响应通常无法限制模型在供应商侧的生成速度。增量校验只能约束本系统继续转发/继续接受的行为；若要阻止超预算生成，需要供应商支持生成上限或可靠取消。
+
+本地丢连接时保留未知状态，不直接释放全部预算。明确输入/输出/缓存 token 的口径后再做适配器。
+
+### 3. 幂等准入与 attempt 身份
+
+区分“同一次准入因网络异常重发”和“业务重新发起一次真实模型调用”。前者复用 admission ID，后者使用新的 attempt ID 并重新消耗额度。
+
+未来需在同槽脚本中将决策和幂等记录一并提交，校验同 ID 的参数指纹，定义 TTL、冲突、拒绝结果缓存与过期重放语义。去重记录过期后就无法保证防重放，不能声称全时段 exactly-once。
+
+### 演进顺序
+
+先稳定已知 Cost 的联合准入和故障契约；再实现幂等身份与结果查询；然后设计有账本依据的预留/校正；最后加入供应商适配。等待队列、调度公平性和计费系统保持独立。
+
+## 验证与参考
+
+已有测试覆盖参数与精度边界、联合拒绝不扣减、两个独立 Redis 客户端的加权竞争、策略冲突、状态损坏、过期恢复、命名隔离和派发前取消。CI 运行真实 Redis 与 Go race detector。尚未验证 Redis Cluster/failover、OOM/网络丢响应、生产吞吐及 LLM 供应商兼容性。
+
+- [Redis Lua scripting](https://redis.io/docs/latest/develop/programmability/eval-intro/)
+- [Go-Redis script execution](https://github.com/redis/go-redis/blob/v9.17.3/script.go)
+- [go-redis/redis_rate](https://github.com/go-redis/redis_rate)：通用 GCRA 实现，可用于对照 API 范围；Pacelock 未复用其代码。
