@@ -55,7 +55,7 @@ func TestClusterLiveRedirects(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The temporary client above is used only to derive keys.
-	l.client.(markedScripter).Scripter.(*redis.Client).Close()
+	l.client.(noRetryScripter).Scripter.(*redis.Client).Close()
 	slot, err := admin.ClusterKeySlot(ctx, l.key("q")).Result()
 	if err != nil {
 		t.Fatal(err)
