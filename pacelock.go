@@ -73,7 +73,12 @@ type Limiter struct {
 
 // New constructs a limiter. Namespace isolates applications; domain selects the
 // set of quotas that can be checked together. Neither may be empty or exceed 256 bytes.
-// Use a dedicated Redis client with MaxRetries: -1 to avoid ambiguous replay.
+// Use a dedicated Redis client with MaxRetries: -1; Cluster clients also need
+// MaxRedirects: -1. Unsafe retry options on concrete go-redis clients return
+// ErrInvalid. Disabling Cluster redirects also disables automatic MOVED/ASK
+// recovery. go-redis clients must be initialized with their constructors; their
+// zero values are unsupported. Custom Scripters, hooks and node factories must
+// not replay commands.
 func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
 	return NewWithOptions(client, namespace, domain, Options{})
 }
@@ -83,6 +88,9 @@ func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
 func NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error) {
 	if nilClient(client) || namespace == "" || domain == "" || len(namespace) > 256 || len(domain) > 256 {
 		return nil, fmt.Errorf("%w: client, namespace and domain are required (names <= 256 bytes)", ErrInvalid)
+	}
+	if err := validateTransport(client); err != nil {
+		return nil, err
 	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
 	return &Limiter{client: client, prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil

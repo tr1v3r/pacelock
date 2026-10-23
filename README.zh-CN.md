@@ -22,9 +22,13 @@ API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约
 
 ## 安装与使用
 
+本 README 描述尚未发布的 `dev` 开发线，请显式安装该分支：
+
 ```sh
-go get github.com/tr1v3r/pacelock
+go get github.com/tr1v3r/pacelock@dev
 ```
+
+默认 `@latest` 当前选中旧版 API，并不包含本页展示的全部 API。请在应用的 `go.mod` 中保留解析得到的伪版本以便复现构建；`@dev` 会随开发推进，不代表稳定发布。
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -54,7 +58,21 @@ if !decision.Allowed {
 }
 ```
 
-`Allow` 为本次尝试消耗容量，**不具备幂等性**。准入后业务失败不会退还容量。Limiter 不拥有或关闭 Redis 客户端；构造函数不建立连接、不修改客户端配置。
+`Allow` 为本次尝试消耗容量，**不具备幂等性**。准入后业务失败不会退还容量。Limiter 不拥有或关闭 Redis 客户端；构造函数不建立连接、不修改客户端配置。客户端必须通过 go-redis 构造函数初始化，不支持零值客户端结构体。对这些已初始化的具体 `*redis.Client` / `*redis.ClusterClient`，`New` 和 `NewWithOptions` 在重试配置不安全时于本地返回 `ErrInvalid`。请先配置客户端再传入，不要在之后修改其 options。
+
+使用 Cluster 时，将上方客户端构造替换为：
+
+```go
+client := redis.NewClusterClient(&redis.ClusterOptions{
+    Addrs: []string{"localhost:17000", "localhost:17001", "localhost:17002"},
+    MaxRetries: -1,
+    MaxRedirects: -1,
+    ContextTimeoutEnabled: true,
+})
+defer client.Close()
+```
+
+仅设置 `MaxRetries` 无法关闭 Cluster 的外层重试，还必须设置 `MaxRedirects: -1`。这也关闭了透明的 `MOVED`/`ASK` 重试：拓扑变化可能直接返回错误，而非自动重试。可用性取舍见[运维说明](docs/operations.md)。自定义 `redis.Scripter` 包装、hooks、Cluster `NewClient` 工厂及代理仍由调用方审计；构造检查无法证明这些层绝不重放命令。
 
 所有实例必须使用相同的 namespace、domain、额度名称和有效策略。每次调用都要包含适用的账号、模型和租户规则；库无法推断漏传的规则。不同 namespace/domain 相互独立。
 
@@ -94,7 +112,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 | `Unknown` 错误 | 可能已经扣减，也可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
 | `Lookup` 未找到 | 没有找到仍保留的完整结果 | 保留对先前执行结果的不确定性 |
 
-`NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。`OutcomeOf` 对不认识的错误保守地返回 Unknown。
+`NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
 `Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`AllowOnce` 或 `Lookup` 调用触发一次。事件包含操作、耗时、结果、规则数、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](examples/idempotency/main.go)。
 
@@ -104,7 +122,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - GCRA 约束速率与突发包络，不是精确的固定/滑动分钟计数器。需要明确建模供应商规则；已知输入 token 不控制输出 TPM；字符数、字节数和 SSE chunk 数不等于 token 数。
 - 策略身份为有效间隔和 Burst。活跃状态策略变化返回 `ErrPolicyMismatch`。这是部署保护，不是配置存储。
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
-- 禁用普通客户端重试（`MaxRetries: -1`）。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。需单独审计 hooks、代理和 Cluster 重定向。
+- 禁用客户端重试（`MaxRetries: -1`，Cluster 还需 `MaxRedirects: -1`）。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
 - 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Lua 执行隔离不等于运行时错误回滚或崩溃持久性；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
 

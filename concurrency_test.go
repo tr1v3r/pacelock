@@ -30,7 +30,7 @@ type contentionFixture struct {
 
 func contentionClient(cluster bool, pool int) redis.UniversalClient {
 	if cluster {
-		return redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(os.Getenv("PACELOCK_REDIS_CLUSTER_ADDRS"), ","), MaxRetries: -1, ContextTimeoutEnabled: true, PoolSize: pool, MaxActiveConns: pool, PoolTimeout: 15 * time.Second})
+		return redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(os.Getenv("PACELOCK_REDIS_CLUSTER_ADDRS"), ","), MaxRetries: -1, MaxRedirects: -1, ContextTimeoutEnabled: true, PoolSize: pool, MaxActiveConns: pool, PoolTimeout: 15 * time.Second})
 	}
 	return redis.NewClient(&redis.Options{Addr: os.Getenv("PACELOCK_REDIS_ADDR"), MaxRetries: -1, ContextTimeoutEnabled: true, PoolSize: pool, MaxActiveConns: pool, PoolTimeout: 15 * time.Second})
 }

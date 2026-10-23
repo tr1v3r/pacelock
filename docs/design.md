@@ -25,7 +25,7 @@ NewWithOptions(client redis.Scripter, namespace, domain string, options Options)
 - 同次调用不得出现重复 Name；不会偷偷合并重复额度。
 - namespace 和 domain 非空、最多 256 字节；额度名称同样最多 256 字节。
 - Limiter 持有调用者提供的并发安全客户端，不负责关闭。调用者必须提供实际非空客户端；包含 nil 指针的接口值也会返回 ErrInvalid。nil context 或未初始化 Limiter 同样会返回错误，不再 panic。
-- 正常执行时，全部维度通过才写入全部状态；任一维度不足则不写任何状态。
+- 正常执行时，全部维度通过才扣减全部额度；任一维度不足则不扣减任何额度。`AllowOnce` 仍会保存拒绝的 attempt 记录，额度状态与准入记录不可混为一谈。
 - Decision.Allowed=false 且 err=nil 只代表额度不足；Redis 故障不伪装成限流。
 - RetryAfter 为本次观察下各维度等待时间的最大值。其他请求可能抢占额度，不保证等到该时间必定通过。
 - Allow 不存储请求身份，不防重复扣减；AllowOnce 提供保留期内的准入去重。两者都不提供反向退款。
@@ -49,7 +49,7 @@ retry     = max(0, candidate - B * I - now)
 allowed   = retry == 0
 ```
 
-通过时保存 candidate；拒绝时保持原状态。每个额度只需常数大小的状态，不需要逐请求滑动日志。
+通过时保存 candidate；拒绝时保持原额度状态（`AllowOnce` 另存拒绝的准入记录）。每个额度只需常数大小的状态，不需要逐请求滑动日志。
 
 例如每秒 10 单位、Burst=20：空闲时可立即消耗 20 单位；随后每 100ms 恢复 1 单位。它不是“任意一秒最多 10 次”，也不是固定时间窗计数。供应商若使用不同窗口规则，需要保守配置或另加对应策略，不能宣称 GCRA 精确模拟所有 RPM/TPM 限制。
 
@@ -64,7 +64,7 @@ value = TAT_microseconds:effective_interval_microseconds:Burst
 
 长度前缀避免 namespace/domain 连接歧义；哈希避免调用者输入干扰 Cluster hash tag。相同 domain 中所有额度同槽，所以可一次脚本判定。不同 domain 相互独立，也不能跨 domain 原子准入。
 
-脚本先读取 Redis TIME，再读取并校验全部状态、计算全部候选值，全部通过后才写入。活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。此校验仅在状态存在时有效；配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
+对于未命中已有准入记录的新尝试，脚本读取 Redis TIME，再读取并校验全部额度状态、计算全部候选值，全部通过后才写入额度；`AllowOnce` 的拒绝记录仍会保存。活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。此校验仅在状态存在时有效；配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
 
 TTL 为 `ceil((newTAT - now) / 1ms)`，最少 1ms；状态完全恢复后即可删除。拒绝不刷新 TTL。Period 和 Burst × I 都限制在 24 小时以内，防止无界债务与持续时间溢出。TAT 使用整微秒并以整数格式序列化，避免 Lua 默认 tostring 丢失高位精度；服务端时钟还须处于 IEEE-754 精确整数范围内。
 
@@ -94,12 +94,16 @@ Cost 的单位由业务定义。库不把字符数、字节数或 SSE chunk 数�
 |---|---|---|
 | ErrInvalid | 本地参数无效，未派发 | 修正参数 |
 | ErrPolicyMismatch | 活跃策略冲突，本次未写入 | 修正部署或协调迁移 |
-| ErrState | 状态损坏或不支持的时钟范围；脚本检查在写入前 | 告警排查，不自动重置额度 |
+| ErrState | 状态、准入记录或返回协议异常；既可能在写入前检出，也可能在扣减后解析响应时检出 | 必须检查 `OutcomeOf(err)`；`Unknown` 不盲目重试或退款，告警排查且不自动重置额度 |
 | Allowed=false，err=nil | 正常拒绝，无扣减 | 拒绝或按业务队列稍后重试 |
 | Allowed=true，err=nil | 本次全部额度扣减成功 | 执行对应业务尝试 |
 | 其他错误 | 包括超时、网络、取消、Redis 运行时错误；可能无法确认扣减 | 不盲目重放或退款，显式处理失败 |
 
-预先取消的 context 在本地返回；派发后取消无法撤销 Redis 已经完成的脚本。客户端设置 MaxRetries=-1 关闭普通自动重试，ContextTimeoutEnabled=true 使 context 截止时间参与客户端超时。仍需审计 hooks、代理及 Cluster 重定向行为，不能据此声称 exactly-once。
+预先取消的 context 在本地返回；派发后取消无法撤销 Redis 已经完成的脚本。客户端设置 `MaxRetries: -1`，Cluster 还须设置 `MaxRedirects: -1`：后者不仅控制重定向，也控制外层网络错误重试。`ContextTimeoutEnabled: true` 使 context 截止时间参与客户端超时。
+
+`New` / `NewWithOptions` 对具体 `*redis.Client` / `*redis.ClusterClient` 在本地检查归一化后的重试设置；不安全时返回 `ErrInvalid` 和 nil Limiter，不连接 Redis、不修改调用方配置。这是 pre-v1 安全行为收紧：此前可能成功构造的默认客户端现在会被拒绝。归一化规则与迁移说明见 [operations.md](operations.md)。配置应在构造前确定，之后不要修改客户端 options。
+
+关闭 Cluster 外层重试也会关闭透明 `MOVED`/`ASK` 重试。正常槽路由仍可使用，但拓扑变更或旧槽表可能直接返回错误；这是避免未知扣减被再次执行的可用性取舍，不能把错误当作正常拒绝。自定义 `redis.Scripter` 包装、hooks、Cluster `NewClient` 工厂和代理仍需调用方审计，构造检查无法证明端到端绝不重放，也不能据此声称 exactly-once。
 
 Pacelock 在 NOSCRIPT 时从 EVALSHA 回退到 EVAL，这是缓存未命中的安全回退；不会自行重试不确定的传输错误。Redis failover 仍可能丢失已确认写入；持久化、复制和故障策略属于部署边界。
 
