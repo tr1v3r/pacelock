@@ -1,0 +1,24 @@
+# Disposable fixtures. No production credentials or persistent data.
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:16379:6379"]
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+  cluster:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:17000:17000"
+      - "127.0.0.1:17001:17001"
+      - "127.0.0.1:17002:17002"
+    volumes: ["./scripts/redis-cluster.sh:/fixture/cluster.sh:ro"]
+    command: ["sh", "/fixture/cluster.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 17000 cluster info | grep -q cluster_state:ok"]
+      interval: 1s
+      timeout: 1s
+      retries: 30

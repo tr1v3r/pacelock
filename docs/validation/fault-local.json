@@ -1,0 +1,62 @@
+{
+  "image": "redis:7-alpine",
+  "started_utc": "2026-10-23T16:08:11Z",
+  "scenarios": {
+    "replicated_promotion": {
+      "seed": {
+        "allowed": 10,
+        "denied": 0,
+        "errors": 0,
+        "found": 0,
+        "missing": 0,
+        "unknown": 0
+      },
+      "after_promotion": {
+        "allowed": 0,
+        "denied": 10,
+        "errors": 0,
+        "found": 10,
+        "missing": 0,
+        "unknown": 0
+      },
+      "manual_recovery_seconds": 0.24157004100561608,
+      "extra_admissions_after_10_confirmed": 0
+    },
+    "noeviction_oom": {
+      "allowed": 0,
+      "denied": 0,
+      "errors": 10,
+      "found": 0,
+      "missing": 0,
+      "unknown": 10
+    },
+    "synthetic_clock": {
+      "first": "1\n0\n0",
+      "forward_2s": "1\n0\n0",
+      "backward_over_horizon": "PACE_STATE invalid quota state or backward clock jump",
+      "scope": "production Lua with substituted now, not host clock fault"
+    },
+    "unreplicated_loss": {
+      "seed": {
+        "allowed": 10,
+        "denied": 0,
+        "errors": 0,
+        "found": 0,
+        "missing": 0,
+        "unknown": 0
+      },
+      "after_promotion": {
+        "allowed": 10,
+        "denied": 0,
+        "errors": 0,
+        "found": 0,
+        "missing": 10,
+        "unknown": 0
+      },
+      "manual_recovery_seconds": 0.34361954098858405,
+      "extra_admissions_after_10_confirmed": 10
+    }
+  },
+  "image_id": "sha256:ec4f171e9ff071bb2a1c936057d3be00206069b028b6c0d61df2477e1dd02c42",
+  "redis_version": "7.4.11"
+}
