@@ -12,6 +12,8 @@ import (
 // the caller's responsibility: redis.Scripter cannot expose their replay policy.
 func validateTransport(client redis.Scripter) error {
 	switch c := client.(type) {
+	case *redis.Ring:
+		return fmt.Errorf("%w: redis.Ring is unsupported; use redis.Client or redis.ClusterClient", ErrInvalid)
 	case *redis.Client:
 		// NewClient converts MaxRetries: -1 to 0; its default becomes 3.
 		if c.Options() == nil || c.Options().MaxRetries != 0 {

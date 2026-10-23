@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -169,5 +170,26 @@ func TestClusterRedirectsDisabled(t *testing.T) {
 				t.Fatalf("redirect not surfaced once: calls=%d err=%v", hook.calls.Load(), err)
 			}
 		})
+	}
+}
+
+func TestNewRejectsRing(t *testing.T) {
+	for _, retries := range []int{-1, 0, 3} {
+		ring := redis.NewRing(&redis.RingOptions{Addrs: map[string]string{}, MaxRetries: retries, HeartbeatFrequency: time.Hour})
+		before := ring.Options().MaxRetries
+		for _, options := range []bool{false, true} {
+			limiter, err := transportConstructor(ring, options)
+			if limiter != nil || !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Ring accepted: %v %v", limiter, err)
+			}
+			if ring.Options().MaxRetries != before {
+				t.Fatal("caller options modified")
+			}
+		}
+		ring.Close()
+	}
+	var ring *redis.Ring
+	if l, err := New(ring, "test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil Ring accepted: %v", err)
 	}
 }
