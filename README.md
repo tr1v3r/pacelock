@@ -136,6 +136,8 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - Deduplicating admission does not deduplicate upstream execution. Coordinate the
   business attempt separately. A new actual model call needs a new admission ID.
 
+For a complete application-owned flow, see the [durable admission example](examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
+
 ## Errors and observation
 
 Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`, `ErrConflict`,
