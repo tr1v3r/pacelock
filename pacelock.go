@@ -74,9 +74,9 @@ type Limiter struct {
 // New constructs a limiter. Namespace isolates applications; domain selects the
 // set of quotas that can be checked together. Neither may be empty or exceed 256 bytes.
 // Use a dedicated Redis client with MaxRetries: -1; Cluster clients also need
-// MaxRedirects: -1. Unsafe retry options on concrete go-redis clients return
-// ErrInvalid. Disabling Cluster redirects also disables automatic MOVED/ASK
-// recovery. go-redis clients must be initialized with their constructors; their
+// a bounded MaxRedirects budget (the default is supported). Unsafe node retry
+// options return ErrInvalid. SDK commands carry NoRetry to prevent ambiguous
+// replay while preserving MOVED/ASK recovery. go-redis clients must be initialized with their constructors; their
 // zero values are unsupported. Custom Scripters, hooks and node factories must
 // not replay commands. redis.Ring is unsupported and returns ErrInvalid.
 func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
@@ -93,7 +93,7 @@ func NewWithOptions(client redis.Scripter, namespace, domain string, options Opt
 		return nil, err
 	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-	return &Limiter{client: client, prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
+	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
 }
 
 func nilClient(client redis.Scripter) bool {

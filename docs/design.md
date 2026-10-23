@@ -99,11 +99,7 @@ Cost 的单位由业务定义。库不把字符数、字节数或 SSE chunk 数�
 | Allowed=true，err=nil | 本次全部额度扣减成功 | 执行对应业务尝试 |
 | 其他错误 | 包括超时、网络、取消、Redis 运行时错误；可能无法确认扣减 | 不盲目重放或退款，显式处理失败 |
 
-预先取消的 context 在本地返回；派发后取消无法撤销 Redis 已经完成的脚本。客户端设置 `MaxRetries: -1`，Cluster 还须设置 `MaxRedirects: -1`：后者不仅控制重定向，也控制外层网络错误重试。`ContextTimeoutEnabled: true` 使 context 截止时间参与客户端超时。
-
-`New` / `NewWithOptions` 对具体 `*redis.Client` / `*redis.ClusterClient` 在本地检查归一化后的重试设置；不安全时返回 `ErrInvalid` 和 nil Limiter，不连接 Redis、不修改调用方配置。这是 pre-v1 安全行为收紧：此前可能成功构造的默认客户端现在会被拒绝。归一化规则与迁移说明见 [operations.md](operations.md)。配置应在构造前确定，之后不要修改客户端 options。
-
-关闭 Cluster 外层重试也会关闭透明 `MOVED`/`ASK` 重试。正常槽路由仍可使用，但拓扑变更或旧槽表可能直接返回错误；这是避免未知扣减被再次执行的可用性取舍，不能把错误当作正常拒绝。自定义 `redis.Scripter` 包装、hooks、Cluster `NewClient` 工厂和代理仍需调用方审计，构造检查无法证明端到端绝不重放，也不能据此声称 exactly-once。
+预先取消的 context 在本地返回；派发后取消无法撤销 Redis 写入。具体 go-redis 客户端仍要求 MaxRetries: -1，SDK 通过 v9.22.0 的逐命令 NoRetry 标记禁止不确定重放，同时允许有界 MOVED/ASK 重定向。Cluster MaxRedirects 可用默认或正数，-1 仍表示关闭重定向。ASKING 与脚本在同一连接发送。构造不联网、不修改 options；自定义 Scripter、hooks、节点工厂和代理须保持标记及不重放契约。
 
 Pacelock 在 NOSCRIPT 时从 EVALSHA 回退到 EVAL，这是缓存未命中的安全回退；不会自行重试不确定的传输错误。Redis failover 仍可能丢失已确认写入；持久化、复制和故障策略属于部署边界。
 
@@ -160,5 +156,5 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 本地验证记录见 [verification.md](verification.md)。未承诺生产故障切换持久性、OOM 下的可用性、生产吞吐或 LLM 供应商兼容性；这些需要目标部署验证。
 
 - [Redis Lua scripting](https://redis.io/docs/latest/develop/programmability/eval-intro/)
-- [Go-Redis script execution](https://github.com/redis/go-redis/blob/v9.17.3/script.go)
+- [Go-Redis script execution](https://github.com/redis/go-redis/blob/v9.22.0/script.go)
 - [go-redis/redis_rate](https://github.com/go-redis/redis_rate)：通用 GCRA 实现，可用于对照 API 范围；Pacelock 未复用其代码。

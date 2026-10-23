@@ -86,18 +86,17 @@ For Cluster, replace the client construction above with:
 client := redis.NewClusterClient(&redis.ClusterOptions{
     Addrs: []string{"localhost:17000", "localhost:17001", "localhost:17002"},
     MaxRetries: -1,
-    MaxRedirects: -1,
+    MaxRedirects: 3,
     ContextTimeoutEnabled: true,
 })
 defer client.Close()
 ```
 
-`MaxRetries` alone does not disable Cluster's outer retry loop; `MaxRedirects: -1`
-is also required. This disables transparent `MOVED`/`ASK` retries too: topology
-changes can surface errors instead of being retried. See [operations](docs/operations.md)
-for the availability tradeoff. Custom `redis.Scripter` wrappers, hooks, Cluster
-`NewClient` factories and proxies remain the caller's responsibility to audit;
-constructor checks cannot prove that these layers never replay commands.
+Pacelock marks commands on concrete Client/ClusterClient instances with go-redis
+`NoRetry`. This prevents ambiguous network replay while allowing bounded MOVED/ASK
+recovery. A default or positive Cluster MaxRedirects budget is supported;
+`MaxRedirects: -1` still disables redirects. Custom Scripter wrappers, hooks,
+node factories and proxies must preserve this contract. See [operations](docs/operations.md).
 
 Every instance must use the same namespace, domain, quota names and effective
 policies. Include all applicable account/model/tenant quotas in every call; omitted
@@ -179,7 +178,7 @@ panics propagate. Do not label metrics with error text or user identifiers. See
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.
-- Disable client retries (`MaxRetries: -1`; also `MaxRedirects: -1` for Cluster).
+- Disable client retries (`MaxRetries: -1`); Cluster redirects may remain enabled.
   Only `NOSCRIPT` falls back from `EVALSHA` to `EVAL`. Constructor validation is
   not a substitute for auditing custom clients, hooks, factories and proxies.
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot

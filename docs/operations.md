@@ -10,7 +10,7 @@
 3. Use private networking, TLS, least-privilege authentication, dedicated quota
    keys and `maxmemory-policy noeviction`. Configure Redis persistence/replication
    according to the application's tolerance for lost admissions.
-4. Set `MaxRetries: -1`, and also `MaxRedirects: -1` for Cluster. Set
+4. Set `MaxRetries: -1`; Cluster may retain its default redirect budget. Set
    `ContextTimeoutEnabled: true` and connection, read/write, pool and request
    deadlines to the application's latency budget. Constructors reject unsafe
    retry options on concrete go-redis clients; see the retry contract below.
@@ -36,28 +36,23 @@ are unsupported. For these initialized concrete `*redis.Client` and
 Unsafe settings return `ErrInvalid` and a nil limiter, without a network request
 or changing caller-owned settings. Use a
 dedicated client configured before construction; do not mutate its options later.
-For go-redis v9.17.3, the checked values are the **normalized** options:
+The SDK uses go-redis v9.22.0's per-command `NoRetry` contract. Concrete clients
+are adapted without changing options: EVALSHA/EVAL carry the marker through node,
+Cluster and ASK pipeline execution. NOSCRIPT still falls back safely to EVAL.
+Node MaxRetries must remain disabled as in existing configurations. Cluster's
+normalized MaxRedirects may be zero or positive: -1 at construction disables
+redirects, while the default/positive budget permits bounded MOVED/ASK recovery.
+Ambiguous EOF, timeout and lost-response errors remain Unknown and are never
+converted into a second admission. ASKING and the script use the same pipeline
+connection. Routing recovery does not guarantee failover persistence.
 
-- Standalone: `Client.Options().MaxRetries == 0`, obtained by passing
-  `MaxRetries: -1` to `redis.NewClient`. Omitting it enables ordinary retries and
-  is rejected.
-- Cluster: `ClusterClient.Options().MaxRedirects == 0` and `MaxRetries == -1`.
-  Pass both `MaxRedirects: -1` and `MaxRetries: -1` explicitly. go-redis also
-  normalizes an omitted Cluster `MaxRetries` to `-1`, which is accepted; an omitted
-  `MaxRedirects` enables the outer loop and is rejected.
-
-The Cluster outer loop retries some network failures as well as redirects.
-Leaving it enabled can debit a non-idempotent `Allow` twice, or hide a first debit
-behind a later quota denial. Disabling it is therefore required, even when the
-application normally uses `AllowOnce`.
-
-This also disables transparent `MOVED`/`ASK` retries. Normal routing uses the slot
-map, but resharding/failover or a stale map can surface an error on the current
-call. These backend errors remain `Unknown`, not quota denials or proof of no
-debit. Plan for this availability tradeoff; do not restore retries as a workaround.
-For an uncertain `AllowOnce`, recover the same retained ID under a fresh deadline;
-for `Allow`, apply the application's explicit failure policy. Slot-map discovery
-and refresh require the Cluster ACL grant documented in [security](../SECURITY.md).
+The dependency update adds go-redis's indirect atomic/sys dependencies; no new
+SDK service or background worker is introduced. Custom hooks must not strip the
+NoRetry marker or replay commands themselves. Old explicit no-redirect settings
+remain supported, but are no longer required for known Cluster clients.
+The upgraded client may discover COMMAND metadata on first use; provision its
+read permission for efficient routing, and warm client metadata before strict
+latency measurements. Discovery may have a client-owned background deadline.
 
 Custom `redis.Scripter` implementations and wrappers, hooks, Cluster `NewClient`
 factories and external proxies cannot be fully verified by constructor option

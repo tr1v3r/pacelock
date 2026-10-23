@@ -36,7 +36,8 @@ function signatures. A default `*redis.Client` that previously passed `New` now
 returns `ErrInvalid`, because ordinary go-redis retries can replay an ambiguous
 admission. Create it with `redis.Options{MaxRetries: -1, ...}` instead. For a
 `*redis.ClusterClient`, explicitly set both `MaxRetries: -1` and
-`MaxRedirects: -1`; disabling only ordinary retries is insufficient.
+a bounded redirect budget. SDK NoRetry commands prevent ambiguous replay;
+`MaxRedirects: -1` remains supported to disable redirects.
 
 Both `New` and `NewWithOptions` validate the concrete client's normalized options
 without connecting, mutating settings or taking client ownership. Configure a

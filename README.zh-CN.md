@@ -68,13 +68,13 @@ if !decision.Allowed {
 client := redis.NewClusterClient(&redis.ClusterOptions{
     Addrs: []string{"localhost:17000", "localhost:17001", "localhost:17002"},
     MaxRetries: -1,
-    MaxRedirects: -1,
+    MaxRedirects: 3,
     ContextTimeoutEnabled: true,
 })
 defer client.Close()
 ```
 
-仅设置 `MaxRetries` 无法关闭 Cluster 的外层重试，还必须设置 `MaxRedirects: -1`。这也关闭了透明的 `MOVED`/`ASK` 重试：拓扑变化可能直接返回错误，而非自动重试。可用性取舍见[运维说明](docs/operations.md)。自定义 `redis.Scripter` 包装、hooks、Cluster `NewClient` 工厂及代理仍由调用方审计；构造检查无法证明这些层绝不重放命令。
+Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻止不确定网络错误重放，同时保留有界 MOVED/ASK 恢复。Cluster 可使用默认或正数 MaxRedirects；`MaxRedirects: -1` 仍可禁用重定向。自定义 Scripter、hooks、节点工厂及代理必须遵守相同契约，详见[运维说明](docs/operations.md)。
 
 所有实例必须使用相同的 namespace、domain、额度名称和有效策略。每次调用都要包含适用的账号、模型和租户规则；库无法推断漏传的规则。不同 namespace/domain 相互独立。
 
@@ -126,7 +126,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - GCRA 约束速率与突发包络，不是精确的固定/滑动分钟计数器。需要明确建模供应商规则；已知输入 token 不控制输出 TPM；字符数、字节数和 SSE chunk 数不等于 token 数。
 - 策略身份为有效间隔和 Burst。活跃状态策略变化返回 `ErrPolicyMismatch`。这是部署保护，不是配置存储。
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
-- 禁用客户端重试（`MaxRetries: -1`，Cluster 还需 `MaxRedirects: -1`）。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
+- 禁用客户端重试（`MaxRetries: -1`）；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
 - 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Lua 执行隔离不等于运行时错误回滚或崩溃持久性；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
 

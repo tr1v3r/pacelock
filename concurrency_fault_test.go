@@ -435,6 +435,13 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	defer release()
 	var err error
 	if c, ok := small.(*redis.ClusterClient); ok {
+		// Populate go-redis routing metadata before deliberately exhausting its pools.
+		if err := c.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error { return node.Command(ctx).Err() }); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Exists(ctx, l.key("warm-metadata")).Err(); err != nil {
+			t.Fatal(err)
+		}
 		err = c.ForEachMaster(ctx, hold)
 	} else {
 		err = hold(ctx, small.(*redis.Client))

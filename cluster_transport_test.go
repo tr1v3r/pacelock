@@ -32,7 +32,10 @@ func (h *clusterLostReplyHook) ProcessHook(next redis.ProcessHook) redis.Process
 		err := next(ctx, cmd)
 		if err == nil && (cmd.Name() == "eval" || cmd.Name() == "evalsha") {
 			h.executions.Add(1)
-			if reply, ok := cmd.(*redis.Cmd); ok {
+			if reply, ok := cmd.(interface {
+				SetVal(interface{})
+				Int64Slice() ([]int64, error)
+			}); ok {
 				if values, err := reply.Int64Slice(); err == nil && len(values) > 0 && values[0] == 1 {
 					h.admissions.Add(1)
 				}
@@ -54,7 +57,7 @@ func TestRedisClusterLostReply(t *testing.T) {
 		t.Run(fmt.Sprintf("burst=%d", burst), func(t *testing.T) {
 			hook := &clusterLostReplyHook{}
 			client := redis.NewClusterClient(&redis.ClusterOptions{
-				Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1,
+				Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: 3,
 				ContextTimeoutEnabled: true,
 				NewClient: func(opt *redis.Options) *redis.Client {
 					c := redis.NewClient(opt)
