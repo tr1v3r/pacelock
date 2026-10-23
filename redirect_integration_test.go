@@ -3,6 +3,7 @@ package pacelock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 )
 
 type askLossHook struct {
+	loss      *replyLoss
 	lose      atomic.Bool
 	successes atomic.Int64
 }
@@ -22,6 +24,9 @@ func (*askLossHook) DialHook(next redis.DialHook) redis.DialHook          { retu
 func (*askLossHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook { return next }
 func (h *askLossHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if h.loss != nil && h.lose.CompareAndSwap(true, false) {
+			h.loss.armed.Store(true)
+		}
 		err := next(ctx, cmds)
 		for _, cmd := range cmds {
 			if (cmd.Name() == "eval" || cmd.Name() == "evalsha") && cmd.Err() == nil {
@@ -42,6 +47,14 @@ func (h *askLossHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.
 // Requires disposable masters: temporarily migrates one empty slot, then restores
 // its owner. Actual ASK/ASKING, MOVED and cold-cache paths exercise node routing.
 func TestClusterLiveRedirects(t *testing.T) {
+	for _, retries := range []int{-1, 0, 2} {
+		for _, wireLoss := range []bool{false, true} {
+			t.Run(fmt.Sprintf("retries=%d/wire=%t", retries, wireLoss), func(t *testing.T) { testClusterLiveRedirects(t, retries, wireLoss) })
+		}
+	}
+}
+
+func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 	addresses := os.Getenv("PACELOCK_REDIS_CLUSTER_ADDRS")
 	if addresses == "" {
 		t.Skip("Cluster fixture required")
@@ -107,12 +120,20 @@ func TestClusterLiveRedirects(t *testing.T) {
 		}
 	})
 	hook := &askLossHook{}
-	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: 3,
+	loss := &replyLoss{}
+	if wireLoss {
+		hook.loss = loss
+	}
+	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: retries, MaxRedirects: 3, PoolSize: 1, Dialer: loss.dial,
 		ClusterSlots: func(context.Context) ([]redis.ClusterSlot, error) { return slots, nil },
 		NewClient:    func(o *redis.Options) *redis.Client { node := redis.NewClient(o); node.AddHook(hook); return node },
 	})
 	defer c.Close()
 	l.client = safeScripter(c)
+	// Warm target connections before arming a fault below the pipeline retry loop.
+	if err := c.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error { return node.Command(ctx).Err() }); err != nil {
+		t.Fatal(err)
+	}
 	if err := target.Do(ctx, "cluster", "setslot", slot, "importing", sourceID).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +157,7 @@ func TestClusterLiveRedirects(t *testing.T) {
 	if !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
 		t.Fatalf("ASK lost reply: %v", err)
 	}
-	if hook.successes.Load() != 2 {
+	if (!wireLoss && hook.successes.Load() != 2) || (wireLoss && loss.dropped.Load() != 1) {
 		t.Fatal("lost ASK response was replayed")
 	}
 	hook.lose.Store(false)

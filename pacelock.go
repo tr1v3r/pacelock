@@ -4,9 +4,9 @@
 // bounded deduplication and Lookup recovers retained admission results. Neither
 // method queues work, owns concurrency, refunds capacity or bills usage.
 //
-// Use one namespace/domain for all quotas requiring atomic admission, configure
-// the Redis client to disable ordinary retries, and explicitly handle unknown
-// debit outcomes. The client and business execution lifecycle belong to the caller.
+// Use one namespace/domain for all quotas requiring atomic admission and explicitly
+// handle unknown debit outcomes. Built-in go-redis clients receive per-command
+// replay protection. The client and business execution lifecycle belong to the caller.
 package pacelock
 
 import (
@@ -73,12 +73,13 @@ type Limiter struct {
 
 // New constructs a limiter. Namespace isolates applications; domain selects the
 // set of quotas that can be checked together. Neither may be empty or exceed 256 bytes.
-// Use a dedicated Redis client with MaxRetries: -1; Cluster clients also need
-// a bounded MaxRedirects budget (the default is supported). Unsafe node retry
-// options return ErrInvalid. SDK commands carry NoRetry to prevent ambiguous
-// replay while preserving MOVED/ASK recovery. go-redis clients must be initialized with their constructors; their
-// zero values are unsupported. Custom Scripters, hooks and node factories must
-// not replay commands. redis.Ring is unsupported and returns ErrInvalid.
+// Concrete go-redis clients support default, positive and disabled MaxRetries
+// budgets. SDK script commands carry NoRetry to prevent ambiguous replay while
+// preserving bounded MOVED/ASK recovery. Other commands retain the client's retry
+// policy. Unsupported negative budgets return ErrInvalid. go-redis clients must
+// be initialized with their constructors; their zero values are unsupported.
+// Custom Scripters, hooks and node factories must preserve the no-replay contract.
+// redis.Ring is unsupported and returns ErrInvalid.
 func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
 	return NewWithOptions(client, namespace, domain, Options{})
 }

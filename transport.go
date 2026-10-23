@@ -16,16 +16,17 @@ func validateTransport(client redis.Scripter) error {
 	case *redis.Ring:
 		return fmt.Errorf("%w: redis.Ring is unsupported; use redis.Client or redis.ClusterClient", ErrInvalid)
 	case *redis.Client:
-		// NewClient converts MaxRetries: -1 to 0; its default becomes 3.
-		if c.Options() == nil || c.Options().MaxRetries != 0 {
-			return fmt.Errorf("%w: redis.Client requires MaxRetries: -1", ErrInvalid)
+		// NoRetry protects script commands independently of the client retry budget.
+		// Negative normalized values are invalid (input -1 normalizes to zero).
+		if c.Options() == nil || c.Options().MaxRetries < 0 {
+			return fmt.Errorf("%w: redis.Client requires a nonnegative normalized retry budget", ErrInvalid)
 		}
 	case *redis.ClusterClient:
 		// NoRetry suppresses ambiguous replay, while the redirect budget permits
-		// safe MOVED/ASK recovery. Retain the node retry configuration contract.
+		// safe MOVED/ASK recovery. Only reject unsupported negative budgets.
 		options := c.Options()
-		if options == nil || options.MaxRedirects < 0 || options.MaxRetries != -1 {
-			return fmt.Errorf("%w: redis.ClusterClient requires MaxRetries: -1 and a nonnegative normalized redirect budget", ErrInvalid)
+		if options == nil || options.MaxRedirects < 0 || options.MaxRetries < -1 {
+			return fmt.Errorf("%w: redis.ClusterClient requires MaxRetries >= -1 and a nonnegative normalized redirect budget", ErrInvalid)
 		}
 	}
 	return nil

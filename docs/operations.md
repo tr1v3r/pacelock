@@ -10,10 +10,11 @@
 3. Use private networking, TLS, least-privilege authentication, dedicated quota
    keys and `maxmemory-policy noeviction`. Configure Redis persistence/replication
    according to the application's tolerance for lost admissions.
-4. Set `MaxRetries: -1`; Cluster may retain its default redirect budget. Set
+4. Default, positive or disabled (`-1`) `MaxRetries` budgets are supported; Cluster
+   may retain its default redirect budget. Set
    `ContextTimeoutEnabled: true` and connection, read/write, pool and request
-   deadlines to the application's latency budget. Constructors reject unsafe
-   retry options on concrete go-redis clients; see the retry contract below.
+   deadlines to the application's latency budget. SDK script commands carry
+   `NoRetry`; see the retry contract below.
    Audit middleware, hooks, custom clients/factories and proxies for command replay.
 5. Decide the backend-failure policy explicitly. Returning an unavailable response
    is usually preferable when exceeding provider quotas is unacceptable. Any
@@ -33,13 +34,17 @@ SDK. Environment variables in this repository configure examples/tests only.
 Clients must be initialized with go-redis constructors; zero-value client structs
 are unsupported. For these initialized concrete `*redis.Client` and
 `*redis.ClusterClient` instances, `New` and `NewWithOptions` inspect options locally.
-Unsafe settings return `ErrInvalid` and a nil limiter, without a network request
-or changing caller-owned settings. Use a
-dedicated client configured before construction; do not mutate its options later.
+Unsupported negative budgets (`MaxRetries < -1` or `MaxRedirects < -1` at client
+construction) return `ErrInvalid` and a nil limiter, without a network request
+or changing caller-owned settings. Configure the client before construction;
+do not mutate its options later. A shared client retains its retry policy for
+commands outside Pacelock.
 The SDK uses go-redis v9.22.0's per-command `NoRetry` contract. Concrete clients
 are adapted without changing options: EVALSHA/EVAL carry the marker through node,
 Cluster and ASK pipeline execution. NOSCRIPT still falls back safely to EVAL.
-Node MaxRetries must remain disabled as in existing configurations. Cluster's
+Default, positive and disabled MaxRetries budgets are all supported. A standalone
+client normalizes input 0 to 3 and -1 to 0; Cluster normalizes input 0 to -1.
+These client defaults do not change the per-command NoRetry guarantee. Cluster's
 normalized MaxRedirects may be zero or positive: -1 at construction disables
 redirects, while the default/positive budget permits bounded MOVED/ASK recovery.
 Ambiguous EOF, timeout and lost-response errors remain Unknown and are never

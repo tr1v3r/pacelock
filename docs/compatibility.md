@@ -29,23 +29,22 @@ v1 quota key/value encoding. `NewWithOptions` is separate to avoid changing the
 function type of `New`. Typed-nil clients and nil contexts now return `ErrInvalid`.
 Check errors with `errors.Is/As`, not string matching; wrapper text has changed.
 
-### Retry-setting safety tightening (pre-v1)
+### Per-command retry safety (pre-v1)
 
-Constructor acceptance has intentionally become stricter without changing the
-function signatures. A default `*redis.Client` that previously passed `New` now
-returns `ErrInvalid`, because ordinary go-redis retries can replay an ambiguous
-admission. Create it with `redis.Options{MaxRetries: -1, ...}` instead. For a
-`*redis.ClusterClient`, explicitly set both `MaxRetries: -1` and
-a bounded redirect budget. SDK NoRetry commands prevent ambiguous replay;
-`MaxRedirects: -1` remains supported to disable redirects.
+Concrete `*redis.Client` and `*redis.ClusterClient` instances now accept default,
+positive and disabled (`-1`) `MaxRetries` budgets. Pacelock wraps its EVALSHA/EVAL
+commands with go-redis v9.22.0's `NoRetry` marker, preventing ambiguous replay at
+node, Cluster and ASK pipeline layers without disabling retries for other commands
+on a shared client. Existing explicit `MaxRetries: -1` settings remain valid.
 
-Both `New` and `NewWithOptions` validate the concrete client's normalized options
-without connecting, mutating settings or taking client ownership. Configure a
-dedicated client before passing it in and do not mutate its options afterward.
-See [operations](operations.md#client-retries-and-cluster-availability) for exact
-normalized values, custom-client limitations and the availability tradeoff:
-transparent `MOVED`/`ASK` retries are disabled too, so topology changes may surface
-backend errors. Preserve `Unknown` and do not blindly replay `Allow`.
+Cluster supports default or positive bounded redirect budgets. `MaxRedirects: -1`
+still disables redirects; only that opt-out loses transparent MOVED/ASK recovery.
+NOSCRIPT still safely falls back to EVAL. Unsupported negative budgets remain
+invalid. Both constructors inspect normalized options without connecting,
+mutating settings or taking client ownership. Do not mutate client options later.
+Custom transports, hooks, factories and proxies must preserve the no-replay
+contract. See [operations](operations.md#client-retries-and-cluster-availability).
+Preserve `Unknown` and do not blindly replay `Allow`.
 
 This is a development-line safety change, not a stable-release announcement.
 The README's explicit `@dev` installation selects that line; retain its resolved

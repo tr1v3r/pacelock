@@ -43,7 +43,7 @@ func TestNewClientRetryOptions(t *testing.T) {
 					t.Fatalf("unexpected go-redis normalization: %d", normalized)
 				}
 				l, err := transportConstructor(client, withOptions)
-				if retries == -1 {
+				if retries >= -1 {
 					if err != nil || l == nil {
 						t.Fatalf("safe client rejected: %v", err)
 					}
@@ -61,7 +61,7 @@ func TestNewClientRetryOptions(t *testing.T) {
 func TestNewClusterRetryOptions(t *testing.T) {
 	for _, withOptions := range []bool{false, true} {
 		for _, redirects := range []int{-2, -1, 0, 1, 3} {
-			for _, retries := range []int{-2, -1, 0, 1} {
+			for _, retries := range []int{-2, -1, 0, 1, 3} {
 				t.Run(fmt.Sprintf("options=%t/redirects=%d/retries=%d", withOptions, redirects, retries), func(t *testing.T) {
 					var dials, slots, nodes atomic.Int64
 					options := &redis.ClusterOptions{
@@ -95,7 +95,7 @@ func TestNewClusterRetryOptions(t *testing.T) {
 						t.Fatalf("unexpected go-redis normalization: redirects=%d retries=%d", normalizedRedirects, normalizedRetries)
 					}
 					l, err := transportConstructor(client, withOptions)
-					if redirects >= -1 && (retries == -1 || retries == 0) {
+					if redirects >= -1 && retries >= -1 {
 						if err != nil || l == nil {
 							t.Fatalf("safe client rejected: %v", err)
 						}

@@ -99,7 +99,7 @@ Cost 的单位由业务定义。库不把字符数、字节数或 SSE chunk 数�
 | Allowed=true，err=nil | 本次全部额度扣减成功 | 执行对应业务尝试 |
 | 其他错误 | 包括超时、网络、取消、Redis 运行时错误；可能无法确认扣减 | 不盲目重放或退款，显式处理失败 |
 
-预先取消的 context 在本地返回；派发后取消无法撤销 Redis 写入。具体 go-redis 客户端仍要求 MaxRetries: -1，SDK 通过 v9.22.0 的逐命令 NoRetry 标记禁止不确定重放，同时允许有界 MOVED/ASK 重定向。Cluster MaxRedirects 可用默认或正数，-1 仍表示关闭重定向。ASKING 与脚本在同一连接发送。构造不联网、不修改 options；自定义 Scripter、hooks、节点工厂和代理须保持标记及不重放契约。
+预先取消的 context 在本地返回；派发后取消无法撤销 Redis 写入。具体 go-redis 客户端支持默认、正数及禁用（-1）的 MaxRetries 配置，SDK 通过 v9.22.0 的逐命令 NoRetry 标记禁止不确定重放，同时允许有界 MOVED/ASK 重定向；共享客户端的其他命令保留原有重试策略。Cluster MaxRedirects 可用默认或正数，-1 仍表示关闭重定向。ASKING 与脚本在同一连接发送。构造不联网、不修改 options；自定义 Scripter、hooks、节点工厂和代理须保持标记及不重放契约。
 
 Pacelock 在 NOSCRIPT 时从 EVALSHA 回退到 EVAL，这是缓存未命中的安全回退；不会自行重试不确定的传输错误。Redis failover 仍可能丢失已确认写入；持久化、复制和故障策略属于部署边界。
 
