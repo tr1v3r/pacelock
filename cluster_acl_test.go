@@ -37,7 +37,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{owner.key("quota"), owner.attemptKey("admission")}
+	keys := []string{owner.backend.key("quota"), owner.backend.attemptKey("admission")}
 	var masters []*redis.Client
 	t.Cleanup(func() {
 		clean, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -67,7 +67,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 		// SECURITY.md: admission commands plus this client's handshake grants.
 		// No +cluster, +command, administrative command or broad key grant.
 		if err := c.Do(ctx, "ACL", "SETUSER", username, "reset", "on", ">"+password,
-			"~"+owner.prefix+"*", "+evalsha", "+eval", "+get", "+set", "+time",
+			"~"+owner.backend.prefix+"*", "+evalsha", "+eval", "+get", "+set", "+time",
 			"+hello", "+auth", "+client", "+ping", "+select").Err(); err != nil {
 			t.Fatal(err)
 		}

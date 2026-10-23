@@ -43,11 +43,11 @@ func TestRedisCluster(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := []Rule{rule("rpm", 2, 1), rule("tokens", 4, 2)}
-		quotaSlot, err := c.ClusterKeySlot(ctx, l.key("rpm")).Result()
+		quotaSlot, err := c.ClusterKeySlot(ctx, l.backend.key("rpm")).Result()
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []string{l.key("rpm"), l.key("tokens"), l.attemptKey("id")} {
+		for _, k := range []string{l.backend.key("rpm"), l.backend.key("tokens"), l.backend.attemptKey("id")} {
 			keys = append(keys, k)
 			slot, err := c.ClusterKeySlot(ctx, k).Result()
 			if err != nil || slot != quotaSlot {
@@ -84,8 +84,8 @@ func TestRedisCluster(t *testing.T) {
 	l, _ := New(c, "pacelock-test", prefix+"-concurrent")
 	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1})
 	defer other.Close()
-	l2 := &Limiter{client: other, prefix: l.prefix}
-	keys = append(keys, l.key("q"), l.attemptKey("same"))
+	l2 := &Limiter{backend: redisBackend{client: other, prefix: l.backend.prefix}}
+	keys = append(keys, l.backend.key("q"), l.backend.attemptKey("same"))
 	var first atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {

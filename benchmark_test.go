@@ -43,7 +43,7 @@ func BenchmarkRedis(b *testing.B) {
 				b.Cleanup(func() {
 					clean := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
 					defer clean.Close()
-					it := clean.Scan(ctx, 0, l.prefix+"*", 1000).Iterator()
+					it := clean.Scan(ctx, 0, l.backend.prefix+"*", 1000).Iterator()
 					for it.Next(ctx) {
 						clean.Del(ctx, it.Val())
 					}

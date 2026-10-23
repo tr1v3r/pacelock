@@ -90,7 +90,7 @@ func (f *contentionFixture) cleanup(t *testing.T, l *Limiter) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		clean := func(ctx context.Context, c redis.Cmdable) error {
-			it := c.Scan(ctx, 0, l.prefix+"*", 100).Iterator()
+			it := c.Scan(ctx, 0, l.backend.prefix+"*", 100).Iterator()
 			var keys []string
 			for it.Next(ctx) {
 				keys = append(keys, it.Val())
@@ -119,7 +119,7 @@ func (f *contentionFixture) cleanup(t *testing.T, l *Limiter) {
 }
 
 func (f *contentionFixture) caller(l *Limiter, i int) *Limiter {
-	return &Limiter{client: f.clients[i%len(f.clients)], prefix: l.prefix, observer: l.observer}
+	return &Limiter{backend: redisBackend{client: f.clients[i%len(f.clients)], prefix: l.backend.prefix}, observer: l.observer}
 }
 
 func contentionWave(t *testing.T, n int, call func(context.Context, int)) {
@@ -163,7 +163,7 @@ func quotaState(t *testing.T, f *contentionFixture, l *Limiter, name string) str
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	s, err := f.clients[0].Get(ctx, l.key(name)).Result()
+	s, err := f.clients[0].Get(ctx, l.backend.key(name)).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func testContentionPolicy(t *testing.T, f *contentionFixture) {
 			winningBurst.Store(burst)
 			return
 		}
-		if n, err := f.clients[0].Exists(ctx, l.key(fmt.Sprintf("side%d", i))).Result(); err != nil || n != 0 {
+		if n, err := f.clients[0].Exists(ctx, l.backend.key(fmt.Sprintf("side%d", i))).Result(); err != nil || n != 0 {
 			t.Errorf("failed request wrote side quota: %d %v", n, err)
 		}
 	})

@@ -220,16 +220,16 @@ func TestFingerprintBindsParameters(t *testing.T) {
 	l, _ := New(&stubScripter{}, "a", "b")
 	a := rule("a", 2, 1)
 	b := rule("b", 2, 1)
-	_, first, _ := l.prepare([]Rule{a, b})
+	_, first := l.backend.prepare([]Rule{a, b})
 	first[0] = int64(1000)
-	_, second, _ := l.prepare([]Rule{b, a})
+	_, second := l.backend.prepare([]Rule{b, a})
 	second[0] = int64(1000)
 	if fingerprint(first) == fingerprint(second) {
 		t.Fatal("order not bound")
 	}
 	a.Rate = 2
 	a.Period = 2 * time.Hour
-	_, equivalent, _ := l.prepare([]Rule{a, b})
+	_, equivalent := l.backend.prepare([]Rule{a, b})
 	equivalent[0] = int64(1000)
 	if fingerprint(first) != fingerprint(equivalent) {
 		t.Fatal("effective policies should match")

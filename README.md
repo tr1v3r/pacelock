@@ -224,3 +224,12 @@ See [contribution/release checks](CONTRIBUTING.md) and [security policy](SECURIT
 Deployment load, memory and failover tools with raw local observations are documented in [deployment validation](docs/deployment-validation.md). These are bounded fixture measurements, not production SLOs.
 
 MIT licensed.
+
+## Internal implementation boundary
+
+The public API remains Redis-specific. `Limiter` handles validation and observer
+callbacks; a private concrete `redisBackend` owns key construction, Lua dispatch,
+reply decoding and Redis error mapping. `redis_protocol.go` holds the existing
+fingerprint and retained-record formats. This is an internal separation, not a
+public Driver API or support for additional backends. Lua, stored data, retry
+policy and client ownership are unchanged. See [design](docs/design.md).

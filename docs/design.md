@@ -32,6 +32,19 @@ NewWithOptions(client redis.Scripter, namespace, domain string, options Options)
 
 对同一额度漏传规则或使用不同 domain，会绕开共享限制。调用层必须负责规则覆盖和命名一致性。
 
+## 内部 Redis 边界
+
+公开构造函数继续接收 `redis.Scripter`，不引入公开 Driver 或新模块。
+内部调用路径为：`Limiter` 校验与观察 → `redisBackend` → Lua/go-redis。
+
+- `pacelock.go` / `idempotency.go` 保留业务参数校验、校验顺序、取消检查和观察回调。
+- `redis_backend.go` 接收已校验的 Rule/ID/保留期，负责 key、脚本参数、派发及结果转换；向调用层返回 Decision/Receipt 和带扣额结果的错误，不暴露 Redis 命令对象。
+- `redis_protocol.go` 集中指纹、保留记录、脚本响应及服务端错误标记的解释。
+- `transport.go` 继续负责已有的具体 Redis 客户端安全检查；构造不联网、不修改配置，Limiter 不关闭客户端。
+
+后端使用私有具体类型，不为单一实现增加可替换接口。Lua 原子边界、GCRA 计算、微秒舍入、v1 key/记录格式、幂等保留期、错误链及 NotCharged/Unknown 分类均保持不变。
+内部测试直接操作 Redis 状态时显式通过 backend 获取 key；固定 v1 协议样本通过公开 API 验证编码与已有记录读取兼容。
+
 ## GCRA 与加权消耗
 
 定义：

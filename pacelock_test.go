@@ -72,10 +72,10 @@ func TestValidationBeforeRedis(t *testing.T) {
 	}
 	a, _ := New(client, "a", "bc")
 	b, _ := New(client, "ab", "c")
-	if a.prefix == b.prefix {
+	if a.backend.prefix == b.backend.prefix {
 		t.Fatal("ambiguous namespace/domain encoding")
 	}
-	if strings.Count(l.key("{injected}:key"), "{") != 1 {
+	if strings.Count(l.backend.key("{injected}:key"), "{") != 1 {
 		t.Fatal("untrusted key changed hash tag")
 	}
 }

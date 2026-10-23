@@ -95,7 +95,7 @@ return {decision, states, expiries, writes, start, finish}
 			}
 			rules[i] = Rule{Name: fmt.Sprintf("q%d", i), Rate: 1, Period: time.Duration(step) * time.Microsecond, Burst: burst, Cost: cost}
 			before[i] = fmt.Sprintf("%d:%d:%d", now+used, step, burst)
-			if err := c.Set(ctx, l.key(rules[i].Name), before[i], 0).Err(); err != nil {
+			if err := c.Set(ctx, l.backend.key(rules[i].Name), before[i], 0).Err(); err != nil {
 				t.Fatal(err)
 			}
 			free := burst*step - used
@@ -113,13 +113,10 @@ return {decision, states, expiries, writes, start, finish}
 				}
 			}
 		}
-		keys, args, err := l.prepare(rules)
-		if err != nil {
-			t.Fatal(err)
-		}
+		keys, args := l.backend.prepare(rules)
 		// The wrapper removes this same-slot test key before running admission,
 		// preserving the production quota KEYS and ARGV exactly.
-		scriptKeys := append(append([]string(nil), keys...), l.key("model-clock"))
+		scriptKeys := append(append([]string(nil), keys...), l.backend.key("model-clock"))
 		reply, err := deterministic.Run(ctx, c, scriptKeys, args...).Slice()
 		if err != nil {
 			t.Fatal(err)
