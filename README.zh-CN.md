@@ -158,4 +158,6 @@ CI 覆盖 Go 1.24/stable、Redis 7.0/7/8 和三主节点 Cluster。
 CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次。
 参见[并发测试契约与复现方法](docs/concurrency-testing.md)。基准结果依赖部署环境，不承诺通用吞吐量或故障切换 SLO。参见[贡献与发布检查](CONTRIBUTING.md)和[安全策略](SECURITY.md)。
 
+部署负载、内存与故障转移工具及本地原始记录见[部署验收说明](docs/deployment-validation.md)。这些结果只证明受控测试环境的行为，不代表生产 SLO。
+
 MIT 许可证。

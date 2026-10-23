@@ -221,4 +221,6 @@ See [concurrency test contracts and reproduction](docs/concurrency-testing.md). 
 results depend on deployment; there is no universal throughput or failover SLO.
 See [contribution/release checks](CONTRIBUTING.md) and [security policy](SECURITY.md).
 
+Deployment load, memory and failover tools with raw local observations are documented in [deployment validation](docs/deployment-validation.md). These are bounded fixture measurements, not production SLOs.
+
 MIT licensed.
