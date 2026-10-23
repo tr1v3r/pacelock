@@ -103,6 +103,8 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
+完整应用接入见[持久化准入示例](examples/durable/README.zh-CN.md)：可信规则装配、attempt ID 持久化、重启恢复，以及上游执行未知时的显式处理。
+
 ## 错误与观测
 
 使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrOutcomeUnknown`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
