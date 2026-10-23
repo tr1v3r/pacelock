@@ -33,7 +33,7 @@ func integration(t *testing.T) (*Limiter, *redis.Client) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		it := c.Scan(ctx, 0, l.prefix+"*", 100).Iterator()
+		it := c.Scan(ctx, 0, l.backend.prefix+"*", 100).Iterator()
 		for it.Next(ctx) {
 			c.Del(ctx, it.Val())
 		}
@@ -55,12 +55,12 @@ func TestRedisWeightedAndAtomic(t *testing.T) {
 	if err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
-	before := c.Get(ctx, l.key("rpm")).Val()
+	before := c.Get(ctx, l.backend.key("rpm")).Val()
 	d, err = l.Allow(ctx, rpm, tokens)
 	if err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) != 1 || d.Limited[0] != "tokens" {
 		t.Fatalf("%+v %v", d, err)
 	}
-	if c.Get(ctx, l.key("rpm")).Val() != before {
+	if c.Get(ctx, l.backend.key("rpm")).Val() != before {
 		t.Fatal("denial partially charged RPM")
 	}
 	tokens.Cost = 1
@@ -71,7 +71,7 @@ func TestRedisWeightedAndAtomic(t *testing.T) {
 	if err != nil || d.Allowed || len(d.Limited) != 2 {
 		t.Fatalf("%+v %v", d, err)
 	}
-	ttl := c.PTTL(ctx, l.key("tokens")).Val()
+	ttl := c.PTTL(ctx, l.backend.key("tokens")).Val()
 	if ttl <= 0 || ttl > 5*time.Hour {
 		t.Fatalf("ttl=%s", ttl)
 	}
@@ -81,7 +81,7 @@ func TestRedisConcurrentInstances(t *testing.T) {
 	l, c := integration(t)
 	second := redis.NewClient(&redis.Options{Addr: c.Options().Addr, MaxRetries: -1})
 	defer second.Close()
-	l2 := &Limiter{client: second, prefix: l.prefix}
+	l2 := &Limiter{backend: redisBackend{client: second, prefix: l.backend.prefix}}
 	var accepted atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
@@ -119,16 +119,16 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 	if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("err=%v", err)
 	}
-	if c.Exists(ctx, l.key("fresh")).Val() != 0 {
+	if c.Exists(ctx, l.backend.key("fresh")).Val() != 0 {
 		t.Fatal("policy error partially wrote")
 	}
-	if err := c.Set(ctx, l.key("existing"), "broken", time.Minute).Err(); err != nil {
+	if err := c.Set(ctx, l.backend.key("existing"), "broken", time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) {
 		t.Fatalf("err=%v", err)
 	}
-	if c.Exists(ctx, l.key("fresh")).Val() != 0 {
+	if c.Exists(ctx, l.backend.key("fresh")).Val() != 0 {
 		t.Fatal("state error partially wrote")
 	}
 }
@@ -144,7 +144,7 @@ func TestRedisRefillAndExpiry(t *testing.T) {
 		t.Fatalf("%+v %v", d, err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for c.Exists(ctx, l.key(r.Name)).Val() != 0 {
+	for c.Exists(ctx, l.backend.key(r.Name)).Val() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("idle quota did not expire")
 		}
@@ -162,8 +162,8 @@ func TestRedisIndependentDomainsAndCanceledCall(t *testing.T) {
 	if _, err := l.Allow(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	other, _ := New(c, "another-app", l.prefix)
-	t.Cleanup(func() { c.Del(ctx, other.key(r.Name)) })
+	other, _ := New(c, "another-app", l.backend.prefix)
+	t.Cleanup(func() { c.Del(ctx, other.backend.key(r.Name)) })
 	if d, err := other.Allow(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
@@ -172,7 +172,7 @@ func TestRedisIndependentDomainsAndCanceledCall(t *testing.T) {
 	if _, err := l.Allow(canceled, rule("untouched", 1, 1)); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if c.Exists(ctx, l.key("untouched")).Val() != 0 {
+	if c.Exists(ctx, l.backend.key("untouched")).Val() != 0 {
 		t.Fatal("pre-canceled call wrote state")
 	}
 }

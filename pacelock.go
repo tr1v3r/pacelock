@@ -11,11 +11,8 @@ package pacelock
 
 import (
 	"context"
-	"crypto/sha256"
-	_ "embed"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -66,8 +63,7 @@ type Decision struct {
 // Limiter is safe for concurrent use when its Redis client is safe for concurrent use.
 // It neither owns nor closes the client. One domain is one Redis Cluster hash slot.
 type Limiter struct {
-	client   redis.Scripter
-	prefix   string
+	backend  redisBackend
 	observer Observer
 }
 
@@ -89,31 +85,11 @@ func NewWithOptions(client redis.Scripter, namespace, domain string, options Opt
 	if nilClient(client) || namespace == "" || domain == "" || len(namespace) > 256 || len(domain) > 256 {
 		return nil, fmt.Errorf("%w: client, namespace and domain are required (names <= 256 bytes)", ErrInvalid)
 	}
-	if err := validateTransport(client); err != nil {
+	backend, err := newRedisBackend(client, namespace, domain)
+	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-	return &Limiter{client: client, prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
-}
-
-func nilClient(client redis.Scripter) bool {
-	if client == nil {
-		return true
-	}
-	v := reflect.ValueOf(client)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return v.IsNil()
-	}
-	return false
-}
-
-//go:embed gcra.lua
-var source string
-var admissionScript = redis.NewScript(source)
-
-func (l *Limiter) key(name string) string {
-	return fmt.Sprintf("%s%x", l.prefix, sha256.Sum256([]byte(name)))
+	return &Limiter{backend: backend, observer: options.Observer}, nil
 }
 
 func interval(r Rule) (int64, error) {
@@ -144,23 +120,10 @@ func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, 
 	if err := l.ready(ctx); err != nil {
 		return Decision{}, failure("allow", NotCharged, err)
 	}
-	keys, args, err := l.prepare(rules)
-	if err != nil {
+	if err := Validate(rules...); err != nil {
 		return Decision{}, failure("allow", NotCharged, err)
 	}
-	cmd := admissionScript.Run(ctx, l.client, keys, args...)
-	if err := cmd.Err(); err != nil {
-		return Decision{}, scriptFailure("allow", err)
-	}
-	values, err := cmd.Int64Slice()
-	if err != nil {
-		return Decision{}, failure("allow", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
-	}
-	d, err := decodeDecision(values, namesOf(rules))
-	if err != nil {
-		return Decision{}, failure("allow", Unknown, err)
-	}
-	return d, nil
+	return l.backend.allow(ctx, rules)
 }
 
 // Validate checks all rule and effective-policy bounds without contacting Redis.
@@ -182,52 +145,8 @@ func Validate(rules ...Rule) error {
 }
 
 func (l *Limiter) ready(ctx context.Context) error {
-	if ctx == nil || l == nil || l.prefix == "" || nilClient(l.client) {
+	if ctx == nil || l == nil || !l.backend.initialized() {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
-}
-
-func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
-	if err := Validate(rules...); err != nil {
-		return nil, nil, err
-	}
-	keys := make([]string, len(rules))
-	args := make([]interface{}, 0, 2+len(rules)*4)
-	args = append(args, int64(0), "")
-	for i, r := range rules {
-		step, _ := interval(r)
-		keys[i] = l.key(r.Name)
-		args = append(args, step, r.Burst, r.Cost, r.Name)
-	}
-	return keys, args, nil
-}
-
-func namesOf(rules []Rule) []string {
-	names := make([]string, len(rules))
-	for i := range rules {
-		names[i] = rules[i].Name
-	}
-	return names
-}
-
-func decodeDecision(values []int64, names []string) (Decision, error) {
-	if len(names) == 0 || len(names) > MaxRules || len(values) != len(names)+2 || (values[0] != 0 && values[0] != 1) || values[1] < 0 || values[1] > MaxHorizon.Microseconds() {
-		return Decision{}, fmt.Errorf("%w: unexpected script response", ErrState)
-	}
-	d := Decision{Allowed: values[0] == 1, RetryAfter: time.Duration(values[1]) * time.Microsecond}
-	seen := make(map[string]bool, len(names))
-	for i, name := range names {
-		if name == "" || len(name) > 256 || seen[name] || (values[i+2] != 0 && values[i+2] != 1) {
-			return Decision{}, fmt.Errorf("%w: invalid quota in script response", ErrState)
-		}
-		seen[name] = true
-		if values[i+2] == 1 {
-			d.Limited = append(d.Limited, name)
-		}
-	}
-	if (d.Allowed && (d.RetryAfter != 0 || len(d.Limited) != 0)) || (!d.Allowed && (d.RetryAfter == 0 || len(d.Limited) == 0)) {
-		return Decision{}, fmt.Errorf("%w: inconsistent script response", ErrState)
-	}
-	return d, nil
 }

@@ -161,3 +161,11 @@ CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次
 部署负载、内存与故障转移工具及本地原始记录见[部署验收说明](docs/deployment-validation.md)。这些结果只证明受控测试环境的行为，不代表生产 SLO。
 
 MIT 许可证。
+
+## 内部实现边界
+
+公开 API 仍面向 Redis。`Limiter` 负责参数校验和观察回调；私有具体类型
+`redisBackend` 负责 key 构造、Lua 派发、响应解析及 Redis 错误映射。
+`redis_protocol.go` 集中已有的指纹与保留记录格式。这是内部职责分离，
+不提供公开 Driver API，也不代表支持其他后端。Lua、存储格式、重试策略
+和客户端所有权保持不变，详见[设计说明](docs/design.md)。

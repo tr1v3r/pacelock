@@ -81,7 +81,7 @@ func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if n, err := f.clients[0].Exists(ctx, l.key("untouched"), l.attemptKey("never")).Result(); err != nil || n != 0 {
+	if n, err := f.clients[0].Exists(ctx, l.backend.key("untouched"), l.backend.attemptKey("never")).Result(); err != nil || n != 0 {
 		t.Fatalf("pre-dispatch errors wrote %d keys: %v", n, err)
 	}
 	l.observer = nil // All concurrent calls have joined.
@@ -111,7 +111,7 @@ func testContentionLookup(t *testing.T, f *contentionFixture) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for i := 0; i < 100; i++ {
-		if err := f.clients[0].PExpire(ctx, l.attemptKey(fmt.Sprintf("id%d", i)), 30*time.Second).Err(); err != nil {
+		if err := f.clients[0].PExpire(ctx, l.backend.attemptKey(fmt.Sprintf("id%d", i)), 30*time.Second).Err(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -134,7 +134,7 @@ func testContentionLookup(t *testing.T, f *contentionFixture) {
 		t.Fatal("replay/lookup changed quota")
 	}
 	for i := 0; i < 100; i++ {
-		ttl, err := f.clients[0].PTTL(ctx, l.attemptKey(fmt.Sprintf("id%d", i))).Result()
+		ttl, err := f.clients[0].PTTL(ctx, l.backend.attemptKey(fmt.Sprintf("id%d", i))).Result()
 		if err != nil || ttl <= 0 || ttl > 30*time.Second {
 			t.Fatalf("record TTL changed: %s %v", ttl, err)
 		}
@@ -155,20 +155,17 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			want, outcome := ErrState, Unknown
 			switch kind {
 			case "pending":
-				_, args, err := l.prepare(rules)
-				if err != nil {
-					t.Fatal(err)
-				}
+				_, args := l.backend.prepare(rules)
 				args[0] = time.Minute.Milliseconds()
-				seedErr = f.clients[0].Set(ctx, l.attemptKey("id"), "P1|"+fingerprint(args), time.Minute).Err()
+				seedErr = f.clients[0].Set(ctx, l.backend.attemptKey("id"), "P1|"+fingerprint(args), time.Minute).Err()
 				want = ErrOutcomeUnknown
 			case "record":
-				seedErr = f.clients[0].Set(ctx, l.attemptKey("id"), "broken", time.Minute).Err()
+				seedErr = f.clients[0].Set(ctx, l.backend.attemptKey("id"), "broken", time.Minute).Err()
 			case "quota":
-				seedErr = f.clients[0].Set(ctx, l.key("side"), "broken", time.Minute).Err()
+				seedErr = f.clients[0].Set(ctx, l.backend.key("side"), "broken", time.Minute).Err()
 				outcome = NotCharged
 			case "wrong_type":
-				seedErr = f.clients[0].LPush(ctx, l.key("side"), "wrongtype").Err()
+				seedErr = f.clients[0].LPush(ctx, l.backend.key("side"), "wrongtype").Err()
 				outcome = NotCharged
 			}
 			if seedErr != nil {
@@ -190,10 +187,10 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 				t.Fatal("failed concurrent requests debited healthy quota")
 			}
 			if kind == "pending" || kind == "record" {
-				if n, err := f.clients[0].Exists(ctx, l.key("side")).Result(); err != nil || n != 0 {
+				if n, err := f.clients[0].Exists(ctx, l.backend.key("side")).Result(); err != nil || n != 0 {
 					t.Fatalf("wrote side quota: %d %v", n, err)
 				}
-			} else if n, err := f.clients[0].Exists(ctx, l.attemptKey("id")).Result(); err != nil || n != 0 {
+			} else if n, err := f.clients[0].Exists(ctx, l.backend.attemptKey("id")).Result(); err != nil || n != 0 {
 				t.Fatalf("pre-write error created record: %d %v", n, err)
 			}
 		})
@@ -233,7 +230,7 @@ func testContentionLostResponses(t *testing.T, f *contentionFixture) {
 			l := f.limiter(t)
 			r := contentionRule("q", 100, 1)
 			wrapped := &concurrentResponseLoss{Scripter: f.clients[0], loss: loss.err}
-			broken := &Limiter{client: wrapped, prefix: l.prefix}
+			broken := &Limiter{backend: redisBackend{client: wrapped, prefix: l.backend.prefix}}
 			contentionWave(t, 400, func(ctx context.Context, i int) {
 				_, err := broken.AllowOnce(ctx, fmt.Sprintf("id%d", i%100), time.Minute, r)
 				if !errors.Is(err, loss.err) || OutcomeOf(err) != Unknown {
@@ -267,7 +264,7 @@ func testContentionSmallPool(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
 	small := contentionClient(f.cluster, 1)
 	defer small.Close()
-	current := &Limiter{client: small, prefix: l.prefix}
+	current := &Limiter{backend: redisBackend{client: small, prefix: l.backend.prefix}}
 	var admitted atomic.Int64
 	contentionWave(t, 500, func(ctx context.Context, i int) {
 		d, err := current.Allow(ctx, contentionRule("q", 73, 1))
@@ -372,7 +369,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 			if got := admitted.Load(); got < r.Burst || got > bound {
 				t.Fatalf("wave %d admitted %d outside [%d,%d]", wave, got, r.Burst, bound)
 			}
-			waitForKeyExpiry(t, f, l.key("q"))
+			waitForKeyExpiry(t, f, l.backend.key("q"))
 		}
 	})
 	t.Run("record_expiry", func(t *testing.T) {
@@ -384,10 +381,10 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 		if err != nil || !d.Allowed {
 			t.Fatalf("%+v %v", d, err)
 		}
-		if err := f.clients[0].PExpire(ctx, l.attemptKey("same"), time.Millisecond).Err(); err != nil {
+		if err := f.clients[0].PExpire(ctx, l.backend.attemptKey("same"), time.Millisecond).Err(); err != nil {
 			t.Fatal(err)
 		}
-		waitForKeyExpiry(t, f, l.attemptKey("same"))
+		waitForKeyExpiry(t, f, l.backend.attemptKey("same"))
 		var originals atomic.Int64
 		contentionWave(t, 500, func(ctx context.Context, i int) {
 			d, err := f.caller(l, i).AllowOnce(ctx, "same", time.Minute, r)
@@ -442,7 +439,7 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := &Limiter{client: small, prefix: l.prefix}
+	current := &Limiter{backend: redisBackend{client: small, prefix: l.backend.prefix}}
 	contentionWave(t, 100, func(parent context.Context, i int) {
 		deadline, cancel := context.WithTimeout(parent, 100*time.Millisecond)
 		defer cancel()
@@ -453,7 +450,7 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	})
 	// The SDK conservatively reports Unknown after dispatch; the fixture can
 	// independently prove that these particular requests never got a connection.
-	if n, err := f.clients[0].Exists(ctx, l.key("q"), l.attemptKey("blocked")).Result(); err != nil || n != 0 {
+	if n, err := f.clients[0].Exists(ctx, l.backend.key("q"), l.backend.attemptKey("blocked")).Result(); err != nil || n != 0 {
 		t.Fatalf("blocked pool wrote %d keys: %v", n, err)
 	}
 	release()

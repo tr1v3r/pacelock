@@ -70,7 +70,7 @@ func TestRedisClusterLostReply(t *testing.T) {
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if err := client.Del(ctx, l.key("q")).Err(); err != nil {
+				if err := client.Del(ctx, l.backend.key("q")).Err(); err != nil {
 					t.Error(err)
 				}
 			}()

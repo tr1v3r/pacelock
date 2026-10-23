@@ -16,6 +16,11 @@
 - Constructor retry-policy, Cluster post-execution lost-reply and minimum-ACL
   regression tests.
 
+### Changed
+
+- Separate public validation/observation from the private Redis backend and wire
+  protocol helpers. Public APIs, Lua, stored data and retry behavior are unchanged.
+
 ### Fixed
 
 - Reject typed-nil clients, nil contexts and uninitialized limiters without panic.

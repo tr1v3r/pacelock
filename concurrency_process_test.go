@@ -34,7 +34,7 @@ func testContentionProcesses(t *testing.T, f *contentionFixture) {
 			done := make(chan processResult, 4)
 			for i := 0; i < 4; i++ {
 				cmd := exec.CommandContext(ctx, exe, "-test.run=^TestConcurrencyProcessWorker$", "-test.timeout=35s")
-				cmd.Env = append(os.Environ(), "PACELOCK_CONTENTION_WORKER="+dir, "PACELOCK_CONTENTION_INDEX="+strconv.Itoa(i), "PACELOCK_CONTENTION_PREFIX="+l.prefix, "PACELOCK_CONTENTION_CLUSTER="+strconv.FormatBool(f.cluster), "PACELOCK_CONTENTION_MODE="+mode)
+				cmd.Env = append(os.Environ(), "PACELOCK_CONTENTION_WORKER="+dir, "PACELOCK_CONTENTION_INDEX="+strconv.Itoa(i), "PACELOCK_CONTENTION_PREFIX="+l.backend.prefix, "PACELOCK_CONTENTION_CLUSTER="+strconv.FormatBool(f.cluster), "PACELOCK_CONTENTION_MODE="+mode)
 				go func(i int) { out, err := cmd.CombinedOutput(); done <- processResult{i, out, err} }(i)
 			}
 			// Always join children before fixture and temporary-file cleanup, even if
@@ -119,7 +119,7 @@ func TestConcurrencyProcessWorker(t *testing.T) {
 	if err := c.Ping(ctx).Err(); err != nil {
 		t.Fatal(err)
 	}
-	l := &Limiter{client: c, prefix: os.Getenv("PACELOCK_CONTENTION_PREFIX")}
+	l := &Limiter{backend: redisBackend{client: c, prefix: os.Getenv("PACELOCK_CONTENTION_PREFIX")}}
 	index := os.Getenv("PACELOCK_CONTENTION_INDEX")
 	if err := os.WriteFile(filepath.Join(dir, "ready"+index), nil, 0600); err != nil {
 		t.Fatal(err)
