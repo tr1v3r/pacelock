@@ -78,7 +78,7 @@ type Limiter struct {
 // ErrInvalid. Disabling Cluster redirects also disables automatic MOVED/ASK
 // recovery. go-redis clients must be initialized with their constructors; their
 // zero values are unsupported. Custom Scripters, hooks and node factories must
-// not replay commands.
+// not replay commands. redis.Ring is unsupported and returns ErrInvalid.
 func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
 	return NewWithOptions(client, namespace, domain, Options{})
 }

@@ -60,6 +60,8 @@ if !decision.Allowed {
 
 `Allow` 为本次尝试消耗容量，**不具备幂等性**。准入后业务失败不会退还容量。Limiter 不拥有或关闭 Redis 客户端；构造函数不建立连接、不修改客户端配置。客户端必须通过 go-redis 构造函数初始化，不支持零值客户端结构体。对这些已初始化的具体 `*redis.Client` / `*redis.ClusterClient`，`New` 和 `NewWithOptions` 在重试配置不安全时于本地返回 `ErrInvalid`。请先配置客户端再传入，不要在之后修改其 options。
 
+不支持 `redis.Ring`，即使关闭重试也会返回 `ErrInvalid`。自定义 Scripter 包装仍须自行保证重放与路由行为。
+
 使用 Cluster 时，将上方客户端构造替换为：
 
 ```go

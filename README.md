@@ -78,6 +78,8 @@ instances, `New` and `NewWithOptions` reject unsafe retry settings locally with
 `ErrInvalid`. Configure the client before passing it in; do not mutate its options
 afterward.
 
+`redis.Ring` is unsupported and rejected with `ErrInvalid`, including when retries are disabled. Custom Scripter wrappers remain responsible for their replay and routing behavior.
+
 For Cluster, replace the client construction above with:
 
 ```go
