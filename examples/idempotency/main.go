@@ -18,7 +18,7 @@ func main() {
 	if addr == "" {
 		addr = "localhost:6379"
 	}
-	client := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1, ContextTimeoutEnabled: true})
+	client := redis.NewClient(&redis.Options{Addr: addr, ContextTimeoutEnabled: true})
 	defer client.Close()
 	limiter, err := pacelock.NewWithOptions(client, "example", "account", pacelock.Options{Observer: func(_ context.Context, event pacelock.Event) {
 		log.Printf("operation=%s result=%s duration=%s replayed=%t", event.Operation, event.Result, event.Duration, event.Replayed)

@@ -43,7 +43,7 @@ func TestNewClientRetryOptions(t *testing.T) {
 					t.Fatalf("unexpected go-redis normalization: %d", normalized)
 				}
 				l, err := transportConstructor(client, withOptions)
-				if retries == -1 {
+				if retries >= -1 {
 					if err != nil || l == nil {
 						t.Fatalf("safe client rejected: %v", err)
 					}
@@ -61,7 +61,7 @@ func TestNewClientRetryOptions(t *testing.T) {
 func TestNewClusterRetryOptions(t *testing.T) {
 	for _, withOptions := range []bool{false, true} {
 		for _, redirects := range []int{-2, -1, 0, 1, 3} {
-			for _, retries := range []int{-2, -1, 0, 1} {
+			for _, retries := range []int{-2, -1, 0, 1, 3} {
 				t.Run(fmt.Sprintf("options=%t/redirects=%d/retries=%d", withOptions, redirects, retries), func(t *testing.T) {
 					var dials, slots, nodes atomic.Int64
 					options := &redis.ClusterOptions{
@@ -95,7 +95,7 @@ func TestNewClusterRetryOptions(t *testing.T) {
 						t.Fatalf("unexpected go-redis normalization: redirects=%d retries=%d", normalizedRedirects, normalizedRetries)
 					}
 					l, err := transportConstructor(client, withOptions)
-					if redirects == -1 && (retries == -1 || retries == 0) {
+					if redirects >= -1 && retries >= -1 {
 						if err != nil || l == nil {
 							t.Fatalf("safe client rejected: %v", err)
 						}
@@ -139,7 +139,11 @@ func (h *redirectHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis
 	return next
 }
 func (h *redirectHook) ProcessHook(redis.ProcessHook) redis.ProcessHook {
-	return func(context.Context, redis.Cmder) error {
+	return func(_ context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "command" {
+			cmd.(*redis.CommandsInfoCmd).SetVal(map[string]*redis.CommandInfo{})
+			return nil
+		}
 		h.calls.Add(1)
 		return h.err
 	}
@@ -191,5 +195,25 @@ func TestNewRejectsRing(t *testing.T) {
 	var ring *redis.Ring
 	if l, err := New(ring, "test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil Ring accepted: %v", err)
+	}
+}
+
+func TestClusterRedirectBudget(t *testing.T) {
+	hook := &redirectHook{err: serverError("MOVED 1 127.0.0.1:1")}
+	client := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs: []string{"127.0.0.1:1"}, MaxRetries: -1, MaxRedirects: 2,
+		ClusterSlots: func(context.Context) ([]redis.ClusterSlot, error) {
+			return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: "127.0.0.1:1"}}}}, nil
+		},
+		NewClient: func(o *redis.Options) *redis.Client { c := redis.NewClient(o); c.AddHook(hook); return c },
+	})
+	defer client.Close()
+	limiter, err := New(client, "budget", "domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.Allow(context.Background(), rule("q", 1, 1))
+	if !errors.Is(err, ErrBackend) || hook.calls.Load() != 3 {
+		t.Fatalf("unbounded redirects: calls=%d err=%v", hook.calls.Load(), err)
 	}
 }

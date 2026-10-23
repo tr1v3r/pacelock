@@ -1,6 +1,7 @@
 package pacelock
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
@@ -15,18 +16,64 @@ func validateTransport(client redis.Scripter) error {
 	case *redis.Ring:
 		return fmt.Errorf("%w: redis.Ring is unsupported; use redis.Client or redis.ClusterClient", ErrInvalid)
 	case *redis.Client:
-		// NewClient converts MaxRetries: -1 to 0; its default becomes 3.
-		if c.Options() == nil || c.Options().MaxRetries != 0 {
-			return fmt.Errorf("%w: redis.Client requires MaxRetries: -1", ErrInvalid)
+		// NoRetry protects script commands independently of the client retry budget.
+		// Negative normalized values are invalid (input -1 normalizes to zero).
+		if c.Options() == nil || c.Options().MaxRetries < 0 {
+			return fmt.Errorf("%w: redis.Client requires a nonnegative normalized retry budget", ErrInvalid)
 		}
 	case *redis.ClusterClient:
-		// Cluster's outer loop retries network failures as well as MOVED/ASK.
-		// MaxRedirects: -1 becomes 0. Node MaxRetries defaults to -1 here and
-		// is normalized again by NewClient when each node is instantiated.
+		// NoRetry suppresses ambiguous replay, while the redirect budget permits
+		// safe MOVED/ASK recovery. Only reject unsupported negative budgets.
 		options := c.Options()
-		if options == nil || options.MaxRedirects != 0 || options.MaxRetries != -1 {
-			return fmt.Errorf("%w: redis.ClusterClient requires MaxRedirects: -1 and MaxRetries: -1", ErrInvalid)
+		if options == nil || options.MaxRedirects < 0 || options.MaxRetries < -1 {
+			return fmt.Errorf("%w: redis.ClusterClient requires MaxRetries >= -1 and a nonnegative normalized redirect budget", ErrInvalid)
 		}
 	}
 	return nil
+}
+
+// noRetryScripter adapts Pacelock's internal EVAL/EVALSHA calls for the supported
+// go-redis clients. It retains Script.Run cache-miss handling and safe MOVED/ASK
+// redirects while preventing ambiguous replay, including within ASK pipelines.
+type noRetryScripter struct {
+	redis.Scripter
+	process func(context.Context, redis.Cmder) error
+}
+
+// noRetryCmd changes only the command replay policy. Routing and execution
+// remain owned by go-redis.
+type noRetryCmd struct{ *redis.Cmd }
+
+func (noRetryCmd) NoRetry() bool { return true }
+
+// safeScripter deliberately recognizes concrete clients: a custom transport
+// exposing Process is not necessarily guaranteed to honor NoRetry.
+func safeScripter(c redis.Scripter) redis.Scripter {
+	switch c := c.(type) {
+	case *redis.Client:
+		return noRetryScripter{c, c.Process}
+	case *redis.ClusterClient:
+		return noRetryScripter{c, c.Process}
+	default:
+		return c // Custom transports own their replay policy.
+	}
+}
+func (s noRetryScripter) send(ctx context.Context, command, script string, keys []string, args ...interface{}) *redis.Cmd {
+	values := make([]interface{}, 0, 3+len(keys)+len(args))
+	values = append(values, command, script, len(keys))
+	for _, key := range keys {
+		values = append(values, key)
+	}
+	values = append(values, args...)
+	cmd := redis.NewCmd(ctx, values...)
+	cmd.SetFirstKeyPos(3)
+	err := s.process(ctx, noRetryCmd{cmd})
+	cmd.SetErr(err)
+	return cmd
+}
+func (s noRetryScripter) Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd {
+	return s.send(ctx, "eval", script, keys, args...)
+}
+func (s noRetryScripter) EvalSha(ctx context.Context, hash string, keys []string, args ...interface{}) *redis.Cmd {
+	return s.send(ctx, "evalsha", hash, keys, args...)
 }

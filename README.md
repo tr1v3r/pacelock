@@ -44,7 +44,6 @@ reproducible builds; `@dev` moves as development continues and is not a stable r
 ```go
 client := redis.NewClient(&redis.Options{
     Addr: "localhost:6379",
-    MaxRetries: -1,
     ContextTimeoutEnabled: true,
 })
 defer client.Close()
@@ -74,9 +73,9 @@ failure after admission does not refund capacity. The limiter neither owns nor
 closes the Redis client. Constructors do not connect or change client settings.
 Use go-redis constructors to initialize clients; zero-value client structs are
 unsupported. For these initialized concrete `*redis.Client` / `*redis.ClusterClient`
-instances, `New` and `NewWithOptions` reject unsafe retry settings locally with
-`ErrInvalid`. Configure the client before passing it in; do not mutate its options
-afterward.
+instances, default, positive and disabled (`-1`) `MaxRetries` budgets are supported.
+Unsupported negative budgets return `ErrInvalid`. Configure the client before
+passing it in; do not mutate its options afterward.
 
 `redis.Ring` is unsupported and rejected with `ErrInvalid`, including when retries are disabled. Custom Scripter wrappers remain responsible for their replay and routing behavior.
 
@@ -85,19 +84,19 @@ For Cluster, replace the client construction above with:
 ```go
 client := redis.NewClusterClient(&redis.ClusterOptions{
     Addrs: []string{"localhost:17000", "localhost:17001", "localhost:17002"},
-    MaxRetries: -1,
-    MaxRedirects: -1,
+    MaxRedirects: 3,
     ContextTimeoutEnabled: true,
 })
 defer client.Close()
 ```
 
-`MaxRetries` alone does not disable Cluster's outer retry loop; `MaxRedirects: -1`
-is also required. This disables transparent `MOVED`/`ASK` retries too: topology
-changes can surface errors instead of being retried. See [operations](docs/operations.md)
-for the availability tradeoff. Custom `redis.Scripter` wrappers, hooks, Cluster
-`NewClient` factories and proxies remain the caller's responsibility to audit;
-constructor checks cannot prove that these layers never replay commands.
+Pacelock marks commands on concrete Client/ClusterClient instances with go-redis
+`NoRetry`. This prevents ambiguous network replay while allowing bounded MOVED/ASK
+recovery, independently of `MaxRetries`. Other commands on a shared client keep
+the configured retry policy. A default or positive Cluster MaxRedirects budget
+is supported;
+`MaxRedirects: -1` still disables redirects. Custom Scripter wrappers, hooks,
+node factories and proxies must preserve this contract. See [operations](docs/operations.md).
 
 Every instance must use the same namespace, domain, quota names and effective
 policies. Include all applicable account/model/tenant quotas in every call; omitted
@@ -179,7 +178,8 @@ panics propagate. Do not label metrics with error text or user identifiers. See
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.
-- Disable client retries (`MaxRetries: -1`; also `MaxRedirects: -1` for Cluster).
+- SDK script commands disable ambiguous retries with `NoRetry`; client retry
+  settings need not be disabled, and Cluster redirects may remain enabled.
   Only `NOSCRIPT` falls back from `EVALSHA` to `EVAL`. Constructor validation is
   not a substitute for auditing custom clients, hooks, factories and proxies.
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot
