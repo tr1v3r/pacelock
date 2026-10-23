@@ -47,27 +47,41 @@ var (
 // Burst is the total immediately available capacity, including the first unit.
 // The same quota name must use the same policy across all callers in a domain.
 type Rule struct {
-	Name   string
-	Rate   int64
+	// Name identifies a quota within the domain; it must contain 1..256 bytes.
+	Name string
+	// Rate is the positive number of units replenished per Period.
+	Rate int64
+	// Period is positive and at most MaxHorizon; per-unit intervals round up to microseconds.
 	Period time.Duration
-	Burst  int64
-	Cost   int64
+	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
+	Burst int64
+	// Cost is the known charge for this attempt, from 1 through Burst.
+	Cost int64
 }
 
 // Decision describes an admission attempt. RetryAfter is advisory, not a reservation.
 // On denial, Limited contains all dimensions that blocked admission.
+// RetryAfter can become stale immediately as other callers consume quota.
 // On error the returned Decision must not be used.
 type Decision struct {
-	Allowed    bool
+	// Allowed reports whether all quotas admitted the charge; denial consumes no quota.
+	Allowed bool
+	// RetryAfter is the longest required wait at decision time; zero means allowed.
 	RetryAfter time.Duration
-	Limited    []string
+	// Limited lists blocking quota names in input order; it is empty when allowed.
+	Limited []string
 }
 
 // Limiter is safe for concurrent use when its Redis client is safe for concurrent use.
 // It neither owns nor closes the client. One domain is one Redis Cluster hash slot.
+// Construct it with New or NewWithOptions; nil/zero receivers and nil operation
+// contexts return ErrInvalid wrapped in Error before dispatch.
 type Limiter struct {
-	client   redis.Scripter
-	prefix   string
+	// client is the caller-owned transport, configured to avoid command replay.
+	client redis.Scripter
+	// prefix hashes namespace and domain into a shared Redis Cluster hash tag.
+	prefix string
+	// observer is an optional synchronous callback shared by concurrent invocations.
 	observer Observer
 }
 
@@ -84,6 +98,7 @@ func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
 }
 
 // NewWithOptions constructs a limiter with optional synchronous observation.
+// The client, namespace and domain requirements are the same as New.
 // It does not connect to Redis or change the supplied client's configuration.
 func NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error) {
 	if nilClient(client) || namespace == "" || domain == "" || len(namespace) > 256 || len(domain) > 256 {
@@ -96,6 +111,7 @@ func NewWithOptions(client redis.Scripter, namespace, domain string, options Opt
 	return &Limiter{client: client, prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
 }
 
+// nilClient detects nil interfaces and typed nil transports without invoking them.
 func nilClient(client redis.Scripter) bool {
 	if client == nil {
 		return true
@@ -108,14 +124,20 @@ func nilClient(client redis.Scripter) bool {
 	return false
 }
 
+// source contains the versioned atomic admission and receipt protocol.
+//
 //go:embed gcra.lua
 var source string
+
+// admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
 var admissionScript = redis.NewScript(source)
 
+// key hashes a quota name while preserving the domain hash slot.
 func (l *Limiter) key(name string) string {
 	return fmt.Sprintf("%s%x", l.prefix, sha256.Sum256([]byte(name)))
 }
 
+// interval validates a rule and returns its conservative per-unit refill time in microseconds.
 func interval(r Rule) (int64, error) {
 	if r.Name == "" || len(r.Name) > 256 || r.Rate <= 0 || r.Period <= 0 || r.Period > MaxHorizon || r.Burst <= 0 || r.Cost <= 0 || r.Cost > r.Burst {
 		return 0, fmt.Errorf("%w: invalid quota %q; require positive rate/period/burst and 0 < cost <= burst", ErrInvalid, r.Name)
@@ -137,7 +159,9 @@ func interval(r Rule) (int64, error) {
 
 // Allow immediately checks and charges every rule or denies without charging any.
 // It does not wait, queue work, reserve future capacity, or retry transport errors.
+// Rules must satisfy Validate. A denial returns Allowed=false with a nil error.
 // A timeout or cancellation after dispatch can leave the debit outcome unknown.
+// On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
 	finish := l.observe(ctx, "allow", len(rules))
 	defer func() { finish(decision, false, err) }()
@@ -164,6 +188,8 @@ func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, 
 }
 
 // Validate checks all rule and effective-policy bounds without contacting Redis.
+// Supply 1..MaxRules rules with unique names. It wraps ErrInvalid on failure;
+// it cannot detect conflicts with policies already stored in Redis.
 func Validate(rules ...Rule) error {
 	if len(rules) == 0 || len(rules) > MaxRules {
 		return fmt.Errorf("%w: require 1..%d rules", ErrInvalid, MaxRules)
@@ -181,6 +207,7 @@ func Validate(rules ...Rule) error {
 	return nil
 }
 
+// ready rejects unusable receivers and contexts before any backend request.
 func (l *Limiter) ready(ctx context.Context) error {
 	if ctx == nil || l == nil || l.prefix == "" || nilClient(l.client) {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
@@ -188,6 +215,7 @@ func (l *Limiter) ready(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// prepare validates ordered rules and encodes keys and arguments for ordinary admission.
 func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 	if err := Validate(rules...); err != nil {
 		return nil, nil, err
@@ -203,6 +231,7 @@ func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 	return keys, args, nil
 }
 
+// namesOf copies quota names in request order for response validation.
 func namesOf(rules []Rule) []string {
 	names := make([]string, len(rules))
 	for i := range rules {
@@ -211,6 +240,7 @@ func namesOf(rules []Rule) []string {
 	return names
 }
 
+// decodeDecision validates the script result and converts microsecond waits to durations.
 func decodeDecision(values []int64, names []string) (Decision, error) {
 	if len(names) == 0 || len(names) > MaxRules || len(values) != len(names)+2 || (values[0] != 0 && values[0] != 1) || values[1] < 0 || values[1] > MaxHorizon.Microseconds() {
 		return Decision{}, fmt.Errorf("%w: unexpected script response", ErrState)

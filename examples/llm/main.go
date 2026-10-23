@@ -11,6 +11,7 @@ import (
 	"github.com/tr1v3r/pacelock"
 )
 
+// main checks request and known-input-token budgets before the placeholder model call.
 func main() {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
