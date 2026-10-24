@@ -23,12 +23,18 @@ const (
 // On any error, ignore the returned decision. Unknown must not trigger a blind
 // retry of Allow or an automatic refund.
 type Error struct {
-	Op      string
+	// Op identifies the invocation: allow, allow_once, or lookup.
+	Op string
+	// Outcome describes accounting certainty; it does not resolve earlier ambiguous attempts.
 	Outcome Outcome
-	Err     error
+	// Err is the underlying cause, available through errors.Is and errors.As.
+	Err error
 }
 
+// Error formats the operation, outcome and underlying cause.
 func (e *Error) Error() string { return fmt.Sprintf("pacelock: %s (%s): %v", e.Op, e.Outcome, e.Err) }
+
+// Unwrap exposes the underlying cause for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.Err }
 
 // OutcomeOf returns Unknown for errors that do not carry SDK outcome metadata.
@@ -41,10 +47,12 @@ func OutcomeOf(err error) Outcome {
 	return Unknown
 }
 
+// failure attaches accounting metadata without discarding error identity.
 func failure(op string, outcome Outcome, err error) error {
 	return &Error{Op: op, Outcome: outcome, Err: err}
 }
 
+// scriptFailure recognizes SDK pre-write errors and conservatively classifies all other failures.
 func scriptFailure(op string, err error) error {
 	// Only exact SDK-owned pre-write error tokens are known not to debit.
 	var server redis.Error

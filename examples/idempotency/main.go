@@ -13,6 +13,7 @@ import (
 	"github.com/tr1v3r/pacelock"
 )
 
+// main records and replays one admission, demonstrating lookup after an uncertain response.
 func main() {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {

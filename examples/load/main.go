@@ -21,13 +21,21 @@ import (
 	"github.com/tr1v3r/pacelock"
 )
 
+// metrics aggregates calls and a bounded uniform latency sample across concurrent workers.
 type metrics struct {
+	// Mutex protects all counters, the latency reservoir and its random source.
 	sync.Mutex
+	// Calls counts completions; Allowed/Denied count successful decisions (Denied includes missing lookups).
+	// Errors counts failures; Unknown and ContextErrors count their outcome/context subsets.
+	// Found counts successful lookups; Replayed counts retained AllowOnce decisions.
 	Calls, Allowed, Denied, Errors, Unknown, Found, Replayed, ContextErrors int64
-	Samples                                                                 []int64
-	random                                                                  *rand.Rand
+	// Samples holds up to 100000 uniformly sampled call durations in microseconds, including errors.
+	Samples []int64
+	// random is the deterministic source used for reservoir sampling, protected by Mutex.
+	random *rand.Rand
 }
 
+// add records one completed call, including failed-call latency, under the metrics mutex.
 func (m *metrics) add(d pacelock.Decision, found, replayed bool, err error, elapsed time.Duration) {
 	m.Lock()
 	defer m.Unlock()
@@ -60,6 +68,8 @@ func (m *metrics) add(d pacelock.Decision, found, replayed bool, err error, elap
 		m.Samples[i] = value
 	}
 }
+
+// info collects selected Redis diagnostics from a standalone server or each Cluster primary.
 func info(ctx context.Context, c redis.UniversalClient) map[string]string {
 	if cluster, ok := c.(*redis.ClusterClient); ok {
 		all := map[string]string{}
@@ -94,6 +104,8 @@ func info(ctx context.Context, c redis.UniversalClient) map[string]string {
 	}
 	return out
 }
+
+// keepInfo limits captured Redis INFO fields to deployment and resource diagnostics.
 func keepInfo(k string) bool {
 	switch k {
 	case "redis_version", "redis_mode", "os", "arch_bits", "uptime_in_seconds", "used_memory", "used_memory_peak", "used_memory_rss", "maxmemory", "maxmemory_policy", "connected_clients", "total_commands_processed", "total_error_replies", "rejected_connections", "evicted_keys", "expired_keys", "used_cpu_sys", "used_cpu_user", "role", "connected_slaves", "master_repl_offset":
@@ -101,12 +113,16 @@ func keepInfo(k string) bool {
 	}
 	return false
 }
+
+// main reports bounded load-tool errors and exits unsuccessfully.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
+
+// run validates disposable-backend settings, measures bounded load and cleans up its own namespace.
 func run() error {
 	addr := flag.String("addr", "127.0.0.1:16379", "disposable standalone/primary endpoint")
 	clusterMode := flag.Bool("cluster", false, "addr is comma-separated disposable Cluster seeds")

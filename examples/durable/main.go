@@ -17,20 +17,31 @@ import (
 	"github.com/tr1v3r/pacelock"
 )
 
+// retention bounds Redis receipts and the application's automatic recovery window.
 const retention = 10 * time.Minute
+
+// policyVersion pins trusted quota rules for all retained attempts in this example.
 const policyVersion = 1
 
+// attempt is the application-owned durable admission/execution journal entry.
 type attempt struct {
-	ID       string
-	Tenant   string
-	Tokens   int64
-	Policy   int
-	Created  time.Time
-	State    string
+	// ID is generated and persisted before admission; reuse it only for this retained attempt.
+	ID string
+	// Tenant is trusted application identity used to derive quota names.
+	Tenant string
+	// Tokens is the known input cost, frozen before submission.
+	Tokens int64
+	// Policy selects the trusted version needed to reconstruct identical ordered rules.
+	Policy int
+	// Created bounds recovery and detects backward local-clock movement.
+	Created time.Time
+	// State records prepared/admitting/admitted/executing or terminal done/denied/not_charged.
+	State string
+	// Decision stores the last confirmed admission result; it alone never authorizes re-execution.
 	Decision pacelock.Decision
 }
 
-// Policy comes from trusted application code, never from request-supplied rules.
+// rules reconstructs the pinned policy from trusted application code, never request-supplied rules.
 // Keep this version available for the lifetime of its retained attempts.
 func rules(a attempt) ([]pacelock.Rule, error) {
 	if a.Policy != policyVersion || a.Tenant == "" || len(a.Tenant) > 128 || a.Tokens <= 0 || a.Tokens > 1000 {
@@ -44,14 +55,21 @@ func rules(a attempt) ([]pacelock.Rule, error) {
 	return r, pacelock.Validate(r...)
 }
 
+// admission is the SDK surface used by the journal, allowing recovery tests without Redis.
 type admission interface {
+	// AllowOnce records one admission decision for the persisted ID and fixed policy.
 	AllowOnce(context.Context, string, time.Duration, ...pacelock.Rule) (pacelock.Receipt, error)
+	// Lookup recovers a retained decision without debiting; missing does not prove no prior debit.
 	Lookup(context.Context, string) (pacelock.Decision, bool, error)
 }
 
-type journal struct{ dir string }
+// journal stores one attempt under an exclusive application lock.
+type journal struct {
+	// dir contains the exclusive lock directory and the atomically replaced attempt.json.
+	dir string
+}
 
-// All commands hold an exclusive application lock. A crashed owner's lock must
+// openJournal creates and holds an exclusive application lock. A crashed owner's lock must
 // be investigated by an operator, never automatically stolen on a timeout.
 func openJournal(dir string) (journal, func(), error) {
 	j := journal{dir: dir}
@@ -65,6 +83,7 @@ func openJournal(dir string) (journal, func(), error) {
 	return j, func() { _ = os.Remove(lock) }, nil
 }
 
+// save writes and syncs a temporary file, renames it, then syncs the containing directory.
 func (j journal) save(a attempt) error {
 	data, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
@@ -97,6 +116,8 @@ func (j journal) save(a attempt) error {
 	defer d.Close()
 	return d.Sync()
 }
+
+// load decodes the saved attempt and rejects missing identity or creation time.
 func (j journal) load() (attempt, error) {
 	var a attempt
 	b, err := os.ReadFile(filepath.Join(j.dir, "attempt.json"))
@@ -110,8 +131,9 @@ func (j journal) load() (attempt, error) {
 	return a, err
 }
 
-// recover only observes admission. The durable execution state, not an allowed
-// receipt alone, determines whether a later explicit run may execute work.
+// advance persists state before admission or upstream side effects. The recover
+// action only observes admission. A saved execution intent blocks automatic
+// re-execution even when a retained receipt says allowed.
 func advance(ctx context.Context, j journal, l admission, action, fault string, execute func(string) error) error {
 	a, err := j.load()
 	if err != nil {
@@ -200,6 +222,7 @@ func advance(ctx context.Context, j journal, l admission, action, fault string, 
 	return j.save(a)
 }
 
+// run handles new/run/recover/status while holding the exclusive journal lock.
 func run() error {
 	dir := flag.String("dir", "./attempt-demo", "one attempt journal directory")
 	tenant := flag.String("tenant", "tenant-a", "trusted tenant identity for new attempt")
@@ -261,6 +284,8 @@ func run() error {
 		return nil
 	})
 }
+
+// main reports journal command failures and exits unsuccessfully.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

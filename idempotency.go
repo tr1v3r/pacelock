@@ -15,7 +15,9 @@ import (
 // Receipt contains the original decision and whether this call replayed it.
 // Replayed admission is not permission to execute the upstream work twice.
 type Receipt struct {
+	// Decision is the original admission result; ignore it when the call returns an error.
 	Decision
+	// Replayed reports reuse of a retained decision, including a retained denial.
 	Replayed bool
 }
 
@@ -23,7 +25,9 @@ type Receipt struct {
 // Both allow and deny decisions are retained; replays do not extend retention.
 // ID must contain 1..256 bytes. Retention must be a whole number of milliseconds
 // in [1ms, 24h]. Ordered names, effective policies, costs and retention must match
-// on replay. Each new business attempt needs a new ID. Records can be lost on
+// on replay. Quota names must be valid UTF-8 and all rules must satisfy Validate.
+// On error, ignore Receipt and inspect OutcomeOf; a retained denial remains denied.
+// Each new business attempt needs a new ID. Records can be lost on
 // eviction, deletion or failover; this is bounded deduplication, not exactly-once.
 func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
 	finish := l.observe(ctx, "allow_once", len(rules))
@@ -79,6 +83,7 @@ func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Durat
 // A pending record returns ErrOutcomeUnknown. This method never debits and does
 // not extend TTL. RetryAfter is the original observation, not a countdown.
 // Primary routing is intentional: a replica may not yet have the admission.
+// ID has the same bounds as AllowOnce. Use Decision only when err is nil and found is true.
 func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
 	finish := l.observe(ctx, "lookup", 0)
 	defer func() { finish(decision, found, err) }()
@@ -106,9 +111,10 @@ func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, fou
 	return d, true, nil
 }
 
-// Keep EVAL routing to the primary, even though the script does not write.
+// lookupScript keeps EVAL routing on the primary, even though it does not write.
 var lookupScript = redis.NewScript(`local v = redis.pcall('GET', KEYS[1]); if type(v) == 'table' and v.err then return redis.error_reply('PACE_RECORD unreadable admission record') end; return v`)
 
+// validID bounds opaque admission IDs before hashing; UTF-8 is not required.
 func validID(id string) error {
 	if id == "" || len(id) > 256 {
 		return fmt.Errorf("%w: admission ID must contain 1..256 bytes", ErrInvalid)
@@ -116,10 +122,12 @@ func validID(id string) error {
 	return nil
 }
 
+// attemptKey separates receipt keys from quota keys within the same domain hash slot.
 func (l *Limiter) attemptKey(id string) string {
 	return fmt.Sprintf("%sattempt:%x", l.prefix, sha256.Sum256([]byte(id)))
 }
 
+// fingerprint binds retention and ordered effective rules to the versioned script arguments.
 func fingerprint(args []interface{}) string {
 	// All values are validated integers or UTF-8 strings. The empty second slot
 	// is included to bind the versioned argument layout, without hash ambiguity.
@@ -127,6 +135,8 @@ func fingerprint(args []interface{}) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
+// decodeRecord validates a retained result; an empty fingerprint or nil name list
+// skips the corresponding caller-specific match.
 func decodeRecord(raw, expected string, expectedNames []string) (Decision, error) {
 	if len(raw) > 65536 || len(raw) < 67 || (raw[:3] != "P1|" && raw[:3] != "C1|") {
 		return Decision{}, fmt.Errorf("%w: malformed admission record", ErrState)
@@ -160,6 +170,7 @@ func decodeRecord(raw, expected string, expectedNames []string) (Decision, error
 	return decodeDecision(record.Values, record.Names)
 }
 
+// equalNames compares ordered quota names; callers must first verify equal lengths.
 func equalNames(a, b []string) bool {
 	for i := range a {
 		if a[i] != b[i] {

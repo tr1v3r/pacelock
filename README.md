@@ -15,6 +15,16 @@ contracts and bounded idempotency; it does not implement an LLM gateway or billi
 ledger. Requires Go 1.24+ and Redis 7+ to compile/run. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
 and the [verification record](docs/verification.md) for tested configurations.
 
+## Fully commented SDK for agents
+
+Pacelock is a **fully commented SDK** intended to help coding agents use it correctly.
+Source comments cover packages, types, interfaces, functions, methods, fields,
+constants and variables, explaining input constraints, concurrency and lifecycle
+rules, and error handling. Read the comments for your pinned version alongside
+the examples when integrating the SDK.
+
+Start with the [Admission API](pacelock.go), [idempotency and recovery](idempotency.go), and [error outcomes](errors.go).
+
 ## Capabilities
 
 - Weighted GCRA and atomic admission across 1–32 named quotas.

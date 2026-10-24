@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// main seeds or inspects synthetic retained admissions for an isolated failover fixture.
 func main() {
 	addr := flag.String("addr", "127.0.0.1:17379", "fixture address")
 	domain := flag.String("domain", "", "unique fixture run ID")
