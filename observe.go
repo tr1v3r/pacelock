@@ -18,7 +18,8 @@ type Observer func(context.Context, Event)
 // Event describes a call without exposing quota names or admission IDs as fields.
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, allow_once or lookup.
+	// Operation is allow, wait, allow_once or lookup. Wait emits one event for
+	// the whole call, not one per internal attempt.
 	Operation string
 	// Duration excludes the observer callback execution time.
 	Duration time.Duration
@@ -28,7 +29,7 @@ type Event struct {
 	Result string
 	// Replayed is true only for AllowOnce returning a retained decision.
 	Replayed bool
-	// RetryAfter is the original decision advisory wait.
+	// RetryAfter is the last decision advisory wait (zero after allowance).
 	RetryAfter time.Duration
 	// Err is the returned error; do not label metrics with its text.
 	Err error

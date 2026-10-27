@@ -32,11 +32,12 @@ Start with the [Admission API](pacelock.go), [driver and recovery contract](driv
 - Redis Lua with one MSET commit; bounded, application-scheduled `Driver.Prune`.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
+- Context-aware blocking `Wait` for weighted, multidimensional admission.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
 
-There is no queue, blocking `Wait`, tokenization, output reservation, refund,
+There is no queue, tokenization, output reservation, refund,
 streaming reconciliation or concurrency ownership. [Airlock](https://github.com/tr1v3r/airlock)
 handles concurrent work; Pacelock handles consumption over time. Their operations
 are not a joint transaction.
@@ -133,7 +134,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers share `Allow`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
+Both drivers share `Allow`, `Wait`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota and retained result in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
@@ -144,6 +145,39 @@ logical expiry works without cleanup. The SDK starts no background workers.
 See the [PostgreSQL guide](drivers/postgres/README.md), [Redis guide](drivers/redis/README.md),
 and [custom-driver contract](docs/drivers.md). Drivers are alternatives: switching
 backends does not transfer quota debt or retained IDs and is not automatic failover.
+
+## Blocking admission
+
+`Wait(ctx, rules...) error` accepts the same weighted, multidimensional rules as
+`Allow`. It tries immediately, sleeps for `RetryAfter` after ordinary denials, and
+rechecks every quota atomically until admitted or an error occurs:
+
+```go
+waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+if err := limiter.Wait(waitCtx, rules...); err != nil {
+    // All errors stop waiting. Unknown may have charged: do not blindly retry.
+    return err
+}
+// Quota was consumed once. Execute this business attempt.
+```
+
+A nil error confirms admission and consumption; business failure does not refund
+it. Cancellation between attempts is `NotCharged`. Cancellation during a backend
+call preserves its accounting outcome; a confirmed successful debit returns nil
+even if cancellation arrives concurrently. Every backend error stops waiting,
+including `NotCharged` errors. Use `errors.Is` and `OutcomeOf` on returned errors;
+`Error.Op` is `wait`.
+
+Waiting uses the calling goroutine and a snapshot of the supplied rules. It holds
+no backend lock or connection while sleeping and adds no queue or background
+worker. `RetryAfter` reserves no capacity: competing callers can win repeatedly,
+so there is no FIFO or starvation guarantee. Bound waiting with a context deadline.
+
+`Wait` is non-idempotent and creates no retained ID for `Lookup`. A denied
+`AllowOnce` ID replays its original denial, so polling one retained ID cannot
+implement blocking admission. Use the explicit recovery flow below when durable
+attempt identity is required.
 
 ## Idempotent admission and recovery
 
@@ -203,7 +237,9 @@ reply after a debit also returns it. Check `OutcomeOf(err)`; it is conservative 
 unrecognized errors.
 
 `Validate(rules...)` checks bounds offline. `NewWithOptions` accepts an optional
-`Observer` that runs once per `Allow`, `AllowOnce` or `Lookup` call. Events expose
+`Observer` that runs once per `Allow`, `Wait`, `AllowOnce` or `Lookup` call.
+`Wait` emits one `wait` event for the whole call, including sleep time; internal
+attempts do not emit separate `allow` events. Events expose
 operation, duration, result, rule count, replay status, delay and error without
 raw IDs or quota names as fields. Callbacks must be fast and concurrency-safe;
 panics propagate. Do not label metrics with error text or user identifiers. See
