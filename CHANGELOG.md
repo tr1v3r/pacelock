@@ -19,7 +19,15 @@
 - `Policy`, `Quota`, `Charge` and `Limiter.Bind` separate fixed policies from
   complete per-attempt charge sets across all drivers. `BoundLimiter` provides
   `Allow`, `AllowOnce` and scope-wide `Lookup`; charge order is normalized to
-  binding order. Existing rule-based APIs and driver protocols remain compatible.
+  binding order. This unreleased PR's API now constructs charges through the
+  value-receiver `Quota.Charge(cost)`, capturing a quota snapshot and cost in private
+  fields without validation or I/O. Bound admission validates the complete captured
+  policy and requires matching names, effective microsecond-rounded intervals and
+  bursts before dispatch (`ErrInvalid` / `NotCharged` on mismatch); equivalent valid
+  policy expressions are accepted. `Quota.Name` / `Policy` remain public. Mutating
+  a quota affects neither existing charges nor bindings; policy changes need a new
+  binding. Existing rule-based APIs, Driver contracts and storage remain unchanged;
+  no `AllowCharges` or `BoundLimiter.Wait` is added.
 
 - Public `Driver`, `Admission`, `LookupRequest`, `Scope`, `Rule.Interval`, and a
   pure `Evaluate` transition for custom atomic persistence boundaries.

@@ -31,10 +31,20 @@ responses, remain `Unknown`. A lost post-commit response can be recovered using
 the complete retained result. This does not promise crash/failover durability or
 upstream execution deduplication. Never blindly retry ordinary `Allow` or refund.
 
-Use `limiter.Bind(quotas...)` to copy fixed policies locally, then call
-`bound.Allow(ctx, charges...)` or `bound.AllowOnce(ctx, id, retention, charges...)`.
+Define named `Quota` values such as `rpm` and `tokens`, then call
+`limiter.Bind(rpm, tokens)` to validate and copy the fixed quota set locally.
+Submit `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))`, or pass the same
+`...Charge` values to `bound.AllowOnce(ctx, id, retention, charges...)`.
+`q.Charge(cost)` captures a quota value snapshot and cost in private fields without
+validation or I/O. `Quota.Name` / `Policy` remain public; later mutation affects
+neither earlier charges nor bindings. Change policies by creating a new binding.
 Every call must charge all bound quotas exactly once; order is normalized to binding
-order. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+order. Each captured policy must be fully valid, with matching name, effective
+microsecond-rounded interval and burst; equivalent valid policy expressions are
+accepted. Invalid, incomplete or mismatched charges fail locally with `ErrInvalid` /
+`NotCharged` before admission, not backend `ErrPolicyMismatch`. Existing Rule APIs,
+Driver and storage are unchanged; blocking admission still uses `limiter.Wait` with
+rules, not a bound wait method. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects. Ring is unsupported. Custom Scripters/hooks/factories/proxies must

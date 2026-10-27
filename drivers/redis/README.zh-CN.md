@@ -16,9 +16,16 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域、名称和有效策略，
 每次准入必须包含全部适用额度。
 
-通过 `limiter.Bind(quotas...)` 在本地复制固定策略，再调用 `bound.Allow(ctx, charges...)`
-或 `bound.AllowOnce(ctx, id, retention, charges...)`。每次必须为全部已绑定额度各提供一次消耗，
-Charge 会按绑定顺序整理。详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+先定义 `rpm`、`tokens` 等具名 `Quota` 值，通过 `limiter.Bind(rpm, tokens)` 在本地校验并复制固定额度集合。
+调用 `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))`，或将相同的 `...Charge`
+传给 `bound.AllowOnce(ctx, id, retention, charges...)`。`q.Charge(cost)` 将额度值快照和消耗
+捕获到私有字段，不校验、不做 I/O。`Quota.Name` / `Policy` 仍公开，之后修改既不影响先前的
+Charge，也不影响绑定；变更策略需新建 binding。每次必须为全部已绑定额度各提供一次消耗，
+Charge 会按绑定顺序整理。捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
+须与绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前
+本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储
+不变，等待仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
+详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 单命令提交与恢复
 

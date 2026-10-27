@@ -68,7 +68,7 @@ func TestBindValidation(t *testing.T) {
 	charges := make([]Charge, MaxRules)
 	for i := range quotas {
 		quotas[i] = Quota{Name: fmt.Sprint(i), Policy: Policy{Rate: 1, Period: time.Nanosecond, Burst: 1}}
-		charges[MaxRules-1-i] = Charge{Name: quotas[i].Name, Cost: 1}
+		charges[MaxRules-1-i] = quotas[i].Charge(1)
 	}
 	b := bindForTest(t, l, quotas...)
 	if s.calls != 0 {
@@ -84,18 +84,22 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 	s := &testDriver{}
 	var events []Event
 	l, _ := NewWithOptions(s, "test", "validation", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	b := bindForTest(t, l, boundTestQuotas()...)
-	for _, charges := range [][]Charge{
+	quotas := boundTestQuotas()
+	rpm, tokens := quotas[0], quotas[1]
+	b := bindForTest(t, l, quotas...)
+	invalid := [][]Charge{
 		nil,
-		{{Name: "rpm", Cost: 1}},
-		{{Name: "rpm", Cost: 1}, {Name: "tokens", Cost: 1}, {Name: "extra", Cost: 1}},
-		{{Name: "rpm", Cost: 1}, {Name: "rpm", Cost: 1}},
-		{{Name: "rpm", Cost: 1}, {Name: "unknown", Cost: 1}},
-		{{Name: "rpm", Cost: 1}, {Name: "", Cost: 1}},
-		{{Name: "rpm", Cost: 0}, {Name: "tokens", Cost: 1}},
-		{{Name: "rpm", Cost: -1}, {Name: "tokens", Cost: 1}},
-		{{Name: "rpm", Cost: 3}, {Name: "tokens", Cost: 1}},
-	} {
+		{rpm.Charge(1)},
+		{rpm.Charge(1), tokens.Charge(1), (Quota{Name: "extra", Policy: rpm.Policy}).Charge(1)},
+		{rpm.Charge(1), rpm.Charge(1)},
+		{rpm.Charge(1), (Quota{Name: "unknown", Policy: tokens.Policy}).Charge(1)},
+		{rpm.Charge(1), (Quota{Policy: tokens.Policy}).Charge(1)},
+		{rpm.Charge(0), tokens.Charge(1)},
+		{rpm.Charge(-1), tokens.Charge(1)},
+		{rpm.Charge(3), tokens.Charge(1)},
+		{rpm.Charge(1), {}},
+	}
+	for _, charges := range invalid {
 		for _, op := range []string{"allow", "allow_once"} {
 			var err error
 			if op == "allow" {
@@ -113,7 +117,7 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 			}
 		}
 	}
-	if len(events) != 18 || s.calls != 0 {
+	if len(events) != 2*len(invalid) || s.calls != 0 {
 		t.Fatalf("events=%d driver calls=%d", len(events), s.calls)
 	}
 	for _, current := range []*BoundLimiter{nil, {}, b} {
@@ -138,7 +142,7 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	charges := []Charge{{Name: "rpm", Cost: 1}, {Name: "tokens", Cost: 1}}
+	charges := []Charge{rpm.Charge(1), tokens.Charge(1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := b.Allow(ctx, charges...); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
@@ -165,8 +169,9 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 	opaque := string([]byte{255})
-	other := bindForTest(t, l, Quota{Name: opaque, Policy: boundTestQuotas()[0].Policy})
-	if _, err := other.AllowOnce(context.Background(), "id", time.Minute, Charge{Name: opaque, Cost: 1}); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+	opaqueQuota := Quota{Name: opaque, Policy: rpm.Policy}
+	other := bindForTest(t, l, opaqueQuota)
+	if _, err := other.AllowOnce(context.Background(), "id", time.Minute, opaqueQuota.Charge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if s.calls != 0 {
@@ -174,12 +179,120 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 	}
 }
 
+func TestQuotaChargeSnapshot(t *testing.T) {
+	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+	l, _ := New(s, "test", "snapshot")
+	q := boundTestQuotas()[0]
+	original := q
+	b := bindForTest(t, l, q)
+	charge := q.Charge(1)
+	if s.calls != 0 {
+		t.Fatal("binding or charge construction contacted Driver")
+	}
+	q.Name = "changed"
+	q.Policy.Rate++
+	q.Policy.Burst++
+	for _, once := range []bool{false, true} {
+		var err error
+		if once {
+			_, err = b.AllowOnce(context.Background(), "id", time.Minute, charge)
+		} else {
+			_, err = b.Allow(context.Background(), charge)
+		}
+		if err != nil || !reflect.DeepEqual(s.request.Rules, []Rule{original.rule(1)}) {
+			t.Fatalf("quota changes affected snapshot: %+v %v", s.request, err)
+		}
+	}
+	if s.calls != 2 {
+		t.Fatalf("driver calls=%d, want 2", s.calls)
+	}
+}
+
+func TestBoundChargePolicyValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*Quota)
+	}{
+		{"different interval", func(q *Quota) { q.Policy.Rate++ }},
+		{"different burst", func(q *Quota) { q.Policy.Burst++ }},
+		{"zero rate", func(q *Quota) { q.Policy.Rate = 0 }},
+		{"negative rate", func(q *Quota) { q.Policy.Rate = -1 }},
+		{"zero period", func(q *Quota) { q.Policy.Period = 0 }},
+		{"negative period", func(q *Quota) { q.Policy.Period = -1 }},
+		// This has the same effective interval, but the policy is itself invalid.
+		{"invalid equivalent period", func(q *Quota) { q.Policy.Rate = 25; q.Policy.Period = 25 * time.Hour }},
+		{"zero burst", func(q *Quota) { q.Policy.Burst = 0 }},
+		{"negative burst", func(q *Quota) { q.Policy.Burst = -1 }},
+		{"refill horizon", func(q *Quota) { q.Policy.Burst = 25 }},
+		{"burst overflow", func(q *Quota) { q.Policy.Burst = 1 << 62 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &testDriver{}
+			l, _ := New(s, "test", "policy-validation")
+			quotas := boundTestQuotas()
+			b := bindForTest(t, l, quotas...)
+			changed := quotas[0]
+			tc.change(&changed)
+			charges := []Charge{quotas[1].Charge(1), changed.Charge(1)}
+			for _, once := range []bool{false, true} {
+				var err error
+				if once {
+					_, err = b.AllowOnce(context.Background(), "id", time.Minute, charges...)
+				} else {
+					_, err = b.Allow(context.Background(), charges...)
+				}
+				if !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+					t.Fatalf("once=%t: %v", once, err)
+				}
+			}
+			if s.calls != 0 {
+				t.Fatal("invalid or mismatched policy contacted Driver")
+			}
+		})
+	}
+}
+
+func TestBoundEquivalentChargePolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bound   Policy
+		charged Policy
+	}{
+		{"scaled rate and period", Policy{Rate: 1, Period: time.Minute, Burst: 2}, Policy{Rate: 2, Period: 2 * time.Minute, Burst: 2}},
+		{"microsecond rounding", Policy{Rate: 1, Period: 1001 * time.Nanosecond, Burst: 2}, Policy{Rate: 1, Period: 1999 * time.Nanosecond, Burst: 2}},
+		{"submicrosecond floor", Policy{Rate: 2, Period: time.Nanosecond, Burst: 2}, Policy{Rate: 1, Period: time.Microsecond, Burst: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+			l, _ := New(s, "test", "equivalent-policy")
+			q := Quota{Name: "rpm", Policy: tc.bound}
+			b := bindForTest(t, l, q)
+			equivalent := Quota{Name: q.Name, Policy: tc.charged}
+			for _, once := range []bool{false, true} {
+				var err error
+				if once {
+					_, err = b.AllowOnce(context.Background(), "id", time.Minute, equivalent.Charge(1))
+				} else {
+					_, err = b.Allow(context.Background(), equivalent.Charge(1))
+				}
+				if err != nil {
+					t.Fatalf("once=%t: equivalent policy rejected: %v", once, err)
+				}
+				if !reflect.DeepEqual(s.request.Rules, []Rule{q.rule(1)}) {
+					t.Fatalf("charge replaced bound policy: %+v", s.request.Rules)
+				}
+			}
+		})
+	}
+}
+
 func TestBoundObservationAndUnknownOutcome(t *testing.T) {
 	var events []Event
 	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 	l, _ := NewWithOptions(s, "test", "observation", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	b := bindForTest(t, l, boundTestQuotas()...)
-	charges := []Charge{{Name: "tokens", Cost: 2}, {Name: "rpm", Cost: 1}}
+	quotas := boundTestQuotas()
+	b := bindForTest(t, l, quotas...)
+	charges := []Charge{quotas[1].Charge(2), quotas[0].Charge(1)}
 	before := append([]Charge(nil), charges...)
 	if d, err := b.Allow(context.Background(), charges...); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)

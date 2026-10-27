@@ -21,7 +21,7 @@ func BenchmarkBoundAdmission(b *testing.B) {
 				for i := range quotas {
 					name := fmt.Sprint(i)
 					quotas[i] = Quota{Name: name, Policy: Policy{Rate: 1000, Period: time.Second, Burst: 1000}}
-					charges[n-1-i] = Charge{Name: name, Cost: 1}
+					charges[n-1-i] = quotas[i].Charge(1)
 					rules[i] = Rule{Name: name, Rate: 1000, Period: time.Second, Burst: 1000, Cost: 1}
 				}
 				bound, err := l.Bind(quotas...)

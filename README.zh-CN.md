@@ -60,23 +60,19 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
+rpm := pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
+    Rate: 60, Period: time.Minute, Burst: 10,
+}}
+tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
+    Rate: 60000, Period: time.Minute, Burst: 12000,
+}}
 // 绑定一次固定策略；bound 可供多个请求并发复用。
-bound, err := limiter.Bind(
-    pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
-        Rate: 60, Period: time.Minute, Burst: 10,
-    }},
-    pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
-        Rate: 60000, Period: time.Minute, Burst: 12000,
-    }},
-)
+bound, err := limiter.Bind(rpm, tokens)
 if err != nil {
     return err
 }
-// 每次只传本次消耗；Charge 顺序不影响结果。
-charges := []pacelock.Charge{
-    {Name: "account:rpm", Cost: 1},
-    {Name: "model-a:input-tpm", Cost: 1500},
-}
+// 每个 Charge 捕获额度快照和本次消耗；顺序不影响结果。
+charges := []pacelock.Charge{rpm.Charge(1), tokens.Charge(1500)}
 decision, err := bound.Allow(ctx, charges...)
 if err != nil {
     // 忽略 decision。OutcomeOf(err) 为 NotCharged 或 Unknown。
@@ -110,11 +106,12 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ## 固定策略与单次消耗
 
-`Policy` 包含 `Rate`、`Period`、`Burst`；`Quota` 将 `Name` 与策略关联；`Charge` 只包含 `Name` 和本次已知的 `Cost`。
+`Policy` 包含 `Rate`、`Period`、`Burst`；`Quota` 保留公开的 `Name` 和 `Policy` 字段。通过 `q.Charge(cost)` 构造每个 `Charge`：这个值接收者方法将完整额度和已知消耗复制到私有字段，不校验、不做 I/O，交由绑定准入时校验。不要通过字段字面量构造 Charge。
 
 - `limiter.Bind(quotas...)` 在本地校验并复制 1～32 个名称唯一的额度，不访问后端，也不注册或更新服务端策略。定义无效时返回包装 `ErrInvalid` 的错误。
-- `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片或策略值不会影响绑定。每次调用独立组装消耗，不修改传入参数。
-- 每次 `Allow` / `AllowOnce` 必须为全部已绑定额度各提供一次消耗，且 `0 < Cost <= Burst`。遗漏、重复、未知额度或无效消耗均在派发前返回 `ErrInvalid`，结果为 `NotCharged`。不默认填充 Cost，也不通过零消耗隐式跳过额度。
+- `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片、Quota 或策略值，既不影响绑定，也不影响先前构造的 Charge。每次调用独立组装规则，不修改传入参数。
+- `bound.Allow(ctx, charges...)` 和 `bound.AllowOnce(ctx, id, retention, charges...)` 仍接收 `...Charge`。每次必须为全部已绑定额度各提供一次通过 `q.Charge(cost)` 构造的消耗，且 `0 < cost <= Burst`。遗漏、重复、未知额度、零值 Charge 或其他无效消耗均在派发前返回 `ErrInvalid`，结果为 `NotCharged`。不默认填充消耗，也不通过零消耗隐式跳过额度。
+- 每个 Charge 捕获的完整策略必须合法，其名称、有效 `Interval`（向上取整到微秒）和 `Burst` 必须与绑定一致。不同但合法的 `Rate` / `Period` 写法只要有效间隔相同即可接受。捕获策略无效或与绑定不符是本地 `ErrInvalid` / `NotCharged`，不是后端的 `ErrPolicyMismatch`。
 - `Charge` 可以任意排序。`Decision.Limited` 和幂等使用的有序规则均以绑定顺序为准。调整 Charge 顺序仍可重放；调整绑定顺序会改变已保留尝试的参数。
 - 由应用根据可信身份构造额度名称并选择策略。动态租户或模型可以按适用的额度集合创建绑定；绑定是本地操作，不需要预先注册或强制使用缓存。
 - 修改策略需创建新绑定。绑定不会迁移已有债务，也不会绕过活跃后端状态的 `ErrPolicyMismatch` 检查。已保留尝试的恢复应继续使用原绑定、消耗和保留期限。
@@ -122,7 +119,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ### 现有底层 API
 
-`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，签名与后端协议均不变。`Rule` 将额度名称、固定策略和单次消耗合在一起。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、固定策略和单次消耗合在一起。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
 [持久化示例](drivers/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
@@ -149,9 +146,13 @@ SDK 不启动后台任务。
 
 ## 阻塞等待准入
 
-`Wait(ctx, rules...) error` 接受与 `Allow` 相同的多维加权规则。先立即尝试，普通额度拒绝后按 `RetryAfter` 等待，再原子检查全部额度，直到准入成功或发生错误：
+`limiter.Wait(ctx, rules...) error` 使用现有底层 `Rule` API，不提供 `BoundLimiter.Wait`。先立即尝试，普通额度拒绝后按 `RetryAfter` 等待，再原子检查全部额度，直到准入成功或发生错误：
 
 ```go
+rules := []pacelock.Rule{
+    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
+    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+}
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()
 if err := limiter.Wait(waitCtx, rules...); err != nil {

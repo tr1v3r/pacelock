@@ -11,9 +11,9 @@ type Options struct {
 	Observer Observer
 }
 
-// Observer receives one synchronous event per Allow, AllowOnce or Lookup call.
-// Bind emits no event. The callback must be fast
-// and concurrency-safe. Panics propagate; no background work is created.
+// Observer receives one synchronous event per Allow, Wait, AllowOnce or Lookup call.
+// Bind emits no event. The callback must be fast and concurrency-safe.
+// Panics propagate; no background work is created.
 type Observer func(context.Context, Event)
 
 // Event describes a call without exposing quota names or admission IDs as fields.

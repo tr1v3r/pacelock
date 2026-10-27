@@ -25,12 +25,23 @@ type Quota struct {
 	Policy Policy
 }
 
-// Charge supplies the known positive consumption of one quota for this attempt.
+// Charge captures a quota's name and policy together with its per-attempt cost.
+// Construct it with Quota.Charge. A zero Charge is invalid.
 type Charge struct {
-	// Name must identify exactly one quota in the bound set.
-	Name string
-	// Cost must be from 1 through that quota's Burst.
-	Cost int64
+	quota Quota
+	cost  int64
+}
+
+// Charge captures a value copy of q with the known consumption for one attempt.
+// It does not validate inputs or contact the backend. BoundLimiter.Allow and
+// AllowOnce require a valid policy matching the binding's effective interval and
+// Burst, and a cost from 1 through Burst. Later changes to q do not affect the charge.
+func (q Quota) Charge(cost int64) Charge {
+	return Charge{quota: q, cost: cost}
+}
+
+func (q Quota) rule(cost int64) Rule {
+	return Rule{Name: q.Name, Rate: q.Policy.Rate, Period: q.Policy.Period, Burst: q.Policy.Burst, Cost: cost}
 }
 
 // BoundLimiter binds an immutable, ordered quota set to a Limiter. Every admission
@@ -61,7 +72,7 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 	}
 	rules := make([]Rule, len(quotas))
 	for i, q := range quotas {
-		rules[i] = Rule{Name: q.Name, Rate: q.Policy.Rate, Period: q.Policy.Period, Burst: q.Policy.Burst, Cost: 1}
+		rules[i] = q.rule(1)
 	}
 	if err := Validate(rules...); err != nil {
 		return nil, err
@@ -74,9 +85,11 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 }
 
 // Allow immediately checks and charges the entire bound quota set or denies
-// without charging any. Supply each bound name exactly once, in any order, with
-// 0 < Cost <= Burst. Missing, duplicate, unknown or invalid charges return
-// ErrInvalid with NotCharged before dispatch. No cost is defaulted or skipped.
+// without charging any. Use Quota.Charge to supply each bound quota exactly once,
+// in any order, with 0 < cost <= Burst. Each charge must carry a valid policy with
+// the same effective interval and Burst as its bound quota. Missing, duplicate,
+// unknown, mismatched or invalid charges return ErrInvalid with NotCharged before
+// dispatch. No cost is defaulted or skipped.
 // It never waits for quota recovery or queues work; backend synchronization may
 // wait until ctx expires. After dispatch an error may have an Unknown debit
 // outcome. Ignore Decision on error and inspect OutcomeOf.
@@ -140,18 +153,25 @@ func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Ru
 	rules := append([]Rule(nil), b.rules...)
 	seen := make([]bool, len(rules))
 	for _, charge := range charges {
-		i, ok := b.index[charge.Name]
+		rule := charge.quota.rule(charge.cost)
+		i, ok := b.index[rule.Name]
 		if !ok {
-			return nil, fmt.Errorf("%w: unknown quota %q", ErrInvalid, charge.Name)
+			return nil, fmt.Errorf("%w: unknown quota %q", ErrInvalid, rule.Name)
 		}
 		if seen[i] {
-			return nil, fmt.Errorf("%w: duplicate charge for quota %q", ErrInvalid, charge.Name)
+			return nil, fmt.Errorf("%w: duplicate charge for quota %q", ErrInvalid, rule.Name)
 		}
-		if charge.Cost <= 0 || charge.Cost > rules[i].Burst {
-			return nil, fmt.Errorf("%w: quota %q requires 0 < cost <= burst", ErrInvalid, charge.Name)
+		interval, err := rule.Interval()
+		if err != nil {
+			return nil, err
+		}
+		// Bind validated the immutable template, including its placeholder cost.
+		boundInterval, _ := rules[i].Interval()
+		if interval != boundInterval || rule.Burst != rules[i].Burst {
+			return nil, fmt.Errorf("%w: quota %q policy differs from binding", ErrInvalid, rule.Name)
 		}
 		seen[i] = true
-		rules[i].Cost = charge.Cost
+		rules[i].Cost = charge.cost
 	}
 	return rules, nil
 }

@@ -24,19 +24,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	bound, err := limiter.Bind(
-		pacelock.Quota{Name: "model-a:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
-		pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
-	)
+	rpm := pacelock.Quota{Name: "model-a:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}}
+	tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}}
+	// Bind copies the fixed quota set; each charge captures its quota by value.
+	bound, err := limiter.Bind(rpm, tokens)
 	if err != nil {
 		log.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	d, err := bound.Allow(ctx,
-		pacelock.Charge{Name: "model-a:rpm", Cost: 1},
-		pacelock.Charge{Name: "model-a:input-tpm", Cost: 1500},
-	)
+	d, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 	if err != nil {
 		log.Fatal(err)
 	}

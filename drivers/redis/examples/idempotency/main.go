@@ -33,13 +33,15 @@ func main() {
 		log.Fatal(err)
 	}
 	id := hex.EncodeToString(bytes[:]) // Persist alongside the business attempt before use.
-	bound, err := limiter.Bind(pacelock.Quota{
+	rpm := pacelock.Quota{
 		Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
-	})
+	}
+	bound, err := limiter.Bind(rpm)
 	if err != nil {
 		log.Fatal(err)
 	}
-	charges := []pacelock.Charge{{Name: "requests", Cost: 1}}
+	// Keep the binding and captured charges unchanged for retained-attempt recovery.
+	charges := []pacelock.Charge{rpm.Charge(1)}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	receipt, err := bound.AllowOnce(ctx, id, 10*time.Minute, charges...)

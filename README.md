@@ -73,23 +73,19 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
+rpm := pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
+    Rate: 60, Period: time.Minute, Burst: 10,
+}}
+tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
+    Rate: 60000, Period: time.Minute, Burst: 12000,
+}}
 // Bind fixed policies once; reuse bound for concurrent requests.
-bound, err := limiter.Bind(
-    pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
-        Rate: 60, Period: time.Minute, Burst: 10,
-    }},
-    pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
-        Rate: 60000, Period: time.Minute, Burst: 12000,
-    }},
-)
+bound, err := limiter.Bind(rpm, tokens)
 if err != nil {
     return err
 }
-// Supply only this attempt's costs. Charge order does not matter.
-charges := []pacelock.Charge{
-    {Name: "account:rpm", Cost: 1},
-    {Name: "model-a:input-tpm", Cost: 1500},
-}
+// Each charge captures a quota snapshot and this attempt's cost; order does not matter.
+charges := []pacelock.Charge{rpm.Charge(1), tokens.Charge(1500)}
 decision, err := bound.Allow(ctx, charges...)
 if err != nil {
     // Ignore decision. OutcomeOf(err) is NotCharged or Unknown.
@@ -138,19 +134,29 @@ be inferred. Different namespaces/domains are independent.
 
 ## Fixed policies and per-attempt costs
 
-`Policy` contains `Rate`, `Period` and `Burst`; `Quota` associates a `Name` with a
-policy; `Charge` contains only `Name` and the known per-attempt `Cost`.
+`Policy` contains `Rate`, `Period` and `Burst`; `Quota` retains its public `Name`
+and `Policy` fields. Construct each `Charge` with `q.Charge(cost)`: this
+value-receiver method captures a copy of the entire quota and the known cost in
+private fields. It performs no validation or I/O; bound admission validates them.
+Do not construct charges with field literals.
 
 - `limiter.Bind(quotas...)` validates and copies 1–32 uniquely named quotas locally.
   It performs no backend I/O and does not register or update server-side policies.
   Invalid definitions return an error wrapping `ErrInvalid`.
 - A `BoundLimiter` is immutable and safe to share across concurrent calls under the
-  parent's driver contract. Changing the original quota slice or policy values
-  afterward has no effect. Each call assembles its own costs without mutating inputs.
-- Every `Allow` / `AllowOnce` call must supply every bound quota exactly once,
-  with `0 < Cost <= Burst`. Missing, duplicate, unknown or invalid charges return
-  `ErrInvalid` with `NotCharged` before dispatch. There are no default costs or
-  implicit zero-cost exemptions.
+  parent's driver contract. Changing the original quota slice, quota or policy
+  afterward affects neither the binding nor previously constructed charges. Each
+  call assembles its own rules without mutating inputs.
+- `bound.Allow(ctx, charges...)` and `bound.AllowOnce(ctx, id, retention, charges...)`
+  still accept `...Charge`. Each call must supply every bound quota exactly once,
+  constructed with `q.Charge(cost)`, with `0 < cost <= Burst`. Missing, duplicate,
+  unknown, zero-value or otherwise invalid charges return `ErrInvalid` with
+  `NotCharged` before dispatch. There are no default costs or zero-cost exemptions.
+- Each charge's captured policy must be fully valid, and its name, effective
+  `Interval` (rounded upward to microseconds) and `Burst` must match the binding.
+  Different valid `Rate` / `Period` expressions with the same effective interval
+  are accepted. An invalid or nonmatching captured policy is a local `ErrInvalid` /
+  `NotCharged`, not the backend's `ErrPolicyMismatch`.
 - Charge order is arbitrary. The binding order determines `Decision.Limited` and
   the ordered rules used for idempotency. Reordering charges preserves a replay;
   changing the binding order changes the retained attempt's parameters.
@@ -168,9 +174,9 @@ policy; `Charge` contains only `Name` and the known per-attempt `Cost`.
 
 `Rule`, `Validate`, `limiter.Allow(ctx, rules...)` and
 `limiter.AllowOnce(ctx, id, retention, rules...)` remain supported without a
-signature or backend protocol change. A `Rule` combines a quota's name, policy and
-per-attempt cost. This path checks only the supplied rules and cannot detect
-omitted applicable quotas. Bound admissions use the same execution path and quota
+signature, Driver contract or storage/protocol change from the bound API. A `Rule`
+combines a quota's name, policy and per-attempt cost. This path checks only the
+supplied rules and cannot detect omitted applicable quotas. Bound admissions use the same execution path and quota
 state; they add complete-set validation and normalize charges to binding order.
 The versioned trusted builder in the [durable example](drivers/redis/examples/durable/README.md)
 continues to demonstrate the low-level API.
@@ -201,11 +207,16 @@ backends does not transfer quota debt or retained IDs and is not automatic failo
 
 ## Blocking admission
 
-`Wait(ctx, rules...) error` accepts the same weighted, multidimensional rules as
-`Allow`. It tries immediately, sleeps for `RetryAfter` after ordinary denials, and
-rechecks every quota atomically until admitted or an error occurs:
+`limiter.Wait(ctx, rules...) error` uses the existing low-level `Rule` API;
+there is no `BoundLimiter.Wait`. It tries immediately, sleeps for `RetryAfter`
+after ordinary denials, and rechecks every quota atomically until admitted or an
+error occurs:
 
 ```go
+rules := []pacelock.Rule{
+    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
+    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+}
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()
 if err := limiter.Wait(waitCtx, rules...); err != nil {
