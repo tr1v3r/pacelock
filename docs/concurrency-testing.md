@@ -43,8 +43,11 @@ The response-loss/cancellation/deadline cases replace a successful **real Redis
 command result** with a transport/context error. They test recovery after execution;
 they do not simulate TCP loss or cancellation interrupting the Redis script.
 Pending/corrupt state cases seed explicit fixtures. The existing ACL integration
-test separately exercises an actual partial-write script failure followed by
-200 concurrent retries/lookups that must preserve the partially debited state.
+tests now exercise all-or-none MSET ACL/OOM rejection, errors before/after the
+commit boundary, and recovery of complete records. Additional standalone/Cluster
+cleanup tests cover strict candidate budgets, SCAN overflow, stale candidates and
+200 concurrent cleanup/admission calls without resetting capacity. Legacy Pending
+fixtures remain blocked; new writes never create Pending.
 
 ## CI and local reproduction
 

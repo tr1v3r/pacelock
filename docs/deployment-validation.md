@@ -38,6 +38,16 @@ slot; more independent domains can spread across Cluster masters, but on standal
 Redis they still share one server. The tool uses the existing conservative
 no-redirect client settings; topology mutation tests are separate from load tests.
 
+## Redis v2 interpretation
+
+The archived October 24 results below used the old native-TTL/Pending protocol.
+They do not measure the current MSET protocol or cleanup throughput. `-expiry`
+waits for logical deadlines; v2 physical memory/key counts will not drain without
+application-scheduled `Driver.Prune` cycles. Measure cleanup lag, per-scope scan
+cost, idle scopes and prolonged maintenance failure as part of new acceptance.
+The old ACL partial-write scenario is replaced by an all-or-none MSET ACL test;
+legacy Pending preservation still has regression coverage.
+
 ## What the load results mean
 
 - Six modes separate ordinary allow/deny, first idempotent allow/deny, replay and
@@ -80,8 +90,8 @@ The noeviction OOM case sets maxmemory below current usage on the isolated fixtu
 admissions must return errors, never normal quota denials. The synthetic clock
 case executes production Lua with only its `now` expression replaced: a forward
 jump replenishes capacity early and a large backward jump returns PACE_STATE.
-It is an algorithm boundary test, **not a host-clock chaos test**. The core suite
-separately exercises genuine ACL partial writes and preserved pending records.
+It is an algorithm boundary test, **not a host-clock chaos test**. The core suite now exercises genuine MSET ACL rejection and legacy Pending
+preservation. The archived partial-write observation describes only the old protocol.
 Live ASK/MOVED migration and lost-response accounting are covered by the Cluster
 transport regression introduced with the redirect work; run it when that change
 is present. Passing standalone/three-master tests alone does not establish HA.

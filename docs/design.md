@@ -6,10 +6,10 @@
 
 核心模块只依赖标准库，公共构造函数接受 `Driver`，这是 pre-v1 破坏性变更。
 Driver 以 `Admit` / `Lookup` 表达完整原子操作，Redis 和 PostgreSQL 是独立模块。
-Redis 协议保持 v1；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
+Redis 保留原键名，v2 值采用逻辑过期和单次 MSET 提交；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
 当前不支持调用者业务事务接入，不提供跨后端债务迁移或故障自动切换。
 统一契约见 [drivers.md](drivers.md)，PG 部署边界见[指南](../drivers/postgres/README.zh-CN.md)。
-下文 Redis 数据布局、Lua 故障与 TTL 说明专属于 Redis Driver。
+下文 Redis 数据布局、Lua 提交和逻辑过期说明专属于 Redis Driver。
 
 ## 目标与边界
 
@@ -68,18 +68,22 @@ allowed   = retry == 0
 
 ```text
 pacelock:v1:{sha256(length(namespace):namespace + domain)}:sha256(Name)
-value = TAT_microseconds:effective_interval_microseconds:Burst
+value = Q2|TAT_microseconds:effective_interval_microseconds:Burst
 ```
 
 长度前缀避免 namespace/domain 连接歧义；哈希避免调用者输入干扰 Cluster hash tag。相同 domain 中所有额度同槽，所以可一次脚本判定。不同 domain 相互独立，也不能跨 domain 原子准入。
 
 对于未命中已有准入记录的新尝试，脚本读取 Redis TIME，再读取并校验全部额度状态、计算全部候选值，全部通过后才写入额度；`AllowOnce` 的拒绝记录仍会保存。活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。此校验仅在状态存在时有效；配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
 
-TTL 为 `ceil((newTAT - now) / 1ms)`，最少 1ms；状态完全恢复后即可删除。拒绝不刷新 TTL。Period 和 Burst × I 都限制在 24 小时以内，防止无界债务与持续时间溢出。TAT 使用整微秒并以整数格式序列化，避免 Lua 默认 tostring 丢失高位精度；服务端时钟还须处于 IEEE-754 精确整数范围内。
+额度在 TAT 时逻辑过期，表示容量已全部恢复。所有校验、候选值、JSON 和响应编码在写入前完成，最后仅一次 MSET 提交本次允许的全部额度和完整准入记录；拒绝只保存准入记录，普通 Allow 拒绝不写入。结果使用 `E2|expires_us|C1|fingerprint|json`，按 Redis 时间加 retention 逻辑过期。重放不修改截止时间。
+
+MSET 清除原生 TTL。应用通过 `Driver.Prune(ctx, scope, cursor, limit)` 调度物理清理：每次最多发现一页 SCAN、读取 limit 个候选值（上限 64），多出的候选保留在不透明游标中。SCAN COUNT 为提示，不是扫描耗时硬上限。候选在短 Lua 内重新读取、检查过期，最后一次 DEL；不能凭旧扫描结果删除并发更新后的状态。应对所有使用过的作用域重复完整周期；清理故障不影响逻辑过期，但会积累内存。域内不会聚合成一个大 key。
+
+Period 和 Burst × I 仍限制为 24 小时。TAT 以整微秒序列化；服务端时钟须处于 IEEE-754 精确整数范围。旧值继续读取并保留债务、原生 TTL 和 Pending；启用新写入前须停止并排空旧写入方，不能混跑或直接回滚。详见 Redis 中英文指南及 compatibility.md。
 
 复杂度是每次 O(维度数)；单次最多 32 维，避免任意长脚本阻塞 Redis。不作通用吞吐量承诺；可复现基准及实测环境见 [verification.md](verification.md)。
 
-Redis 的脚本原子执行保证其他请求不会插入中间。它**不保证运行时错误回滚**：若写阶段出现内存或权限等错误，应按未知结果处理，不能假定完全没扣减。所有预期的参数、状态和策略检查都在写入前完成。建议专用 Redis、noeviction、稳定 ACL、监控内存与复制延迟。
+Redis 脚本隔离阻止其他请求插入读算写之间。最终 MSET 在一条命令内提交；脚本收到明确命令拒绝时可确定本次未扣减，响应丢失等错误仍保守返回 Unknown。单命令提交不提供故障切换或崩溃后的绝对持久性。建议专用 Redis、noeviction、稳定 ACL，并监控内存、清理滞后与复制延迟。
 
 ## Domain 与 LLM 额度建模
 
@@ -122,11 +126,11 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 ## 已实现：有保留期限的幂等准入与查询
 
-`AllowOnce` 的 ID 在 namespace/domain 内生效，绑定有序的额度名称、有效发射间隔、Burst、Cost 和保留期限。相同有效策略的不同 Rate/Period 表达可重放，但规则重排或其他参数变化返回 ErrConflict。保留期限为 1ms～24h 的整毫秒，重放和查询不延长 TTL。
+`AllowOnce` 的 ID 在 namespace/domain 内生效，绑定有序的额度名称、有效发射间隔、Burst、Cost 和保留期限。相同有效策略的不同 Rate/Period 表达可重放，但规则重排或其他参数变化返回 ErrConflict。保留期限为 1ms～24h 的整毫秒，重放和查询不延长逻辑截止时间。
 
-记录与额度同槽，使用独立的 `attempt:sha256(id)` 后缀。脚本先读记录：完整记录直接重放；参数不符报冲突；处理中记录报 ErrOutcomeUnknown。无记录时检查所有额度、编码结果，然后先写处理中标记，再写入允许的额度，最后用 KEEPTTL 保存完整结果。拒绝也保存，因此同一 ID 不会随恢复时间改变决策。
+记录与额度同槽，使用独立 `attempt:sha256(id)` 后缀。脚本先读有效记录：完整记录直接重放，参数不符报冲突，旧 P1 报 ErrOutcomeUnknown。无有效记录时检查所有额度、完成编码，最后一次 MSET 提交允许的额度及完整结果。新操作没有 Pending。拒绝仍会保存，所以相同 ID 不会随容量恢复改变决策。
 
-处理中标记解决运行时错误后重复扣减的问题，但不能消除部分写入。测试通过 Redis ACL selectors 允许脚本访问全部键、仅允许写第一个额度，在第二个额度触发真实运行时错误，验证同 ID 重试不会再次扣减。
+故障测试验证真实 MSET ACL 拒绝和 OOM 不留下部分额度/结果，提交前错误不写入，提交后错误及丢响应可恢复完整结果；同时保留旧 Pending 的阻断测试。逻辑过期、过期策略变更、有界清理、扫描溢出、陈旧候选与清理响应丢失均有测试。
 
 `Lookup` 使用主节点路由，返回保留的原始决策；RetryAfter 是原始观测值。缺失不证明从未扣减：记录可能过期、被删除、被淘汰或在故障切换中丢失，原命令也可能仍在执行。幂等窗口仅覆盖记录存续期，不保证全时段 exactly-once，更不保证上游执行恰好一次。
 

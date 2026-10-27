@@ -67,7 +67,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 		// SECURITY.md: admission commands plus this client's handshake grants.
 		// No +cluster, +command, administrative command or broad key grant.
 		if err := c.Do(ctx, "ACL", "SETUSER", username, "reset", "on", ">"+password,
-			"~"+owner.prefix+"*", "+evalsha", "+eval", "+get", "+set", "+time",
+			"~"+owner.prefix+"*", "+evalsha", "+eval", "+get", "+mset", "+time",
 			"+hello", "+auth", "+client", "+ping", "+select").Err(); err != nil {
 			t.Fatal(err)
 		}
@@ -124,4 +124,28 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 			t.Fatalf("quota not exhausted: %+v %v", d, err)
 		}
 	})
+	// Maintenance has separate grants; admission does not require SCAN or DEL.
+	for _, c := range masters {
+		if err := c.Do(ctx, "ACL", "SETUSER", username, "+scan", "+del").Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("maintenance_grants_route_to_scope_primary", func(t *testing.T) {
+		l := connect(t)
+		cursor := PruneCursor{}
+		for pages := 0; !cursor.Done(); pages++ {
+			if pages > 10000 {
+				t.Fatal("scan did not complete")
+			}
+			result, err := l.Prune(ctx, cursor, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Examined > 1 || result.Deleted != 0 {
+				t.Fatalf("maintenance changed live state: %+v", result)
+			}
+			cursor = result.Cursor
+		}
+	})
+
 }

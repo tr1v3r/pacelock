@@ -11,6 +11,12 @@
 
 ### Added
 
+- Redis single-MSET commit for all quota updates and complete admission results,
+  v2 logical expiry, and scope-routed bounded cursor cleanup via `Driver.Prune`.
+  Legacy quota/C1/P1 readers preserve existing debt and recovery boundaries.
+  Upgrade requires drained old writers and scheduled cleanup; unconverted rollback
+  and mixed writers are unsupported. Runtime admission now needs MSET permission.
+
 - Public `Driver`, `Admission`, `LookupRequest`, `Scope`, `Rule.Interval`, and a
   pure `Evaluate` transition for custom atomic persistence boundaries.
 - PostgreSQL driver with explicit schema setup, domain row locking, backend time,

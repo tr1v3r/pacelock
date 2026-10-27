@@ -1,3 +1,8 @@
+> Historical verification below predates the Redis MSET/logical-expiry protocol.
+> The current Redis suite replaces partial-write/Pending creation with atomic-commit
+> ACL/OOM, logical-expiry, migration and bounded cleanup tests. New protocol results
+> are recorded in [the MSET local record](validation/redis-mset-local.md); do not interpret old native-TTL figures as new benchmarks.
+
 # Verification record — 2026-10-23
 
 Scope: commercial hardening of the known-cost admission core on

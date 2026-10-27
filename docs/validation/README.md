@@ -1,5 +1,9 @@
 # Local fixture observations
 
+Historical native-TTL/Pending protocol measurements, not benchmarks of the new
+MSET/logical-expiry protocol. Current physical memory drain requires scheduled cleanup.
+See [the MSET verification record](redis-mset-local.md) for the new protocol.
+
 These are measurements of the development implementation based on
 `27e91ca7dd916b8bc63c35b68266a9ba535236a8` (Go 1.24.13, macOS/arm64, Apple M3 Pro,
 host-to-Docker loopback, Redis 7.4.11). The repository Compose fixture has no

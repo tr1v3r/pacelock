@@ -372,7 +372,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 			if got := admitted.Load(); got < r.Burst || got > bound {
 				t.Fatalf("wave %d admitted %d outside [%d,%d]", wave, got, r.Burst, bound)
 			}
-			waitForKeyExpiry(t, f, l.key("q"))
+			time.Sleep(time.Duration(r.Burst)*r.Period + 10*time.Millisecond) // Logical recovery requires no physical deletion.
 		}
 	})
 	t.Run("record_expiry", func(t *testing.T) {
