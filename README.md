@@ -31,7 +31,7 @@ Start with the [Admission API](pacelock.go), [driver and recovery contract](driv
 - Backend server time and shared state; Redis TTL or PostgreSQL logical expiry.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
-- Context-aware blocking `Wait` / `WaitOnce` for weighted, multidimensional admission.
+- Context-aware blocking `Wait` for weighted, multidimensional admission.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
@@ -133,7 +133,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers share `Allow`, `Wait`, `AllowOnce`, `WaitOnce`, `Lookup`, outcomes and observers. PostgreSQL
+Both drivers share `Allow`, `Wait`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota and retained result in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
@@ -175,38 +175,8 @@ so there is no FIFO or starvation guarantee. Bound waiting with a context deadli
 
 `Wait` is non-idempotent and creates no retained ID for `Lookup`. A denied
 `AllowOnce` ID replays its original denial, so polling one retained ID cannot
-implement blocking admission. Use `WaitOnce` for blocking admission with a
-recoverable identity:
-
-```go
-// Persist admissionID before dispatch; use a context deadline to bound waiting.
-receipt, err := limiter.WaitOnce(ctx, admissionID, 10*time.Minute, rules...)
-if err != nil {
-    // Stop. On Unknown, use Lookup with a fresh context and this same ID.
-    return err
-}
-// receipt.Allowed is true. Replayed does not authorize duplicate business work.
-```
-
-`WaitOnce` uses the same ID, rule and retention bounds as `AllowOnce`, but ordinary
-denials create no record, debit nothing and can be retried with the same ID.
-Parameters become bound only at a successful or pending admission. Success
-retention starts at the backend admission decision, excluding earlier quota
-waiting; dispatch/write latency consumes part of that window. A retained success
-replays without charging again or extending retention and is readable by `Lookup`
-and `AllowOnce`. Never reuse an ID after expiry or loss of its retained record.
-
-An existing retained `AllowOnce` denial returns `ErrConflict` / `NotCharged` from
-`WaitOnce`; it is not replaced. All backend errors, including `Unknown`, stop
-waiting. Concurrent waiters with the same ID can all receive the same successful
-receipt; the application must coordinate business execution. Cancellation between
-attempts is `NotCharged` for this invocation and does not rule out a concurrent
-caller's debit.
-
-All admission uses `Driver.Admit`. `WaitOnce` sets `Admission.SuccessOnly=true`;
-`AllowOnce` leaves it false to retain both outcomes. Custom drivers must honor
-this field as part of the Driver contract. SuccessOnly requires a nonempty ID
-and valid retention; it does not change successful receipt fingerprints.
+implement blocking admission. Use the explicit recovery flow below when durable
+attempt identity is required.
 
 ## Idempotent admission and recovery
 
@@ -231,7 +201,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
   `ErrConflict`. Names must be valid UTF-8 for `AllowOnce`; IDs contain 1–256 bytes.
 - Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
   a value covering your recovery window. Replays and queries never extend it.
-- `AllowOnce` retains both allow and deny decisions. A denied ID stays denied while
+- Both allow and deny decisions are retained. A denied ID stays denied while
   retained; a later, genuinely new attempt needs a new ID. Replayed `RetryAfter`
   is the original delay, not a countdown or fresh capacity estimate.
 - A pending marker is written before quota mutations. A runtime error may leave
@@ -264,9 +234,9 @@ reply after a debit also returns it. Check `OutcomeOf(err)`; it is conservative 
 unrecognized errors.
 
 `Validate(rules...)` checks bounds offline. `NewWithOptions` accepts an optional
-`Observer` that runs once per `Allow`, `Wait`, `AllowOnce`, `WaitOnce` or `Lookup` call.
-`Wait` / `WaitOnce` emit one `wait` / `wait_once` event for the whole call, including
-sleep time; internal attempts do not emit separate events. Events expose
+`Observer` that runs once per `Allow`, `Wait`, `AllowOnce` or `Lookup` call.
+`Wait` emits one `wait` event for the whole call, including sleep time; internal
+attempts do not emit separate `allow` events. Events expose
 operation, duration, result, rule count, replay status, delay and error without
 raw IDs or quota names as fields. Callbacks must be fast and concurrency-safe;
 panics propagate. Do not label metrics with error text or user identifiers. See

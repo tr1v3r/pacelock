@@ -32,7 +32,7 @@ consistent schema/primary routing for every caller. Do not use a read-replica po
 Each admission uses Read Committed, INSERT ON CONFLICT for a permanent domain guard,
 then SELECT FOR UPDATE on that guard. This serializes even initially missing quota
 and receipt rows. Backend time is sampled once with clock_timestamp after locking.
-All quota rows and an AllowOnce retained allow/deny result commit together. PostgreSQL uses
+All quota rows and a retained allow/deny result commit together. PostgreSQL uses
 the core Evaluate transition; Redis's equivalent runs inside Lua.
 
 Before Commit is sent, failures roll back and are NotCharged. Every Commit error
@@ -40,13 +40,6 @@ is conservatively Unknown; recover by retained ID with a fresh context. There is
 no automatic transaction retry. Lookup does not lock/wait for an in-flight admission,
 so missing does not prove zero debit. Replays and queries never extend retention.
 Upstream execution still needs application coordination.
-
-`Wait` and `WaitOnce` wait in the core between immediate transactions, holding
-no connection or lock while sleeping. `Driver.Admit` with `Admission.SuccessOnly=true` rolls back ordinary denials
-without storing a receipt. Successful quota charges and their receipt commit
-together with the existing fingerprint; success retention starts at that backend
-decision. Existing AllowOnce denials conflict instead of being replaced. A lost
-commit reply remains Unknown; recover by ID without automatically retrying.
 
 ## Deployment limits and cleanup
 

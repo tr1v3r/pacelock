@@ -155,7 +155,7 @@ func (l *Limiter) ready(ctx context.Context) error {
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
 	finish := l.observe(ctx, "allow", len(rules))
 	defer func() { finish(decision, false, err) }()
-	r, err := l.admit(ctx, "", 0, rules, false)
+	r, err := l.admit(ctx, "", 0, rules)
 	return r.Decision, err
 }
 
@@ -169,21 +169,18 @@ func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Durat
 	if id == "" {
 		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return l.admit(ctx, id, retention, rules, false)
+	return l.admit(ctx, id, retention, rules)
 }
 
-func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule, successOnly bool) (Receipt, error) {
+func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
 	op := "allow"
 	if id != "" {
 		op = "allow_once"
 	}
-	if successOnly {
-		op = "wait_once"
-	}
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention, SuccessOnly: successOnly}
+	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
 	if err := request.Validate(); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
@@ -193,9 +190,6 @@ func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration,
 	}
 	if err := validateDecision(result.Decision, rules); err != nil {
 		return Receipt{}, failure(op, Unknown, err)
-	}
-	if successOnly && result.Replayed && !result.Allowed {
-		return Receipt{}, failure(op, NotCharged, fmt.Errorf("%w: ID retains an AllowOnce denial", ErrConflict))
 	}
 	if id == "" && result.Replayed {
 		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: replay of ordinary admission", ErrState))

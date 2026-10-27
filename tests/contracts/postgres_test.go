@@ -51,12 +51,6 @@ func pgScopeID(s pacelock.Scope) string {
 func pgItemID(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }
 
 func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
-	for _, mode := range []string{"allow_once", "wait_once"} {
-		t.Run(mode, func(t *testing.T) { testPostgresRollbackAfterFirstQuotaWrite(t, mode == "wait_once") })
-	}
-}
-
-func testPostgresRollbackAfterFirstQuotaWrite(t *testing.T, successOnly bool) {
 	db, _, s, l := postgresFixture(t)
 	// A real server-side trigger raises only on this test's second quota. The first
 	// quota has already been written when the transaction aborts.
@@ -72,11 +66,7 @@ func testPostgresRollbackAfterFirstQuotaWrite(t *testing.T, successOnly bool) {
 	if _, err := db.Exec("CREATE TRIGGER " + name + " BEFORE INSERT OR UPDATE ON pacelock_quotas FOR EACH ROW EXECUTE FUNCTION " + name + "()"); err != nil {
 		t.Fatal(err)
 	}
-	admit := l.AllowOnce
-	if successOnly {
-		admit = l.WaitOnce
-	}
-	_, err := admit(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
+	_, err := l.AllowOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
 	if err == nil || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
 	}
@@ -93,7 +83,7 @@ func testPostgresRollbackAfterFirstQuotaWrite(t *testing.T, successOnly bool) {
 	if _, err = db.Exec("DROP TRIGGER " + name + " ON pacelock_quotas"); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := admit(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
+	receipt, err := l.AllowOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
 	if err != nil || !receipt.Allowed || receipt.Replayed {
 		t.Fatal(receipt, err)
 	}
@@ -148,12 +138,6 @@ func (tx *loseCommitTx) Commit() error {
 }
 
 func TestPostgresLostCommitReplyRecovery(t *testing.T) {
-	for _, mode := range []string{"allow_once", "wait_once"} {
-		t.Run(mode, func(t *testing.T) { testPostgresLostCommitReplyRecovery(t, mode == "wait_once") })
-	}
-}
-
-func testPostgresLostCommitReplyRecovery(t *testing.T, successOnly bool) {
 	_, normal, s, l := postgresFixture(t)
 	config, err := pgx.ParseConfig(os.Getenv("PACELOCK_POSTGRES_DSN"))
 	if err != nil {
@@ -167,19 +151,15 @@ func testPostgresLostCommitReplyRecovery(t *testing.T, successOnly bool) {
 		t.Fatal(err)
 	}
 	broken, _ := pacelock.New(fault, s.Namespace, s.Domain)
-	admit, recover := broken.AllowOnce, l.AllowOnce
-	if successOnly {
-		admit, recover = broken.WaitOnce, l.WaitOnce
-	}
 	connector.armed.Store(true)
-	if _, err := admit(context.Background(), "lost", time.Minute, rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+	if _, err := broken.AllowOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 		t.Fatal(err)
 	}
 	decision, found, err := l.Lookup(context.Background(), "lost")
 	if err != nil || !found || !decision.Allowed {
 		t.Fatal(decision, found, err)
 	}
-	replay, err := recover(context.Background(), "lost", time.Minute, rule("q", 1, 1))
+	replay, err := l.AllowOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1))
 	if err != nil || !replay.Replayed || !replay.Allowed {
 		t.Fatal(replay, err)
 	}

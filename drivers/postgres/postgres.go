@@ -105,17 +105,13 @@ func fail(op string, outcome pacelock.Outcome, err error) error {
 }
 
 // Admit validates, locks the domain, samples backend time once, and calculates the
-// shared GCRA transition. SuccessOnly rolls back denials without storing a
-// receipt; successful quota charges and their receipt commit in one transaction.
+// shared GCRA transition. Every quota and optional receipt commits in one transaction.
 // Before Commit is sent, failures are NotCharged; any Commit error is conservatively
 // Unknown. A prior ambiguous invocation remains ambiguous even after a later error.
 func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
 	op := "allow"
 	if a.ID != "" {
 		op = "allow_once"
-	}
-	if a.SuccessOnly {
-		op = "wait_once"
 	}
 	uncharged := func(err error) (pacelock.Receipt, error) {
 		return pacelock.Receipt{}, fail(op, pacelock.NotCharged, err)
@@ -156,9 +152,6 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Rece
 			if decodeErr != nil {
 				return pacelock.Receipt{}, fail(op, pacelock.Unknown, decodeErr)
 			}
-			if a.SuccessOnly && !decision.Allowed {
-				return uncharged(fmt.Errorf("%w: ID retains an AllowOnce denial", pacelock.ErrConflict))
-			}
 			// A retained replay performs no quota mutation; ending the transaction
 			// with Rollback releases the lock without a second commit ambiguity.
 			return pacelock.Receipt{Decision: decision, Replayed: true}, nil
@@ -175,9 +168,6 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Rece
 	decision, next, err := pacelock.Evaluate(now, a.Rules, states)
 	if err != nil {
 		return uncharged(err)
-	}
-	if a.SuccessOnly && !decision.Allowed {
-		return pacelock.Receipt{Decision: decision}, nil
 	}
 	if decision.Allowed {
 		for i, s := range next {

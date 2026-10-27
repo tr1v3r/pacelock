@@ -32,21 +32,6 @@ its accounting certainty. No driver API, persistence protocol or backend-side
 queue is added. Sleeping holds no driver resources; the caller owns the context
 deadline. One `wait` observation covers the complete operation.
 
-`Limiter.WaitOnce` uses the same `Driver.Admit` method with
-`Admission.SuccessOnly=true`, a required ID and valid retention. False retains
-both decisions for AllowOnce. Every custom driver must honor the new field; it
-is part of the admission contract, with no separate capability interface.
-Normal denials must debit nothing and create/refresh no receipt. Successful and
-pending records share AllowOnce's ID namespace and fingerprint; success retention
-starts at the backend admission decision, never at the start of quota waiting.
-Replay/Lookup must not extend it. Reject an existing AllowOnce denial with
-`ErrConflict` / `NotCharged`; never replace it. Until success/pending, denied
-attempts do not bind the ID's parameters. Unknown outcomes must stop waiting and
-use the retained ID for explicit recovery. One `wait_once` event observes the
-whole call. The `Driver` method signatures remain unchanged, while the request
-contract gains SuccessOnly. The flag is excluded from the successful receipt
-fingerprint to preserve interoperability with AllowOnce.
-
 ## GCRA and policy identity
 
 Use `Rule.Interval()` for conservative microsecond rounding. Effective interval
@@ -62,7 +47,7 @@ validation. Keep periods and burst recovery within 24h and each request within 3
 ID scope is namespace/domain. `Admission.Fingerprint()` binds ordered names,
 effective intervals, bursts, costs and retention with the Redis v1 encoding.
 Names must be UTF-8 for idempotent requests; all other identity strings may be
-opaque bytes. AllowOnce retains both allow and deny decisions; replay/lookup does not extend
+opaque bytes. Both allow and deny are retained; replay/lookup does not extend
 retention. A changed fingerprint returns `ErrConflict`. A retained denial stays
 denied; its RetryAfter is historical. A genuinely new business attempt needs a new
 ID. Expired/lost IDs must not be reused to depend on deduplication.
@@ -75,7 +60,7 @@ lookup results do not prove no debit or upstream exactly-once execution.
 
 ## Backend modules and migration
 
-- `drivers/redis`: go-redis transport, compatible v1 keys/records and guarded
+- `drivers/redis`: go-redis transport, unchanged v1 Lua/keys/records and guarded
   command replay, including bounded Cluster redirects. Existing Redis state can
   continue with the same namespace/domain/policies; the Go constructor changes.
 - `drivers/postgres`: database/sql primary handle, explicit `Migrate`, one locked

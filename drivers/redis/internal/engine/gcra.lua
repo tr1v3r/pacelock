@@ -1,6 +1,5 @@
 -- All keys share one hash tag. Validate quotas before writing anything.
 -- ARGV: retention_ms (0 for Allow), fingerprint, then step/burst/cost/name.
--- An optional trailing success_only skips receipt writes for new denials.
 local retention = tonumber(ARGV[1])
 local fingerprint = ARGV[2]
 local count = #KEYS
@@ -29,7 +28,6 @@ if retention > 0 then
         return {1, read}
     end
 end
-local successOnly = ARGV[3 + count * 4] == 'success_only'
 local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])
 local horizon = 86400000000
@@ -77,9 +75,6 @@ end
 local complete = nil
 if recordKey then
     complete = 'C1|' .. fingerprint .. '|' .. cjson.encode({names = names, values = result})
-    if successOnly and result[1] == 0 then
-        return {0, complete}
-    end
     -- Pending protects against replay after a partial write/runtime error.
     redis.call('SET', recordKey, 'P1|' .. fingerprint, 'PX', retention)
 end

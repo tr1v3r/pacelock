@@ -30,15 +30,11 @@ func New(client redis.Scripter) (*Driver, error) {
 }
 
 // Admit executes all dimensions and optional retained deduplication in one Lua
-// operation. SuccessOnly denials write nothing; existing retained denials
-// conflict. Runtime write errors may partially debit; errors retain their Outcome.
+// operation. Runtime write errors may partially debit; errors retain their Outcome.
 func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
 	op := "allow"
 	if request.ID != "" {
 		op = "allow_once"
-	}
-	if request.SuccessOnly {
-		op = "wait_once"
 	}
 	if err := request.Validate(); err != nil {
 		return pacelock.Receipt{}, inputError(op, err)
@@ -51,7 +47,7 @@ func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (paceloc
 		return pacelock.Receipt{}, inputError(op, err)
 	}
 	if request.ID != "" {
-		return l.AdmitOnce(ctx, request.ID, request.Retention, request.SuccessOnly, request.Rules...)
+		return l.AllowOnce(ctx, request.ID, request.Retention, request.Rules...)
 	}
 	decision, err := l.Allow(ctx, request.Rules...)
 	return pacelock.Receipt{Decision: decision}, err

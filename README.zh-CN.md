@@ -23,7 +23,7 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 - 后端服务端时间、共享状态，Redis TTL 或 PostgreSQL 逻辑过期。
 - 核心仅依赖标准库，Redis/PostgreSQL Driver 为独立模块。
 - 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
-- 支持 context 取消的阻塞式 `Wait` / `WaitOnce`，复用多维加权准入。
+- 支持 context 取消的阻塞式 `Wait`，复用多维加权准入。
 - 有保留期限的幂等准入、参数冲突检测和结果查询。
 - 可程序化判断的扣减结果、离线规则校验和同步观测回调。
 - 真实 Redis/Cluster、race、模型对照、模糊测试、故障注入和基准测试。
@@ -105,7 +105,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，�
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-两种 Driver 共用 `Allow`、`Wait`、`AllowOnce`、`WaitOnce`、`Lookup`、错误结果和观测接口。
+两种 Driver 共用 `Allow`、`Wait`、`AllowOnce`、`Lookup`、错误结果和观测接口。
 PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，用短事务
 一起提交全部额度与准入记录。提交前失败会回滚；提交错误保守标记为 `Unknown`。
 当前不会加入调用者的业务事务。domain 竞争、WAL、连接池和 vacuum 需要目标环境验证，
@@ -133,23 +133,7 @@ if err := limiter.Wait(waitCtx, rules...); err != nil {
 
 等待使用调用方 goroutine 和传入规则的快照，休眠期间不持有后端锁或连接，不增加队列或后台 worker。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
 
-`Wait` 不具备幂等性，也不产生供 `Lookup` 查询的保留 ID。`AllowOnce` 被拒绝的 ID 会重放原始拒绝，轮询同一个保留 ID 无法实现阻塞准入。需要可恢复的阻塞准入身份时，使用 `WaitOnce`：
-
-```go
-// 派发前持久化 admissionID，并用 context deadline 限制等待。
-receipt, err := limiter.WaitOnce(ctx, admissionID, 10*time.Minute, rules...)
-if err != nil {
-    // 停止等待。Unknown 时使用新 context 按同一个 ID 调用 Lookup。
-    return err
-}
-// receipt.Allowed 为 true。Replayed 不代表可以重复执行业务。
-```
-
-`WaitOnce` 的 ID、规则及保留期范围与 `AllowOnce` 相同，但普通拒绝不留记录、不扣减，允许同一 ID 继续尝试。参数只在成功或留下 pending 记录时绑定。成功保留期从后端准入决策起算，不包含此前的额度等待；派发和写入延迟会消耗一部分窗口。保留的成功结果重放时不再次扣减、不延长保留期，并可由 `Lookup` 和 `AllowOnce` 读取。记录过期或丢失后不要复用旧 ID。
-
-已有的 `AllowOnce` 保留拒绝传给 `WaitOnce` 会返回 `ErrConflict` / `NotCharged`，不会覆盖原决策。任何后端错误（包括 `Unknown`）都会停止等待。同一 ID 的并发等待者可能都收到同一份成功结果，业务执行仍需应用协调。两次尝试之间取消的 `NotCharged` 只说明本次调用未扣减，不能排除另一个并发调用者已扣减。
-
-所有准入统一调用 `Driver.Admit`。`WaitOnce` 设置 `Admission.SuccessOnly=true`；`AllowOnce` 保持 false，保留两种结果。自定义 Driver 必须按更新后的契约处理该字段。SuccessOnly 要求非空 ID 和有效保留期，不改变成功记录的指纹。
+`Wait` 不具备幂等性，也不产生供 `Lookup` 查询的保留 ID。`AllowOnce` 被拒绝的 ID 会重放原始拒绝，轮询同一个保留 ID 无法实现阻塞准入。需要持久化尝试身份时，使用下方明确的恢复流程。
 
 ## 幂等准入与恢复
 
@@ -171,7 +155,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 - ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
-- `AllowOnce` 的允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
+- 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
 - 扣减额度前先写入“处理中”标记。运行时错误可能留下部分扣减和该标记；后续重试返回 `ErrOutcomeUnknown`，不会再次扣减。不要删除标记或自动退款。
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
@@ -191,7 +175,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`Wait`、`AllowOnce`、`WaitOnce` 或 `Lookup` 调用触发一次。`Wait` / `WaitOnce` 为整个调用产生一个 `wait` / `wait_once` 事件，耗时包含等待时间；内部尝试不另发事件。事件包含操作、耗时、结果、规则数、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
+`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`Wait`、`AllowOnce` 或 `Lookup` 调用触发一次。`Wait` 为整个调用产生一个 `wait` 事件，耗时包含等待时间；内部尝试不另发 `allow` 事件。事件包含操作、耗时、结果、规则数、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
 
 ## 额度与运行契约
 

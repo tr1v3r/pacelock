@@ -30,18 +30,13 @@ decision, err := limiter.Allow(ctx, pacelock.Rule{
 
 每次准入使用 Read Committed，通过 INSERT ON CONFLICT 建立永久 domain 锁行，
 再用 SELECT FOR UPDATE 锁定它，覆盖额度或准入记录尚不存在的情况。
-获得锁后用 clock_timestamp 采样一次后端时间，全部额度与 AllowOnce 的允许/拒绝记录在同一事务提交。
+获得锁后用 clock_timestamp 采样一次后端时间，全部额度与允许/拒绝记录在同一事务提交。
 PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行。
 
 发送 Commit 前的错误回滚并标记 NotCharged；任何 Commit 错误都保守标记 Unknown，
 使用新 context 按仍保留的 ID 查询恢复。不自动重试事务。Lookup 不加 domain 锁，
 不等待进行中的准入，因此未找到不代表没有扣减。重放和查询不延长保留期。
 上游业务执行仍需应用协调。
-
-`Wait` / `WaitOnce` 在核心层的两次立即事务之间等待，休眠不持有连接或锁。
-`Driver.Admit` 在 `Admission.SuccessOnly=true` 时普通拒绝回滚、不保存记录；成功额度与结果沿用现有指纹并一起提交，
-成功保留期从该次后端决策起算。已有 AllowOnce 拒绝返回冲突，不被替换。
-提交响应丢失仍为 Unknown，按 ID 恢复，不自动重试。
 
 ## 部署边界与清理
 
