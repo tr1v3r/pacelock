@@ -1,153 +1,60 @@
-// Package pacelock provides distributed, weighted GCRA rate admission using Redis.
-//
-// Allow immediately admits known costs across named quotas. AllowOnce adds
-// bounded deduplication and Lookup recovers retained admission results. Neither
-// method queues work, owns concurrency, refunds capacity or bills usage.
-//
-// Use one namespace/domain for all quotas requiring atomic admission and explicitly
-// handle unknown debit outcomes. Built-in go-redis clients receive per-command
-// replay protection. The client and business execution lifecycle belong to the caller.
+// Package pacelock provides immediate, weighted, multidimensional GCRA admission.
+// Drivers own backend time, atomic persistence and retained admission records.
+// The package does not queue work, refund capacity, execute upstream calls or bill usage.
 package pacelock
 
 import (
 	"context"
-	"crypto/sha256"
-	_ "embed"
 	"errors"
 	"fmt"
 	"reflect"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 const (
-	// MaxRules bounds the work performed by one atomic Redis script.
+	// MaxRules bounds the work performed by one atomic admission.
 	MaxRules = 32
-	// MaxHorizon bounds both policy periods and the time needed to refill a burst.
+	// MaxHorizon bounds periods, burst recovery and admission retention.
 	MaxHorizon = 24 * time.Hour
 )
 
 var (
 	// ErrInvalid reports invalid input before dispatch.
 	ErrInvalid = errors.New("pacelock: invalid argument")
-	// ErrPolicyMismatch reports an effective policy conflict with active quota state.
-	ErrPolicyMismatch = errors.New("pacelock: policy differs from active Redis state")
-	// ErrState reports malformed Redis state or a malformed response. Check OutcomeOf.
-	ErrState = errors.New("pacelock: invalid Redis state")
-	// ErrConflict reports reuse of a retained admission ID with different parameters.
+	// ErrPolicyMismatch reports a policy conflict with active quota state.
+	ErrPolicyMismatch = errors.New("pacelock: policy differs from active backend state")
+	// ErrState reports malformed state or replies; inspect OutcomeOf.
+	ErrState = errors.New("pacelock: invalid backend state")
+	// ErrConflict reports reuse of a retained ID with different parameters.
 	ErrConflict = errors.New("pacelock: admission ID used with different parameters")
-	// ErrOutcomeUnknown reports a retained admission without a complete result.
+	// ErrOutcomeUnknown reports an admission whose debit cannot be established.
 	ErrOutcomeUnknown = errors.New("pacelock: admission outcome unknown")
-	// ErrBackend wraps an unclassified Redis or transport failure.
-	ErrBackend = errors.New("pacelock: Redis backend failure")
+	// ErrBackend wraps an unclassified backend or transport failure.
+	ErrBackend = errors.New("pacelock: backend failure")
 )
 
-// Rule charges Cost units to a named quota. Rate units replenish per Period.
-// Burst is the total immediately available capacity, including the first unit.
-// The same quota name must use the same policy across all callers in a domain.
+// Rule charges Cost units to Name. Rate units replenish per Period.
+// Burst is total instantaneous capacity, including the first unit.
 type Rule struct {
-	// Name identifies a quota within the domain; it must contain 1..256 bytes.
+	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
 	// Rate is the positive number of units replenished per Period.
 	Rate int64
-	// Period is positive and at most MaxHorizon; per-unit intervals round up to microseconds.
+	// Period is positive and at most MaxHorizon.
 	Period time.Duration
-	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
+	// Burst is positive; its effective refill time is at most MaxHorizon.
 	Burst int64
 	// Cost is the known charge for this attempt, from 1 through Burst.
 	Cost int64
 }
 
-// Decision describes an admission attempt. RetryAfter is advisory, not a reservation.
-// On denial, Limited contains all dimensions that blocked admission.
-// RetryAfter can become stale immediately as other callers consume quota.
-// On error the returned Decision must not be used.
-type Decision struct {
-	// Allowed reports whether all quotas admitted the charge; denial consumes no quota.
-	Allowed bool
-	// RetryAfter is the longest required wait at decision time; zero means allowed.
-	RetryAfter time.Duration
-	// Limited lists blocking quota names in input order; it is empty when allowed.
-	Limited []string
-}
-
-// Limiter is safe for concurrent use when its Redis client is safe for concurrent use.
-// It neither owns nor closes the client. One domain is one Redis Cluster hash slot.
-// Construct it with New or NewWithOptions; nil/zero receivers and nil operation
-// contexts return ErrInvalid wrapped in Error before dispatch.
-type Limiter struct {
-	// client is the caller-owned transport, configured to avoid command replay.
-	client redis.Scripter
-	// prefix hashes namespace and domain into a shared Redis Cluster hash tag.
-	prefix string
-	// observer is an optional synchronous callback shared by concurrent invocations.
-	observer Observer
-}
-
-// New constructs a limiter. Namespace isolates applications; domain selects the
-// set of quotas that can be checked together. Neither may be empty or exceed 256 bytes.
-// Concrete go-redis clients support default, positive and disabled MaxRetries
-// budgets. SDK script commands carry NoRetry to prevent ambiguous replay while
-// preserving bounded MOVED/ASK recovery. Other commands retain the client's retry
-// policy. Unsupported negative budgets return ErrInvalid. go-redis clients must
-// be initialized with their constructors; their zero values are unsupported.
-// Custom Scripters, hooks and node factories must preserve the no-replay contract.
-// redis.Ring is unsupported and returns ErrInvalid.
-func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
-	return NewWithOptions(client, namespace, domain, Options{})
-}
-
-// NewWithOptions constructs a limiter with optional synchronous observation.
-// The client, namespace and domain requirements are the same as New.
-// It does not connect to Redis or change the supplied client's configuration.
-func NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error) {
-	if nilClient(client) || namespace == "" || domain == "" || len(namespace) > 256 || len(domain) > 256 {
-		return nil, fmt.Errorf("%w: client, namespace and domain are required (names <= 256 bytes)", ErrInvalid)
-	}
-	if err := validateTransport(client); err != nil {
-		return nil, err
-	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
-}
-
-// nilClient detects nil interfaces and typed nil transports without invoking them.
-func nilClient(client redis.Scripter) bool {
-	if client == nil {
-		return true
-	}
-	v := reflect.ValueOf(client)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return v.IsNil()
-	}
-	return false
-}
-
-// source contains the versioned atomic admission and receipt protocol.
-//
-//go:embed gcra.lua
-var source string
-
-// admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
-var admissionScript = redis.NewScript(source)
-
-// key hashes a quota name while preserving the domain hash slot.
-func (l *Limiter) key(name string) string {
-	return fmt.Sprintf("%s%x", l.prefix, sha256.Sum256([]byte(name)))
-}
-
-// interval validates a rule and returns its conservative per-unit refill time in microseconds.
-func interval(r Rule) (int64, error) {
+// Interval validates the rule and returns its per-unit recovery interval, rounded
+// upward to whole microseconds. Drivers must use this effective interval.
+func (r Rule) Interval() (time.Duration, error) {
 	if r.Name == "" || len(r.Name) > 256 || r.Rate <= 0 || r.Period <= 0 || r.Period > MaxHorizon || r.Burst <= 0 || r.Cost <= 0 || r.Cost > r.Burst {
-		return 0, fmt.Errorf("%w: invalid quota %q; require positive rate/period/burst and 0 < cost <= burst", ErrInvalid, r.Name)
+		return 0, fmt.Errorf("%w: invalid quota %q", ErrInvalid, r.Name)
 	}
-	// Round upward to whole microseconds, never admitting faster than configured.
-	us := r.Period.Nanoseconds() / 1000
-	if r.Period.Nanoseconds()%1000 != 0 {
-		us++
-	}
+	us := (r.Period.Nanoseconds() + 999) / 1000
 	step := us / r.Rate
 	if us%r.Rate != 0 {
 		step++
@@ -155,49 +62,18 @@ func interval(r Rule) (int64, error) {
 	if r.Burst > MaxHorizon.Microseconds()/step {
 		return 0, fmt.Errorf("%w: burst refill horizon exceeds 24 hours for %q", ErrInvalid, r.Name)
 	}
-	return step, nil
+	return time.Duration(step) * time.Microsecond, nil
 }
 
-// Allow immediately checks and charges every rule or denies without charging any.
-// It does not wait, queue work, reserve future capacity, or retry transport errors.
-// Rules must satisfy Validate. A denial returns Allowed=false with a nil error.
-// A timeout or cancellation after dispatch can leave the debit outcome unknown.
-// On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
-func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow", len(rules))
-	defer func() { finish(decision, false, err) }()
-	if err := l.ready(ctx); err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
-	}
-	keys, args, err := l.prepare(rules)
-	if err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
-	}
-	cmd := admissionScript.Run(ctx, l.client, keys, args...)
-	if err := cmd.Err(); err != nil {
-		return Decision{}, scriptFailure("allow", err)
-	}
-	values, err := cmd.Int64Slice()
-	if err != nil {
-		return Decision{}, failure("allow", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
-	}
-	d, err := decodeDecision(values, namesOf(rules))
-	if err != nil {
-		return Decision{}, failure("allow", Unknown, err)
-	}
-	return d, nil
-}
-
-// Validate checks all rule and effective-policy bounds without contacting Redis.
-// Supply 1..MaxRules rules with unique names. It wraps ErrInvalid on failure;
-// it cannot detect conflicts with policies already stored in Redis.
+// Validate checks 1..MaxRules rules with unique names without backend access.
+// It cannot detect conflicts with active backend policies.
 func Validate(rules ...Rule) error {
 	if len(rules) == 0 || len(rules) > MaxRules {
 		return fmt.Errorf("%w: require 1..%d rules", ErrInvalid, MaxRules)
 	}
 	seen := make(map[string]bool, len(rules))
 	for _, r := range rules {
-		if _, err := interval(r); err != nil {
+		if _, err := r.Interval(); err != nil {
 			return err
 		}
 		if seen[r.Name] {
@@ -208,57 +84,177 @@ func Validate(rules ...Rule) error {
 	return nil
 }
 
-// ready rejects unusable receivers and contexts before any backend request.
+// Decision describes one admission. On errors, ignore the returned decision.
+type Decision struct {
+	// Allowed is true when all quota charges were accepted.
+	Allowed bool
+	// RetryAfter is advisory, not a reservation. Retained results preserve the original wait.
+	RetryAfter time.Duration
+	// Limited lists every blocking quota in input order; it is empty on allowance.
+	Limited []string
+}
+
+// Receipt contains an original decision and its replay status. Replayed admission
+// does not authorize executing upstream work twice.
+type Receipt struct {
+	// Decision is the original allow/deny result; ignore it on error.
+	Decision
+	// Replayed reports reuse of a retained allow or deny decision.
+	Replayed bool
+}
+
+// Limiter validates and observes operations on a caller-owned, concurrency-safe
+// Driver. It does not connect, close the driver or create background goroutines.
+type Limiter struct {
+	driver   Driver
+	scope    Scope
+	observer Observer
+}
+
+// New constructs a limiter in a namespace/domain scope without backend access.
+// Namespace isolates applications; domain groups quotas for atomic admission.
+func New(driver Driver, namespace, domain string) (*Limiter, error) {
+	return NewWithOptions(driver, namespace, domain, Options{})
+}
+
+// NewWithOptions constructs a limiter with optional synchronous observation.
+func NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error) {
+	scope := Scope{Namespace: namespace, Domain: domain}
+	if isNil(driver) {
+		return nil, fmt.Errorf("%w: driver is required", ErrInvalid)
+	}
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	return &Limiter{driver: driver, scope: scope, observer: options.Observer}, nil
+}
+
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	r := reflect.ValueOf(v)
+	switch r.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return r.IsNil()
+	}
+	return false
+}
+
 func (l *Limiter) ready(ctx context.Context) error {
-	if ctx == nil || l == nil || l.prefix == "" || nilClient(l.client) {
+	if ctx == nil || l == nil || isNil(l.driver) {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
 }
 
-// prepare validates ordered rules and encodes keys and arguments for ordinary admission.
-func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
-	if err := Validate(rules...); err != nil {
-		return nil, nil, err
-	}
-	keys := make([]string, len(rules))
-	args := make([]interface{}, 0, 2+len(rules)*4)
-	args = append(args, int64(0), "")
-	for i, r := range rules {
-		step, _ := interval(r)
-		keys[i] = l.key(r.Name)
-		args = append(args, step, r.Burst, r.Cost, r.Name)
-	}
-	return keys, args, nil
+// Allow immediately attempts all charges; a normal denial debits none. It does
+// not wait for quota recovery. Backend synchronization may wait until ctx expires.
+// It never retries an uncertain operation. On any error ignore Decision.
+func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
+	finish := l.observe(ctx, "allow", len(rules))
+	defer func() { finish(decision, false, err) }()
+	r, err := l.admit(ctx, "", 0, rules)
+	return r.Decision, err
 }
 
-// namesOf copies quota names in request order for response validation.
-func namesOf(rules []Rule) []string {
-	names := make([]string, len(rules))
-	for i := range rules {
-		names[i] = rules[i].Name
+// AllowOnce retains both allow and deny results for an ID. Retention is whole
+// milliseconds in [1ms,24h]; replay never extends it. Rules are ordered and their
+// names must be UTF-8. Persist the attempt ID before dispatch. Each genuinely new
+// business attempt needs a new ID. On errors ignore Receipt and inspect OutcomeOf.
+func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
+	finish := l.observe(ctx, "allow_once", len(rules))
+	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
+	if id == "" {
+		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return names
+	return l.admit(ctx, id, retention, rules)
 }
 
-// decodeDecision validates the script result and converts microsecond waits to durations.
-func decodeDecision(values []int64, names []string) (Decision, error) {
-	if len(names) == 0 || len(names) > MaxRules || len(values) != len(names)+2 || (values[0] != 0 && values[0] != 1) || values[1] < 0 || values[1] > MaxHorizon.Microseconds() {
-		return Decision{}, fmt.Errorf("%w: unexpected script response", ErrState)
+func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
+	op := "allow"
+	if id != "" {
+		op = "allow_once"
 	}
-	d := Decision{Allowed: values[0] == 1, RetryAfter: time.Duration(values[1]) * time.Microsecond}
-	seen := make(map[string]bool, len(names))
-	for i, name := range names {
-		if name == "" || len(name) > 256 || seen[name] || (values[i+2] != 0 && values[i+2] != 1) {
-			return Decision{}, fmt.Errorf("%w: invalid quota in script response", ErrState)
+	if err := l.ready(ctx); err != nil {
+		return Receipt{}, failure(op, NotCharged, err)
+	}
+	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
+	if err := request.Validate(); err != nil {
+		return Receipt{}, failure(op, NotCharged, err)
+	}
+	result, err := l.driver.Admit(ctx, request)
+	if err != nil {
+		return Receipt{}, driverFailure(op, err)
+	}
+	if err := validateDecision(result.Decision, rules); err != nil {
+		return Receipt{}, failure(op, Unknown, err)
+	}
+	if id == "" && result.Replayed {
+		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: replay of ordinary admission", ErrState))
+	}
+	return result, nil
+}
+
+// Lookup returns a retained complete decision without charging or extending its
+// retention. A missing result does not prove no debit: the original operation may
+// still be in flight or its record may have expired or been lost. Drivers route
+// recovery to the authoritative primary. Use Decision only when found and err==nil.
+func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
+	finish := l.observe(ctx, "lookup", 0)
+	defer func() { finish(decision, found, err) }()
+	if err := l.ready(ctx); err != nil {
+		return Decision{}, false, failure("lookup", NotCharged, err)
+	}
+	request := LookupRequest{Scope: l.scope, ID: id}
+	if err := request.Validate(); err != nil {
+		return Decision{}, false, failure("lookup", NotCharged, err)
+	}
+	decision, found, err = l.driver.Lookup(ctx, request)
+	if err != nil {
+		return Decision{}, false, driverFailure("lookup", err)
+	}
+	if found {
+		if err := validateDecision(decision, nil); err != nil {
+			return Decision{}, false, failure("lookup", Unknown, err)
+		}
+	}
+	if !found {
+		decision = Decision{}
+	}
+	return decision, found, nil
+}
+
+func validateDecision(d Decision, rules []Rule) error {
+	bad := func() error { return fmt.Errorf("%w: invalid driver decision", ErrState) }
+	if d.RetryAfter < 0 || d.RetryAfter > MaxHorizon || len(d.Limited) > MaxRules {
+		return bad()
+	}
+	if d.Allowed {
+		if d.RetryAfter != 0 || len(d.Limited) != 0 {
+			return bad()
+		}
+		return nil
+	}
+	if d.RetryAfter == 0 || len(d.Limited) == 0 {
+		return bad()
+	}
+	seen := map[string]bool{}
+	position := 0
+	for _, name := range d.Limited {
+		if name == "" || len(name) > 256 || seen[name] {
+			return bad()
 		}
 		seen[name] = true
-		if values[i+2] == 1 {
-			d.Limited = append(d.Limited, name)
+		if rules != nil {
+			for position < len(rules) && rules[position].Name != name {
+				position++
+			}
+			if position == len(rules) {
+				return bad()
+			}
+			position++
 		}
 	}
-	if (d.Allowed && (d.RetryAfter != 0 || len(d.Limited) != 0)) || (!d.Allowed && (d.RetryAfter == 0 || len(d.Limited) == 0)) {
-		return Decision{}, fmt.Errorf("%w: inconsistent script response", ErrState)
-	}
-	return d, nil
+	return nil
 }

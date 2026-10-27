@@ -1,4 +1,7 @@
-# Operating Pacelock
+# Operating the Redis driver
+
+For PostgreSQL, see its [deployment guide](../drivers/postgres/README.md).
+Core Driver contracts are documented [separately](drivers.md).
 
 ## Before production traffic
 

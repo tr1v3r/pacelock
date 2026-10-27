@@ -1,5 +1,8 @@
 # Commercial SDK hardening contract
 
+Redis-specific hardening details below remain applicable to the Redis driver.
+For PostgreSQL deployment limits, see [its guide](../drivers/postgres/README.md).
+
 Scope: the existing immediate, known-cost, weighted multidimensional limiter.
 This work does not turn the limiter into a scheduler, concurrency owner, billing
 ledger, or output-token reservation system. Existing `New`, `Allow`, `Rule`,

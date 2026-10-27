@@ -3,79 +3,141 @@ package pacelock
 import (
 	"context"
 	"errors"
-	"strings"
+	"io"
+	"reflect"
 	"testing"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
-func TestInterval(t *testing.T) {
-	base := Rule{Name: "tokens", Rate: 3, Period: time.Second, Burst: 3, Cost: 2}
-	step, err := interval(base)
-	if err != nil || step != 333334 {
-		t.Fatalf("step=%d err=%v", step, err)
+type testDriver struct {
+	calls   int
+	request Admission
+	result  Receipt
+	err     error
+	found   bool
+}
+
+func (d *testDriver) Admit(_ context.Context, a Admission) (Receipt, error) {
+	d.calls++
+	d.request = a
+	return d.result, d.err
+}
+func (d *testDriver) Lookup(context.Context, LookupRequest) (Decision, bool, error) {
+	d.calls++
+	return d.result.Decision, d.found, d.err
+}
+func sampleRule() Rule { return Rule{Name: "q", Rate: 1, Period: time.Second, Burst: 5, Cost: 1} }
+
+func TestFacadeValidationAndErrors(t *testing.T) {
+	var typedNil *testDriver
+	for _, driver := range []Driver{nil, typedNil} {
+		if _, err := New(driver, "app", "domain"); !errors.Is(err, ErrInvalid) {
+			t.Fatal(err)
+		}
 	}
-	tests := []struct {
-		name   string
-		change func(*Rule)
+	driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+	if _, err := New(driver, "", "domain"); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
+	}
+	l, _ := New(driver, "app", "domain")
+	ctx := context.Background()
+	for _, call := range []func() error{
+		func() error { _, err := l.Allow(ctx); return err },
+		func() error { _, err := l.Allow(ctx, sampleRule(), sampleRule()); return err },
+		func() error { _, err := l.Allow(nil, sampleRule()); return err },
+		func() error { _, err := l.AllowOnce(ctx, "", time.Second, sampleRule()); return err },
+		func() error { _, err := l.AllowOnce(ctx, "id", time.Nanosecond, sampleRule()); return err },
+		func() error { _, _, err := l.Lookup(ctx, ""); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+			t.Fatal(err)
+		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := l.Allow(canceled, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
+		t.Fatal(err)
+	}
+	if driver.calls != 0 {
+		t.Fatal("invalid request reached driver")
+	}
+	if _, err := l.AllowOnce(ctx, "id", time.Minute, sampleRule()); err != nil {
+		t.Fatal(err)
+	}
+	if driver.request.Namespace != "app" || driver.request.Domain != "domain" || driver.request.ID != "id" {
+		t.Fatal(driver.request)
+	}
+	for _, tc := range []struct {
+		err  error
+		want Outcome
 	}{
-		{"empty name", func(r *Rule) { r.Name = "" }},
-		{"long name", func(r *Rule) { r.Name = strings.Repeat("a", 257) }},
-		{"zero rate", func(r *Rule) { r.Rate = 0 }},
-		{"negative period", func(r *Rule) { r.Period = -1 }},
-		{"long period", func(r *Rule) { r.Period = MaxHorizon + 1 }},
-		{"zero burst", func(r *Rule) { r.Burst = 0 }},
-		{"zero cost", func(r *Rule) { r.Cost = 0 }},
-		{"oversized cost", func(r *Rule) { r.Cost = 4 }},
-		{"overflow", func(r *Rule) { r.Burst = 1 << 62 }},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r := base
-			tc.change(&r)
-			if _, err := interval(r); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("err=%v", err)
-			}
-		})
-	}
-	base.Period = time.Nanosecond
-	base.Rate = 1 << 62
-	if got, err := interval(base); err != nil || got != 1 {
-		t.Fatalf("sub-microsecond rounding: %d %v", got, err)
+		{io.ErrUnexpectedEOF, Unknown},
+		{&Error{Op: "backend", Outcome: NotCharged, Err: ErrPolicyMismatch}, NotCharged},
+		{&Error{Op: "backend", Outcome: Unknown, Err: context.DeadlineExceeded}, Unknown},
+	} {
+		driver.err = tc.err
+		decision, err := l.Allow(ctx, sampleRule())
+		var typed *Error
+		if !errors.Is(err, tc.err) || !errors.As(err, &typed) || typed.Op != "allow" || OutcomeOf(err) != tc.want || decision.Allowed {
+			t.Fatalf("%+v %v", decision, err)
+		}
 	}
 }
 
-func TestValidationBeforeRedis(t *testing.T) {
-	client := redis.NewClient(&redis.Options{Addr: "localhost:1", MaxRetries: -1})
-	defer client.Close()
-	if _, err := New(nil, "app", "domain"); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
-	}
-	if _, err := New(client, "", "domain"); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
-	}
-	l, err := New(client, "app", "domain")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := Rule{Name: "rpm", Rate: 1, Period: time.Second, Burst: 1, Cost: 1}
-	for _, rules := range [][]Rule{nil, {r, r}, make([]Rule, MaxRules+1)} {
-		if _, err := l.Allow(context.Background(), rules...); !errors.Is(err, ErrInvalid) {
-			t.Fatalf("err=%v", err)
+func TestFacadeRejectsMalformedDriverResults(t *testing.T) {
+	for _, decision := range []Decision{
+		{}, {Allowed: true, RetryAfter: time.Second},
+		{RetryAfter: time.Second, Limited: []string{"wrong"}},
+		{RetryAfter: time.Second, Limited: []string{"q", "q"}},
+	} {
+		driver := &testDriver{result: Receipt{Decision: decision}}
+		l, _ := New(driver, "a", "b")
+		if _, err := l.Allow(context.Background(), sampleRule()); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+			t.Fatalf("%+v %v", decision, err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := l.Allow(ctx, r); !errors.Is(err, context.Canceled) {
+	driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}, Replayed: true}}
+	l, _ := New(driver, "a", "b")
+	if _, err := l.Allow(context.Background(), sampleRule()); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
-	a, _ := New(client, "a", "bc")
-	b, _ := New(client, "ab", "c")
-	if a.prefix == b.prefix {
-		t.Fatal("ambiguous namespace/domain encoding")
+}
+
+func TestFacadeObservation(t *testing.T) {
+	var events []Event
+	driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+	l, _ := NewWithOptions(driver, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
+	l.Allow(context.Background(), sampleRule())
+	l.Allow(context.Background())
+	driver.result.Replayed = true
+	l.AllowOnce(context.Background(), "id", time.Minute, sampleRule())
+	driver.found = true
+	l.Lookup(context.Background(), "id")
+	driver.found = false
+	l.Lookup(context.Background(), "id")
+	var results []string
+	for _, e := range events {
+		results = append(results, e.Result)
 	}
-	if strings.Count(l.key("{injected}:key"), "{") != 1 {
-		t.Fatal("untrusted key changed hash tag")
+	if !reflect.DeepEqual(results, []string{"allowed", "error", "allowed", "found", "missing"}) || !events[2].Replayed || events[3].Replayed {
+		t.Fatal(events)
+	}
+}
+
+func TestFingerprintAndRounding(t *testing.T) {
+	a := Admission{Scope: Scope{"a", "b"}, ID: "id", Retention: time.Minute, Rules: []Rule{sampleRule(), {Name: "tokens", Rate: 3, Period: time.Second, Burst: 4, Cost: 2}}}
+	step, err := a.Rules[1].Interval()
+	if err != nil || step != 333334*time.Microsecond {
+		t.Fatal(step, err)
+	}
+	fp := a.Fingerprint()
+	a.Rules[0].Rate = 60
+	a.Rules[0].Period = time.Minute
+	if fp != a.Fingerprint() {
+		t.Fatal("equivalent policy changed fingerprint")
+	}
+	a.Rules[0], a.Rules[1] = a.Rules[1], a.Rules[0]
+	if fp == a.Fingerprint() {
+		t.Fatal("ordering not bound")
 	}
 }

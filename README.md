@@ -3,7 +3,7 @@
 [![CI](https://github.com/tr1v3r/pacelock/actions/workflows/ci.yml/badge.svg)](https://github.com/tr1v3r/pacelock/actions/workflows/ci.yml)
 [简体中文](README.zh-CN.md)
 
-**Atomic, weighted, multidimensional rate admission for Go and Redis.**
+**Atomic, weighted, multidimensional GCRA admission for Go, with Redis and PostgreSQL drivers.**
 
 Pacelock coordinates shared quotas across service instances. One admission can
 charge request count, known input tokens and tenant capacity together: all pass
@@ -12,7 +12,7 @@ the core accepts any known positive cost.
 
 The API is pre-v1. This SDK is a rate-admission component, with explicit failure
 contracts and bounded idempotency; it does not implement an LLM gateway or billing
-ledger. Requires Go 1.24+ and Redis 7+ to compile/run. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
+ledger. Requires Go 1.24+. Choose Redis 7+ or PostgreSQL 16+. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
 and the [verification record](docs/verification.md) for tested configurations.
 
 ## Fully commented SDK for agents
@@ -23,12 +23,13 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [Admission API](pacelock.go), [idempotency and recovery](idempotency.go), and [error outcomes](errors.go).
+Start with the [Admission API](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
 
 ## Capabilities
 
 - Weighted GCRA and atomic admission across 1–32 named quotas.
-- Redis server time, shared state and automatic expiry when capacity replenishes.
+- Backend server time and shared state; Redis TTL or PostgreSQL logical expiry.
+- A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
@@ -44,12 +45,15 @@ are not a joint transaction.
 This README documents the pre-release `dev` line. Install that line explicitly:
 
 ```sh
-go get github.com/tr1v3r/pacelock@dev
+go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/drivers/redis@dev
 ```
 
 The default `@latest` currently selects an older API and does not include all APIs
 shown here. Keep the resolved pseudo-version in your application's `go.mod` for
 reproducible builds; `@dev` moves as development continues and is not a stable release.
+
+The constructor now accepts `pacelock.Driver`, a breaking pre-v1 change.
+Import `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` for the example.
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -58,7 +62,11 @@ client := redis.NewClient(&redis.Options{
 })
 defer client.Close()
 
-limiter, err := pacelock.New(client, "llm-service", "provider-account-a")
+driver, err := redisdriver.New(client)
+if err != nil {
+    return err
+}
+limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
@@ -79,7 +87,7 @@ if !decision.Allowed {
 ```
 
 `Allow` consumes capacity for this attempt and is **not idempotent**. Business
-failure after admission does not refund capacity. The limiter neither owns nor
+failure after admission does not refund capacity. For the Redis driver, the limiter neither owns nor
 closes the Redis client. Constructors do not connect or change client settings.
 Use go-redis constructors to initialize clients; zero-value client structs are
 unsupported. For these initialized concrete `*redis.Client` / `*redis.ClusterClient`
@@ -111,6 +119,30 @@ node factories and proxies must preserve this contract. See [operations](docs/op
 Every instance must use the same namespace, domain, quota names and effective
 policies. Include all applicable account/model/tenant quotas in every call; omitted
 rules cannot be inferred. Different namespaces/domains are independent.
+
+## PostgreSQL and the Driver boundary
+
+Install `github.com/tr1v3r/pacelock/drivers/postgres@dev` for PostgreSQL.
+The application registers a `database/sql` transport and owns a primary DB:
+
+```go
+driver, err := postgres.New(db) // import github.com/tr1v3r/pacelock/drivers/postgres
+if err != nil { return err }
+if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not per request
+limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
+```
+
+Both drivers share `Allow`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
+locks one domain row, samples `clock_timestamp()` after locking, and commits every
+quota and retained result in one short transaction. Pre-commit failures roll back;
+commit errors are `Unknown`. This driver does not join a caller's business transaction.
+Domain contention, WAL, pools and vacuum need deployment testing; no throughput
+advantage is claimed. `Prune` offers bounded caller-scheduled physical cleanup;
+logical expiry works without cleanup. The SDK starts no background workers.
+
+See the [PostgreSQL guide](drivers/postgres/README.md), [Redis guide](drivers/redis/README.md),
+and [custom-driver contract](docs/drivers.md). Drivers are alternatives: switching
+backends does not transfer quota debt or retained IDs and is not automatic failover.
 
 ## Idempotent admission and recovery
 
@@ -147,7 +179,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - Deduplicating admission does not deduplicate upstream execution. Coordinate the
   business attempt separately. A new actual model call needs a new admission ID.
 
-For a complete application-owned flow, see the [durable admission example](examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
+For a complete application-owned flow, see the [durable admission example](drivers/redis/examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
 
 ## Errors and observation
 
@@ -172,7 +204,7 @@ unrecognized errors.
 operation, duration, result, rule count, replay status, delay and error without
 raw IDs or quota names as fields. Callbacks must be fast and concurrency-safe;
 panics propagate. Do not label metrics with error text or user identifiers. See
-[runnable observation/recovery example](examples/idempotency/main.go).
+[runnable observation/recovery example](drivers/redis/examples/idempotency/main.go).
 
 ## Quota and operational contracts
 
@@ -204,25 +236,22 @@ See [operations and incident recovery](docs/operations.md),
 ## Examples and validation
 
 ```sh
-# Disposable standalone Redis and three-master Cluster (requires Docker Compose).
 docker compose up -d --wait
-REDIS_ADDR=localhost:16379 go run ./examples/llm
-REDIS_ADDR=localhost:16379 go run ./examples/idempotency
-
-go test ./...
-go vet ./...
+(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
+(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
+(cd examples/postgres && go run .)
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
-  go test -race -count=1 -cover ./...
-# Dedicated standalone test Redis must allow ACL user creation for fault tests.
-# Unset integration variables means integration tests are skipped.
-go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .
-go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .
-PACELOCK_REDIS_ADDR=localhost:16379 go test -run '^$' -bench . -benchmem .
+PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
+PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
+PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
+(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
+(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
 docker compose down
 ```
 
-CI covers Go 1.24/stable, Redis 7.0/7/8, and a three-master Cluster.
+CI covers Go 1.24/stable, Redis 7.0/7/8, a three-master Cluster, and PostgreSQL 16/17/18.
+Shared contracts and PG rollback/commit-recovery tests run with race detection.
 The default suite includes synchronized bursts of 100/500/1000 callers, up to
 32 quota dimensions, weighted/shared quotas, tenant isolation, idempotency races,
 cancellation, pool exhaustion, lost-response recovery, and four-process contention.
@@ -234,3 +263,7 @@ See [contribution/release checks](CONTRIBUTING.md) and [security policy](SECURIT
 Deployment load, memory and failover tools with raw local observations are documented in [deployment validation](docs/deployment-validation.md). These are bounded fixture measurements, not production SLOs.
 
 MIT licensed.
+
+The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
+example and integration-test modules require Go 1.25+ to use patched pgx/text
+dependencies. Production applications should use a maintained Go release.

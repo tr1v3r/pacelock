@@ -13,8 +13,8 @@ From the repository root:
 
 ```sh
 docker compose -p pacelock-validation up -d --wait
-go build -o /tmp/pacelock-load ./examples/load
-go build -o /tmp/pacelock-probe ./examples/recovery-probe
+(cd drivers/redis && go build -o /tmp/pacelock-load ./examples/load)
+(cd drivers/redis && go build -o /tmp/pacelock-probe ./examples/recovery-probe)
 python3 scripts/validation/load-matrix.py --binary /tmp/pacelock-load \
   --output /tmp/pacelock-load.jsonl --duration 10s --sustained 30m
 # Run sequentially, not concurrently with other measurements.
@@ -25,7 +25,7 @@ python3 scripts/validation/failover.py --probe /tmp/pacelock-probe \
   --output /tmp/pacelock-faults.json
 PACELOCK_REDIS_ADDR=127.0.0.1:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=127.0.0.1:17000,127.0.0.1:17001,127.0.0.1:17002 \
-PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster go test -race -count=1 ./...
+PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster sh scripts/check.sh
 docker compose -p pacelock-validation down
 ```
 

@@ -1,0 +1,273 @@
+package contracts_test
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/redis/go-redis/v9"
+	"github.com/tr1v3r/pacelock"
+	"github.com/tr1v3r/pacelock/drivers/postgres"
+	redisdriver "github.com/tr1v3r/pacelock/drivers/redis"
+)
+
+type backend struct {
+	name   string
+	driver [2]pacelock.Driver
+}
+
+func backends(t *testing.T) []backend {
+	t.Helper()
+	var result []backend
+	required := "," + os.Getenv("PACELOCK_REQUIRED_DRIVER_BACKENDS") + ","
+	for _, name := range []string{"redis", "postgres"} {
+		env := "PACELOCK_REDIS_ADDR"
+		if name == "postgres" {
+			env = "PACELOCK_POSTGRES_DSN"
+		}
+		address := os.Getenv(env)
+		if address == "" {
+			if strings.Contains(required, ","+name+",") {
+				t.Fatalf("required %s backend is unconfigured", name)
+			}
+			continue
+		}
+		b := backend{name: name}
+		for i := range b.driver {
+			if name == "redis" {
+				client := redis.NewClient(&redis.Options{Addr: address, ContextTimeoutEnabled: true})
+				t.Cleanup(func() { client.Close() })
+				d, err := redisdriver.New(client)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.driver[i] = d
+			} else {
+				db, err := sql.Open("pgx", address)
+				if err != nil {
+					t.Fatal(err)
+				}
+				db.SetMaxOpenConns(8)
+				db.SetMaxIdleConns(8)
+				t.Cleanup(func() { db.Close() })
+				d, err := postgres.New(db)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err = d.Migrate(ctx)
+				cancel()
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.driver[i] = d
+			}
+		}
+		result = append(result, b)
+	}
+	if len(result) == 0 {
+		t.Skip("set PACELOCK_REDIS_ADDR and/or PACELOCK_POSTGRES_DSN")
+	}
+	return result
+}
+
+var sequence atomic.Int64
+
+func limiter(t *testing.T, b backend, index int, domain string) *pacelock.Limiter {
+	t.Helper()
+	l, err := pacelock.New(b.driver[index], "contract-"+domain, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+func freshDomain() string { return fmt.Sprintf("%d-%d", time.Now().UnixNano(), sequence.Add(1)) }
+func rule(name string, burst, cost int64) pacelock.Rule {
+	return pacelock.Rule{Name: name, Rate: 1, Period: time.Minute, Burst: burst, Cost: cost}
+}
+func mustAllow(t *testing.T, l *pacelock.Limiter, rules ...pacelock.Rule) {
+	t.Helper()
+	d, err := l.Allow(context.Background(), rules...)
+	if err != nil || !d.Allowed {
+		t.Fatalf("allow: %+v %v", d, err)
+	}
+}
+
+func TestDriverContract(t *testing.T) {
+	for _, b := range backends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			t.Run("joint denial is uncharged", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				mustAllow(t, l, rule("blocked", 1, 1))
+				d, err := l.Allow(context.Background(), rule("fresh", 5, 2), rule("blocked", 1, 1))
+				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"blocked"}) || d.RetryAfter <= 0 {
+					t.Fatal(d, err)
+				}
+				mustAllow(t, l, rule("fresh", 5, 5))
+			})
+			t.Run("multiple blockers and maximum retry", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				slow := rule("slow", 1, 1)
+				fast := slow
+				fast.Name = "fast"
+				fast.Period = 10 * time.Second
+				mustAllow(t, l, slow, fast)
+				d, err := l.Allow(context.Background(), fast, slow)
+				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"fast", "slow"}) || d.RetryAfter < 50*time.Second || d.RetryAfter > time.Minute {
+					t.Fatal(d, err)
+				}
+			})
+			t.Run("scope isolation", func(t *testing.T) {
+				domain := freshDomain()
+				a := limiter(t, b, 0, domain)
+				mustAllow(t, a, rule("q", 1, 1))
+				other, _ := pacelock.New(b.driver[1], "other-app", domain)
+				mustAllow(t, other, rule("q", 1, 1))
+				mustAllow(t, limiter(t, b, 1, domain+"-other"), rule("q", 1, 1))
+			})
+			t.Run("policy conflict is uncharged", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				mustAllow(t, l, rule("q", 5, 1))
+				changed := rule("q", 6, 1)
+				if _, err := l.Allow(context.Background(), rule("fresh", 1, 1), changed); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+					t.Fatal(err)
+				}
+				mustAllow(t, l, rule("fresh", 1, 1))
+			})
+			t.Run("weighted cross client contention", func(t *testing.T) {
+				domain := freshDomain()
+				limiters := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+				var allowed atomic.Int64
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				for i := range 128 {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						<-start
+						ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+						defer cancel()
+						d, err := limiters[i%2].Allow(ctx, rule("q", 31, 3))
+						if err != nil {
+							t.Error(err)
+						} else if d.Allowed {
+							allowed.Add(1)
+						}
+					}(i)
+				}
+				close(start)
+				wg.Wait()
+				if allowed.Load() != 10 {
+					t.Fatal("allowed", allowed.Load())
+				}
+				mustAllow(t, limiters[0], rule("q", 31, 1))
+			})
+			t.Run("retained same ID contention and conflict", func(t *testing.T) {
+				domain := freshDomain()
+				ls := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+				var first atomic.Int64
+				var wg sync.WaitGroup
+				for i := range 64 {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						r, err := ls[i%2].AllowOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
+						if err != nil || !r.Allowed {
+							t.Errorf("%+v %v", r, err)
+						} else if !r.Replayed {
+							first.Add(1)
+						}
+					}(i)
+				}
+				wg.Wait()
+				if first.Load() != 1 {
+					t.Fatal("first", first.Load())
+				}
+				d, found, err := ls[1].Lookup(context.Background(), "same")
+				if err != nil || !found || !d.Allowed {
+					t.Fatal(d, found, err)
+				}
+				if _, err := ls[1].AllowOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
+					t.Fatal(err)
+				}
+				d, err = ls[0].Allow(context.Background(), rule("q", 1, 1))
+				if err != nil || d.Allowed {
+					t.Fatal(d, err)
+				}
+			})
+			t.Run("denial replay preserves original wait", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				mustAllow(t, l, rule("q", 1, 1))
+				first, err := l.AllowOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				if err != nil || first.Allowed {
+					t.Fatal(first, err)
+				}
+				again, err := l.AllowOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				if err != nil || !again.Replayed || !reflect.DeepEqual(first.Decision, again.Decision) {
+					t.Fatal(first, again, err)
+				}
+				d, found, err := l.Lookup(context.Background(), "denied")
+				if err != nil || !found || !reflect.DeepEqual(d, first.Decision) {
+					t.Fatal(d, found, err)
+				}
+			})
+			t.Run("ordered and equivalent policy fingerprints", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				rules := []pacelock.Rule{rule("a", 3, 1), rule("b", 3, 1)}
+				if _, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil {
+					t.Fatal(err)
+				}
+				rules[0].Rate = 60
+				rules[0].Period = time.Hour
+				if r, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
+					t.Fatal(r, err)
+				}
+				rules[0], rules[1] = rules[1], rules[0]
+				if _, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
+					t.Fatal(err)
+				}
+			})
+			t.Run("expiry recovery and no retention extension", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				r := rule("q", 1, 1)
+				r.Period = 20 * time.Millisecond
+				if _, err := l.AllowOnce(context.Background(), "short", time.Second, r); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(600 * time.Millisecond)
+				replay, err := l.AllowOnce(context.Background(), "short", time.Second, r)
+				if err != nil || !replay.Replayed {
+					t.Fatal(replay, err)
+				}
+				time.Sleep(500 * time.Millisecond)
+				if _, found, err := l.Lookup(context.Background(), "short"); err != nil || found {
+					t.Fatal(found, err)
+				}
+				r.Burst = 2
+				mustAllow(t, l, r)
+			})
+			t.Run("32 dimensions and cancellation", func(t *testing.T) {
+				l := limiter(t, b, 0, freshDomain())
+				rules := make([]pacelock.Rule, pacelock.MaxRules)
+				for i := range rules {
+					rules[i] = rule(fmt.Sprint(i), 1, 1)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, err := l.Allow(ctx, rules...); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+					t.Fatal(err)
+				}
+				mustAllow(t, l, rules...)
+			})
+		})
+	}
+}

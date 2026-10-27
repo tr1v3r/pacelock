@@ -64,6 +64,7 @@ on all masters, and the existing fault suite creates temporary ACL users. Never
 point these tests at production or shared development Redis.
 
 ```sh
+cd drivers/redis/internal/engine
 docker compose up -d --wait
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \

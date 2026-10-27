@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- `New` and `NewWithOptions` now accept an atomic `Driver` rather than a Redis
+  client. Construct the independent Redis or PostgreSQL driver explicitly.
+- Redis examples and backend tests moved into `drivers/redis`; use
+  `scripts/check.sh` to check every module. The core has no third-party dependencies.
+
 ### Added
+
+- Public `Driver`, `Admission`, `LookupRequest`, `Scope`, `Rule.Interval`, and a
+  pure `Evaluate` transition for custom atomic persistence boundaries.
+- PostgreSQL driver with explicit schema setup, domain row locking, backend time,
+  transactional receipts/debits and bounded caller-scheduled cleanup.
+- Shared backend contracts and real PostgreSQL rollback, lost-commit-reply recovery,
+  lock-wait cancellation and expiry tests, plus a runnable pgx example.
 
 - `AllowOnce` and `Lookup` for bounded idempotent admission and recovery, including
   conflict detection, cached rejection, immutable retention and pending markers
@@ -32,7 +46,9 @@
 
 ### Compatibility
 
-- Existing `New`, `Allow`, `Rule`, `Decision` and quota state/key encoding remain.
+- `Allow`, `AllowOnce`, `Lookup`, `Rule` and `Decision` retain their business semantics.
+  The Redis v1 quota keys, Lua and retained-record encoding remain unchanged; the
+  constructor is breaking. Redis and PostgreSQL do not share or migrate state.
 - Concrete go-redis clients accept default, positive and disabled (`-1`)
   `MaxRetries` budgets. Other commands on a shared client keep their retry policy.
   Default/positive Cluster redirect budgets allow bounded MOVED/ASK recovery;

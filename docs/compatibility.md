@@ -1,10 +1,19 @@
 # Compatibility and migration
 
+## Driver constructor migration
+
+This pre-v1 change replaces `pacelock.New(client, ns, domain)` with
+`redisdriver.New(client)` followed by `pacelock.New(driver, ns, domain)`.
+`NewWithOptions` now accepts Driver too. Install the selected driver module explicitly;
+core consumers do not import Redis. Existing Redis v1 keys, Lua and retained records
+are preserved. Moving to PostgreSQL does not transfer existing debt or IDs. See the
+[Driver contract](drivers.md) and [PostgreSQL guide](../drivers/postgres/README.md).
+
 ## Supported contract
 
-The module targets Go 1.24+ and Redis 7+. CI configuration tests Go 1.24/stable with
+The core targets Go 1.24+; independent drivers target Redis 7+ or PostgreSQL 16+. CI configuration tests Go 1.24/stable with
 Redis 7.0, the current Redis 7 image and Redis 8. Cluster routing is tested with
-three Redis 7 masters. Live results and exact local versions are recorded in
+three Redis 7 masters. PostgreSQL CI includes 16/17/18 and common Driver contracts. Live results and exact local versions are recorded in
 [verification.md](verification.md); configured CI is not evidence of a completed
 remote run. Managed Redis variants and Redis-compatible products require their
 own compatibility validation.
@@ -17,7 +26,7 @@ library advisories [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) and
 Go 1.26.10 or Go 1.27.3 on those branches; use later security patches when available.
 Security CI uses stable Go. The minimum-version job checks compatibility only.
 
-Use a concurrency-safe go-redis client and primary routing. `New` still accepts
+Use a concurrency-safe go-redis client and primary routing. `redisdriver.New` accepts
 `redis.Scripter` for custom integrations, but such integrations must preserve
 Redis execution, routing and error semantics. Client ownership remains with the
 caller. No background goroutines, queues, implicit retry loop or package-global
@@ -99,3 +108,7 @@ Use separate IDs for admission transport recovery and for distinct business
 attempts. Implement business execution coordination outside this limiter. This
 SDK does not provide exactly-once execution, crash-proof quota accounting, refund,
 output reservation or billing. Those are not implied by a successful release.
+
+The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
+example and integration-test modules require Go 1.25+ to use patched pgx/text
+dependencies. Production applications should use a maintained Go release.
