@@ -90,10 +90,18 @@ func nilClient(client redis.Scripter) bool {
 	return false
 }
 
-// source contains the versioned atomic admission and receipt protocol.
+// protocolSource contains shared logical-expiry and legacy-format readers.
+//
+//go:embed protocol.lua
+var protocolSource string
+
+// admissionSource computes the decision before its only mutation, MSET.
 //
 //go:embed gcra.lua
-var source string
+var admissionSource string
+
+// source is the complete script, also used by model and failure-injection tests.
+var source = protocolSource + admissionSource
 
 // admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
 var admissionScript = redis.NewScript(source)

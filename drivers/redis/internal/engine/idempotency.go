@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -105,8 +106,13 @@ func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, fou
 	return d, true, nil
 }
 
+// lookupSource filters expired v2 records while preserving legacy receipts.
+//
+//go:embed lookup.lua
+var lookupSource string
+
 // lookupScript keeps EVAL routing on the primary, even though it does not write.
-var lookupScript = redis.NewScript(`local v = redis.pcall('GET', KEYS[1]); if type(v) == 'table' and v.err then return redis.error_reply('PACE_RECORD unreadable admission record') end; return v`)
+var lookupScript = redis.NewScript(protocolSource + lookupSource)
 
 // validID bounds opaque admission IDs before hashing; UTF-8 is not required.
 func validID(id string) error {

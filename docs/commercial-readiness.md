@@ -10,8 +10,9 @@ ledger, or output-token reservation system. Existing `New`, `Allow`, `Rule`,
 
 ## Contracts fixed before implementation
 
-- A normal quota denial changes no quota. Redis execution errors may partially
-  write: Lua isolation is not rollback or crash durability.
+- A normal quota denial changes no quota. Redis computes/encodes before one
+  final MSET of quotas and receipt. Script-visible commit rejection is NotCharged;
+  lost replies/crash durability still require conservative recovery.
 - Admission consumes capacity for a business attempt, even if later work fails.
   There is no implicit refund, queue, background worker, or automatic retry.
 - Invalid inputs and pre-dispatch cancellation do not charge. Errors expose
@@ -22,8 +23,9 @@ ledger, or output-token reservation system. Existing `New`, `Allow`, `Rule`,
   explicit whole-millisecond duration between 1 ms and 24 h. It is not extended
   by reads or replays. Rule order is significant, and effective policy, costs,
   names and retention are bound to the ID. A mismatch never charges.
-- A pending record is written before quota mutations. Interrupted writes leave
-  an unknown outcome that cannot be replayed into another debit while retained.
+- New Redis operations commit complete results without Pending. Legacy Pending
+  remains unknown and cannot be replayed into another debit while retained.
+  Logical expiry is independent of bounded application-scheduled cleanup.
   Only a complete record can be replayed or returned by `Lookup`. Missing records
   do not prove that an admission never happened. Expiry, eviction, deletion and
   failover data loss bound all deduplication guarantees.

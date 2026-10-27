@@ -1,6 +1,6 @@
 module github.com/tr1v3r/pacelock/drivers/redis
 
-go 1.24.0
+go 1.26.0
 
 require github.com/redis/go-redis/v9 v9.22.0
 

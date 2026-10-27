@@ -100,6 +100,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 		outcome Outcome
 	}{
 		{"transport", nil, io.ErrUnexpectedEOF, ErrBackend, Unknown},
+		{"rejected commit", nil, serverError("PACE_COMMIT NOPERM"), ErrBackend, NotCharged},
 		{"canceled after dispatch", nil, context.Canceled, context.Canceled, Unknown},
 		{"policy", nil, serverError("PACE_POLICY conflict"), ErrPolicyMismatch, NotCharged},
 		{"state", nil, serverError("PACE_STATE wrong type"), ErrState, NotCharged},

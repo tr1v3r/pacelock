@@ -72,7 +72,7 @@ func TestRedisWeightedAndAtomic(t *testing.T) {
 		t.Fatalf("%+v %v", d, err)
 	}
 	ttl := c.PTTL(ctx, l.key("tokens")).Val()
-	if ttl <= 0 || ttl > 5*time.Hour {
+	if ttl != -1 {
 		t.Fatalf("ttl=%s", ttl)
 	}
 }
@@ -143,16 +143,15 @@ func TestRedisRefillAndExpiry(t *testing.T) {
 	if d, err := l.Allow(ctx, r); err != nil || d.Allowed || d.RetryAfter <= 0 || d.RetryAfter > r.Period {
 		t.Fatalf("%+v %v", d, err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for c.Exists(ctx, l.key(r.Name)).Val() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("idle quota did not expire")
-		}
-		time.Sleep(10 * time.Millisecond)
+	time.Sleep(220 * time.Millisecond)
+	if c.Exists(ctx, l.key(r.Name)).Val() != 1 {
+		t.Fatal("test must retain physically expired logical state")
 	}
+	r.Burst = 2 // A logically expired policy may change without physical cleanup.
 	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
+
 }
 
 func TestRedisIndependentDomainsAndCanceledCall(t *testing.T) {

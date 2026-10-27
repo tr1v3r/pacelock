@@ -7,7 +7,7 @@
 
 Pacelock 协调多个服务实例的共享额度。一次准入可以同时扣减请求数、已知输入 token 和租户额度：全部通过才扣减；任一额度不足则全部不扣减。LLM API 是主要场景，底层支持任意已知的正数消耗。
 
-API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约和有保留期限的幂等能力，不实现 LLM 网关或计费账本。最低要求为 Go 1.24+，后端选择 Redis 7+ 或 PostgreSQL 16+；生产构建应使用仍在安全维护的 Go 分支及其最新修补版。已验证配置见[兼容性说明](docs/compatibility.md)和[验证记录](docs/verification.md)。
+API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约和有保留期限的幂等能力，不实现 LLM 网关或计费账本。最低要求为 Go 1.26+，后端选择 Redis 7+ 或 PostgreSQL 16+；生产构建应使用仍在安全维护的 Go 分支及其最新修补版。已验证配置见[兼容性说明](docs/compatibility.md)和[验证记录](docs/verification.md)。
 
 ## 方便 agent 使用的完整注释 SDK
 
@@ -21,14 +21,16 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 
 - 加权 GCRA，一次调用 1～32 个具名额度的原子准入。
 - 绑定固定的 `Policy` / `Quota`，每次仅提交 `Charge` 消耗。
-- 后端服务端时间、共享状态，Redis TTL 或 PostgreSQL 逻辑过期。
+- 后端服务端时间、共享状态、逻辑过期及显式物理清理。
+- Redis Lua 最后一次 MSET 提交，由应用调度有界的 `Driver.Prune`。
 - 核心仅依赖标准库，Redis/PostgreSQL Driver 为独立模块。
 - 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
+- 支持 context 取消的阻塞式 `Wait`，复用多维加权准入。
 - 有保留期限的幂等准入、参数冲突检测和结果查询。
 - 可程序化判断的扣减结果、离线规则校验和同步观测回调。
 - 真实 Redis/Cluster、race、模型对照、模糊测试、故障注入和基准测试。
 
-不包含队列、阻塞式 `Wait`、分词、输出预留、退款、流式用量校正或并发许可管理。[Airlock](https://github.com/tr1v3r/airlock) 处理正在执行的工作数量；Pacelock 处理随时间恢复的消耗。两者不构成联合事务。
+不包含队列、分词、输出预留、退款、流式用量校正或并发许可管理。[Airlock](https://github.com/tr1v3r/airlock) 处理正在执行的工作数量；Pacelock 处理随时间恢复的消耗。两者不构成联合事务。
 
 ## 安装与使用
 
@@ -135,7 +137,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，�
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-两种 Driver 共用 `Bind`、`Allow`、`AllowOnce`、`Lookup`、错误结果和观测接口。
+两种 Driver 共用 `Bind`、`Allow`、`Wait`、`AllowOnce`、`Lookup`、错误结果和观测接口。
 PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，用短事务
 一起提交全部额度与准入记录。提交前失败会回滚；提交错误保守标记为 `Unknown`。
 当前不会加入调用者的业务事务。domain 竞争、WAL、连接池和 vacuum 需要目标环境验证，
@@ -144,6 +146,26 @@ SDK 不启动后台任务。
 
 详见 [PostgreSQL 指南](drivers/postgres/README.zh-CN.md)、[Redis 指南](drivers/redis/README.zh-CN.md)
 和[自定义 Driver 契约](docs/drivers.md)。切换后端不会迁移额度债务或幂等历史，不能当作自动故障降级。
+
+## 阻塞等待准入
+
+`Wait(ctx, rules...) error` 接受与 `Allow` 相同的多维加权规则。先立即尝试，普通额度拒绝后按 `RetryAfter` 等待，再原子检查全部额度，直到准入成功或发生错误：
+
+```go
+waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+if err := limiter.Wait(waitCtx, rules...); err != nil {
+    // 任何错误都会停止等待。Unknown 可能已经扣减，不盲目重试。
+    return err
+}
+// 已成功扣减一次额度，执行本次业务尝试。
+```
+
+返回 nil 表示准入且扣减成功，业务失败不会退款。两次尝试之间取消为 `NotCharged`；后端调用期间取消保留该次调用的扣减结果。若确认已成功扣减，即使同时发生取消也返回 nil。所有后端错误（包括 `NotCharged` 错误）都会结束等待。可通过 `errors.Is` 和 `OutcomeOf` 判断错误，`Error.Op` 为 `wait`。
+
+等待使用调用方 goroutine 和传入规则的快照，休眠期间不持有后端锁或连接，不增加队列或后台 worker。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
+
+`Wait` 不具备幂等性，也不产生供 `Lookup` 查询的保留 ID。`AllowOnce` 被拒绝的 ID 会重放原始拒绝，轮询同一个保留 ID 无法实现阻塞准入。需要持久化尝试身份时，使用下方明确的恢复流程。
 
 ## 幂等准入与恢复
 
@@ -166,7 +188,7 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 - ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。绑定接口按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
-- 扣减额度前先写入“处理中”标记。运行时错误可能留下部分扣减和该标记；后续重试返回 `ErrOutcomeUnknown`，不会再次扣减。不要删除标记或自动退款。
+- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](drivers/redis/README.zh-CN.md)。
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
@@ -180,12 +202,12 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 |---|---|---|
 | `Allowed=false`、无错误 | 额度不足；没有扣减额度 | 拒绝或调度新尝试 |
 | `NotCharged` 错误 | 确定本次调用未扣减 | 修正参数/策略或处理取消 |
-| `Unknown` 错误 | 可能已经扣减，也可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
+| `Unknown` 错误 | 可能已经扣减；旧协议可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
 | `Lookup` 未找到 | 没有找到仍保留的完整结果 | 保留对先前执行结果的不确定性 |
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`AllowOnce` 或 `Lookup` 调用触发一次。事件包含操作、耗时、结果、传入的规则或消耗数量、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。绑定接口每次只触发一个事件，涵盖本地校验与消耗组装；`Bind` 不触发事件。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
+`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`Wait`、`AllowOnce` 或 `Lookup` 调用触发一次。`Wait` 为整个调用产生一个 `wait` 事件，耗时包含等待时间；内部尝试不另发 `allow` 事件。事件包含操作、耗时、结果、传入的规则或消耗数量、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。绑定接口每次只触发一个事件，涵盖本地校验与消耗组装；`Bind` 不触发事件。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
 
 ## 额度与运行契约
 
@@ -195,7 +217,7 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
 - SDK 脚本命令通过 `NoRetry` 禁止不确定重放，无需禁用客户端重试；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
-- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Lua 执行隔离不等于运行时错误回滚或崩溃持久性；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
+- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。新 Redis 协议使用单命令提交，崩溃和故障切换持久性仍取决于部署；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
 
 参见[运维与故障恢复](docs/operations.md)、[设计及扩展提案](docs/design.md)和[兼容性说明](docs/compatibility.md)。
 
@@ -216,7 +238,7 @@ PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
 docker compose down
 ```
 
-CI 覆盖 Go 1.24/stable、Redis 7.0/7/8、三主节点 Cluster 和 PostgreSQL 16/17/18。
+CI 覆盖 Go 1.26/stable、Redis 7.0/7/8、三主节点 Cluster 和 PostgreSQL 16/17/18。
 共用契约及 PG 回滚/提交恢复测试启用 race 检查。
 默认测试包含 100/500/1000 个同时调用、最多 32 个额度维度、加权与共享额度、租户隔离、幂等竞争、取消、连接池耗尽、响应丢失恢复和四进程竞争。
 CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次。
@@ -226,5 +248,5 @@ CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次
 
 MIT 许可证。
 
-核心及两个运行时 Driver 保持 Go 1.24 兼容性。可选的 pgx 示例和集成测试模块要求
-Go 1.25+，以使用已修复的 pgx/text 依赖。生产应用应使用仍在维护的 Go 版本。
+核心、两个运行时 Driver、可选的 pgx 示例及集成测试模块统一要求 Go 1.26+
+（pgx/text 依赖原要求 1.25，go-redis v9.23 将下限抬至 1.26）。生产应用应使用仍在维护的 Go 版本。

@@ -124,12 +124,9 @@ func TestRedisDeniedReplayAndExpiry(t *testing.T) {
 	if d, err = l.AllowOnce(ctx, "new-attempt", 20*time.Millisecond, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for c.Exists(ctx, l.attemptKey("new-attempt")).Val() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("record did not expire")
-		}
-		time.Sleep(5 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
+	if c.Exists(ctx, l.attemptKey("new-attempt")).Val() != 1 {
+		t.Fatal("receipt must remain physically present")
 	}
 	if _, found, err := l.Lookup(ctx, "new-attempt"); err != nil || found {
 		t.Fatalf("%v %v", found, err)
@@ -185,46 +182,29 @@ func TestRedisLostResponseRecovery(t *testing.T) {
 	}
 }
 
-func TestRedisPendingAfterWriteFailure(t *testing.T) {
+// An ACL denial of any MSET key rejects the entire commit, including its receipt.
+func TestRedisMSETACLFailureIsUncharged(t *testing.T) {
 	l, admin := integration(t)
 	ctx := context.Background()
 	user := fmt.Sprintf("pacelock-test-%d", time.Now().UnixNano())
 	password := "local-test-only"
-	// The user can write the admission record and first quota, but cannot write
-	// the second quota. This causes a real Redis runtime error after a partial debit.
-	err := admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+password, "+eval", "+evalsha", "+get", "+set", "+time", "+hello", "+ping", "+client", "%R~"+l.prefix+"*", "%W~"+l.attemptKey("partial"), "%W~"+l.key("first"), "(+eval +evalsha ~"+l.prefix+"*)").Err()
+	err := admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+password, "+eval", "+evalsha", "+get", "+mset", "+time", "+hello", "+ping", "+client", "%R~"+l.prefix+"*", "%W~"+l.attemptKey("failed"), "%W~"+l.key("first"), "(+eval +evalsha ~"+l.prefix+"*)").Err()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Do(ctx, "ACL", "DELUSER", user) })
 	restricted := redis.NewClient(&redis.Options{Addr: admin.Options().Addr, Username: user, Password: password, MaxRetries: -1})
 	defer restricted.Close()
-	r := []Rule{rule("first", 2, 1), rule("second", 2, 1)}
 	limited := &Limiter{client: restricted, prefix: l.prefix}
-	if _, err := limited.AllowOnce(ctx, "partial", time.Minute, r...); err == nil || OutcomeOf(err) != Unknown {
-		t.Fatalf("expected runtime failure: %v", err)
+	rules := []Rule{rule("first", 2, 1), rule("second", 2, 1)}
+	if _, err := limited.AllowOnce(ctx, "failed", time.Minute, rules...); err == nil || OutcomeOf(err) != NotCharged {
+		t.Fatalf("want rejected commit: %v", err)
 	}
-	if admin.Exists(ctx, l.key("first")).Val() != 1 || admin.Exists(ctx, l.key("second")).Val() != 0 {
-		t.Fatalf("test did not reach partial write; record=%q first=%q second=%q", admin.Get(ctx, l.attemptKey("partial")).Val(), admin.Get(ctx, l.key("first")).Val(), admin.Get(ctx, l.key("second")).Val())
+	if admin.Exists(ctx, l.key("first"), l.key("second"), l.attemptKey("failed")).Val() != 0 {
+		t.Fatal("rejected MSET partially committed")
 	}
-	before := admin.Get(ctx, l.key("first")).Val()
-	if _, err := l.AllowOnce(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) {
-		t.Fatal(err)
-	}
-	if _, found, err := l.Lookup(ctx, "partial"); !errors.Is(err, ErrOutcomeUnknown) || found {
-		t.Fatalf("%v %v", found, err)
-	}
-	contentionWave(t, 200, func(ctx context.Context, i int) {
-		if i%2 == 0 {
-			if _, err := l.AllowOnce(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
-				t.Errorf("concurrent partial-write recovery: %v", err)
-			}
-		} else if _, found, err := l.Lookup(ctx, "partial"); found || !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
-			t.Errorf("concurrent pending lookup: found=%t err=%v", found, err)
-		}
-	})
-	if admin.Get(ctx, l.key("first")).Val() != before {
-		t.Fatal("pending record permitted repeat debit")
+	if r, err := l.AllowOnce(ctx, "failed", time.Minute, rules...); err != nil || !r.Allowed || r.Replayed {
+		t.Fatalf("retry after known rejection: %+v %v", r, err)
 	}
 }
 

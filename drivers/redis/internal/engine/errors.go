@@ -32,6 +32,8 @@ func scriptFailure(op string, err error) error {
 		token, _, _ = strings.Cut(strings.TrimPrefix(server.Error(), "ERR "), " ")
 	}
 	switch token {
+	case "PACE_COMMIT":
+		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrBackend, err))
 	case "PACE_POLICY":
 		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrPolicyMismatch, err))
 	case "PACE_STATE":

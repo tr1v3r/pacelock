@@ -1,6 +1,7 @@
 // Package redisdriver implements Pacelock atomic admission using Redis Lua.
-// It preserves the Redis v1 keys, record encoding, server clock and no-replay
-// transport contract. A domain occupies one Redis Cluster hash slot.
+// It commits quotas and complete receipts in one MSET, with logical expiry and
+// caller-scheduled bounded cleanup. Legacy keys/state remain readable. One domain
+// occupies one Redis Cluster hash slot; transport commands prevent ambiguous replay.
 package redisdriver
 
 import (
@@ -30,7 +31,8 @@ func New(client redis.Scripter) (*Driver, error) {
 }
 
 // Admit executes all dimensions and optional retained deduplication in one Lua
-// operation. Runtime write errors may partially debit; errors retain their Outcome.
+// operation with one final MSET. Command rejection does not debit; lost responses
+// and other ambiguous failures retain Unknown. Legacy Pending remains protected.
 func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
 	op := "allow"
 	if request.ID != "" {
@@ -71,4 +73,34 @@ func (d *Driver) Lookup(ctx context.Context, request pacelock.LookupRequest) (pa
 
 func inputError(op string, err error) error {
 	return &pacelock.Error{Op: op, Outcome: pacelock.NotCharged, Err: err}
+}
+
+// MaxPruneKeys bounds candidate values checked by one Prune call.
+const MaxPruneKeys = engine.MaxPruneKeys
+
+// PruneCursor is an opaque scope-bound discovery position. Start with its zero
+// value and retain the returned cursor until Done; restart at zero for a new cycle.
+type PruneCursor = engine.PruneCursor
+
+// PruneResult reports candidate checks, deletions and a cursor. Ignore it on error.
+type PruneResult = engine.PruneResult
+
+// Prune checks at most limit candidate values and performs at most one SCAN page
+// on the scope's current primary. Limit must be 1..MaxPruneKeys. SCAN COUNT is a
+// hint, so discovery has no hard latency bound and overflow is buffered in Cursor.
+// Expired v2 values are deleted only after an atomic recheck. Legacy TTLs, pending
+// markers, active debt and live decisions are preserved. The application schedules
+// repeated cycles; constructors and admissions never start cleanup goroutines.
+func (d *Driver) Prune(ctx context.Context, scope pacelock.Scope, cursor PruneCursor, limit int) (PruneResult, error) {
+	if err := scope.Validate(); err != nil {
+		return PruneResult{}, inputError("prune", err)
+	}
+	if d == nil {
+		return PruneResult{}, inputError("prune", pacelock.ErrInvalid)
+	}
+	l, err := engine.New(d.client, scope.Namespace, scope.Domain)
+	if err != nil {
+		return PruneResult{}, inputError("prune", err)
+	}
+	return l.Prune(ctx, cursor, limit)
 }

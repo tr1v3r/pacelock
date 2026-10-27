@@ -11,6 +11,11 @@
 
 ### Added
 
+- Redis single-MSET commit for all quota updates and complete admission results,
+  v2 logical expiry, and scope-routed bounded cursor cleanup via `Driver.Prune`.
+  Legacy quota/C1/P1 readers preserve existing debt and recovery boundaries.
+  Upgrade requires drained old writers and scheduled cleanup; unconverted rollback
+  and mixed writers are unsupported. Runtime admission now needs MSET permission.
 - `Policy`, `Quota`, `Charge` and `Limiter.Bind` separate fixed policies from
   complete per-attempt charge sets across all drivers. `BoundLimiter` provides
   `Allow`, `AllowOnce` and scope-wide `Lookup`; charge order is normalized to

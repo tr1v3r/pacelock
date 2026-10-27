@@ -1,5 +1,7 @@
--- All keys share one hash tag. Validate quotas before writing anything.
+-- All KEYS are explicit and share a slot. No mutation precedes the final MSET.
 -- ARGV: retention_ms (0 for Allow), fingerprint, then step/burst/cost/name.
+local now = backend_time()
+if not now then return redis.error_reply('PACE_STATE server clock outside supported range') end
 local retention = tonumber(ARGV[1])
 local fingerprint = ARGV[2]
 local count = #KEYS
@@ -7,34 +9,25 @@ local recordKey = nil
 if retention > 0 then
     count = count - 1
     recordKey = KEYS[#KEYS]
-    local read = redis.pcall('GET', recordKey)
-    if type(read) == 'table' and read.err then
+    local raw = redis.pcall('GET', recordKey)
+    if type(raw) == 'table' and raw.err then
         return redis.error_reply('PACE_RECORD unreadable admission record')
     end
-    if read then
-        local kind = string.sub(read, 1, 3)
-        local saved = string.sub(read, 4, 67)
-        if (kind ~= 'P1|' and kind ~= 'C1|') or #saved ~= 64 or not string.match(saved, '^%x+$')
-            or (kind == 'P1|' and #read ~= 67)
-            or (kind == 'C1|' and (#read <= 68 or string.sub(read, 68, 68) ~= '|')) then
-            return redis.error_reply('PACE_RECORD malformed admission record')
+    if raw then
+        local read, problem = receipt_body(raw, now)
+        if problem == 'malformed' then return redis.error_reply('PACE_RECORD malformed admission record') end
+        if read then
+            if string.sub(read, 4, 67) ~= fingerprint then
+                return redis.error_reply('PACE_CONFLICT admission parameters differ')
+            end
+            if string.sub(read, 1, 3) == 'P1|' then
+                return redis.error_reply('PACE_PENDING legacy interrupted admission; outcome unknown')
+            end
+            return {1, read}
         end
-        if saved ~= fingerprint then
-            return redis.error_reply('PACE_CONFLICT admission parameters differ')
-        end
-        if kind == 'P1|' then
-            return redis.error_reply('PACE_PENDING interrupted admission; outcome unknown')
-        end
-        return {1, read}
     end
 end
-local clock = redis.call('TIME')
-local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])
-local horizon = 86400000000
-if now < 0 or now > 9007199254740991 - 2 * horizon then
-    return redis.error_reply('PACE_STATE server clock outside supported range')
-end
-local nexts = {}
+local writes = {}
 local result = {1, 0}
 local names = {}
 for i = 1, count do
@@ -44,26 +37,24 @@ for i = 1, count do
     local cost = tonumber(ARGV[offset + 3])
     names[i] = ARGV[offset + 4]
     local tat = now
-    local state = redis.pcall('GET', KEYS[i])
-    if type(state) == 'table' and state.err then
+    local raw = redis.pcall('GET', KEYS[i])
+    if type(raw) == 'table' and raw.err then
         return redis.error_reply('PACE_STATE unreadable quota state')
     end
-    if state then
-        local saved, oldstep, oldburst = string.match(state, '^(%d+):(%d+):(%d+)$')
-        saved, oldstep, oldburst = tonumber(saved), tonumber(oldstep), tonumber(oldburst)
-        if not saved or not oldstep or not oldburst or oldstep < 1 or oldburst < 1
-            or oldstep > horizon or oldburst > math.floor(horizon / oldstep)
-            or saved > 9007199254740991 or saved > now + horizon then
-            return redis.error_reply('PACE_STATE invalid quota state or backward clock jump')
+    if raw then
+        local state = quota_state(raw, now)
+        if not state then return redis.error_reply('PACE_STATE invalid quota state or backward clock jump') end
+        if not state[4] then
+            if state[2] ~= step or state[3] ~= burst then
+                return redis.error_reply('PACE_POLICY quota policy changed while state is active')
+            end
+            tat = math.max(state[1], now)
         end
-        if oldstep ~= step or oldburst ~= burst then
-            return redis.error_reply('PACE_POLICY quota policy changed while state is active')
-        end
-        tat = math.max(saved, now)
     end
     local nexttat = tat + cost * step
     local wait = math.max(0, nexttat - burst * step - now)
-    nexts[i] = nexttat
+    writes[#writes + 1] = KEYS[i]
+    writes[#writes + 1] = string.format('Q2|%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])
     result[i + 2] = 0
     if wait > 0 then
         result[1] = 0
@@ -71,23 +62,21 @@ for i = 1, count do
         result[i + 2] = 1
     end
 end
--- Encode before writes: encoding failure must not leave quota mutations.
-local complete = nil
+if result[1] == 0 then writes = {} end
+local response = result
 if recordKey then
-    complete = 'C1|' .. fingerprint .. '|' .. cjson.encode({names = names, values = result})
-    -- Pending protects against replay after a partial write/runtime error.
-    redis.call('SET', recordKey, 'P1|' .. fingerprint, 'PX', retention)
+    -- All encoding and response assembly must finish before the commit command.
+    local complete = 'C1|' .. fingerprint .. '|' .. cjson.encode({names = names, values = result})
+    local envelope = string.format('E2|%.0f|', now + retention * 1000) .. complete
+    writes[#writes + 1] = recordKey
+    writes[#writes + 1] = envelope
+    response = {0, complete}
 end
-if result[1] == 1 then
-    for i = 1, count do
-        local offset = 2 + (i - 1) * 4
-        local state = string.format('%.0f:%s:%s', nexts[i], ARGV[offset + 1], ARGV[offset + 2])
-        local ttl = math.max(1, math.ceil((nexts[i] - now) / 1000))
-        redis.call('SET', KEYS[i], state, 'PX', ttl)
+if #writes > 0 then
+    local committed = redis.pcall('MSET', unpack(writes))
+    if type(committed) == 'table' and committed.err then
+        return redis.error_reply('PACE_COMMIT ' .. committed.err)
     end
 end
-if recordKey then
-    redis.call('SET', recordKey, complete, 'KEEPTTL')
-    return {0, complete}
-end
-return result
+-- Commit boundary: no further Redis commands or result encoding.
+return response
