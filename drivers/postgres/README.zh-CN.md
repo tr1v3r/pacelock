@@ -1,0 +1,62 @@
+# PostgreSQL Driver
+
+[English](README.md)
+
+独立模块：`github.com/tr1v3r/pacelock/drivers/postgres`，目标版本 PostgreSQL 16+。
+运行时仅依赖标准库与 Pacelock 核心。应用自行选择并注册 database/sql 传输驱动；
+共用测试使用 pgx。
+
+```go
+// db 是已初始化、指向权威主库的 *sql.DB。
+driver, err := postgres.New(db)
+if err != nil { return err }
+if err := driver.Migrate(setupCtx); err != nil { return err }
+limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
+if err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Rule{
+    Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1,
+})
+// 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
+```
+
+导入 `"github.com/tr1v3r/pacelock/drivers/postgres"` 与核心包。使用 pgx 时，
+应用注册 `_ "github.com/jackc/pgx/v5/stdlib"`，调用 `sql.Open("pgx", dsn)`，
+并固定传输驱动版本。构造函数不联网、不迁移、不关闭 db。
+在初始化阶段显式使用具备建表权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
+不升级已有的不兼容表。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
+不能传入读副本连接池。
+
+## 事务与故障契约
+
+每次准入使用 Read Committed，通过 INSERT ON CONFLICT 建立永久 domain 锁行，
+再用 SELECT FOR UPDATE 锁定它，覆盖额度或准入记录尚不存在的情况。
+获得锁后用 clock_timestamp 采样一次后端时间，全部额度与允许/拒绝记录在同一事务提交。
+PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行。
+
+发送 Commit 前的错误回滚并标记 NotCharged；任何 Commit 错误都保守标记 Unknown，
+使用新 context 按仍保留的 ID 查询恢复。不自动重试事务。Lookup 不加 domain 锁，
+不等待进行中的准入，因此未找到不代表没有扣减。重放和查询不延长保留期。
+上游业务执行仍需应用协调。
+
+## 部署边界与清理
+
+- 一个 domain 是一个串行点，可能等待行锁或连接池。配置 context 截止时间、服务端语句/
+  锁超时以及有界连接池；不要在事务中调用供应商或等待 RetryAfter。
+- 使用有日志表、fsync 和合适的 synchronous_commit/复制策略。异步提交或切换至落后副本
+  可能丢失债务与准入记录。PG 也不能消除墙上时钟跳变。
+- 过期行会被逻辑忽略。应用可调度 `driver.Prune(ctx, scope, limit)`，每次从两张数据表
+  各最多删除 limit 行（1～10000）。它使用同一 domain 锁并保留活跃债务。
+  domain 锁行故意保留，需规划 domain 基数；不要独立删除锁行或活跃状态。
+  额度频繁更新，需要关注 vacuum。
+- 当前 Driver 自己管理事务，不能加入业务事务。不提供 Redis 状态自动迁移/故障切换、
+  计费、队列或吞吐/SLO 保证；需要在目标部署验证延迟与热点 domain。
+
+使用根目录 Compose 和 `scripts/check.sh` 验证。`tests/contracts` 覆盖共用行为、
+真实 PG 回滚、提交响应丢失恢复、等锁取消、锁后取时和清理。
+详见 [Driver 契约](../../docs/drivers.md)。
+
+[可运行的 pgx 示例](../../examples/postgres/main.go)：在仓库根目录执行
+`(cd examples/postgres && go run .)`，连接 Compose 的 PostgreSQL 测试实例。
+
+保留期从采样的后端决策时间起算，SQL 执行和提交延迟会消耗一部分窗口；
+配置时需覆盖派发与恢复所需时间。

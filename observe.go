@@ -5,40 +5,35 @@ import (
 	"time"
 )
 
-// Options holds optional integrations. Zero values are valid.
+// Options holds optional integrations; zero values are valid.
 type Options struct {
-	// Observer receives operation results synchronously; nil disables observation.
+	// Observer is nil to disable synchronous observation.
 	Observer Observer
 }
 
-// Observer receives one event per Allow, AllowOnce or Lookup invocation. It runs
-// synchronously and must be fast and safe for concurrent use. Panics propagate.
-// No quota names, attempt IDs or context values are copied into Event.
-// An invalid nil context is reported using context.Background().
+// Observer receives one synchronous event per public operation. It must be fast
+// and concurrency-safe. Panics propagate; no background work is created.
 type Observer func(context.Context, Event)
 
-// Event is a bounded-cardinality observation suitable for metrics or tracing.
-// Result is allowed, denied, found, missing or error. RetryAfter on a replay or
-// lookup is the original observation, not a countdown. Err may contain details;
-// do not use its text as a metric label.
+// Event describes a call without exposing quota names or admission IDs as fields.
+// Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, allow_once, or lookup.
+	// Operation is allow, allow_once or lookup.
 	Operation string
-	// Duration measures invocation time up to the observer call, excluding the callback itself.
+	// Duration excludes the observer callback execution time.
 	Duration time.Duration
-	// RuleCount is the supplied rule count, including invalid input; Lookup reports zero.
+	// RuleCount includes invalid supplied rules; Lookup reports zero.
 	RuleCount int
-	// Result is allowed or denied for admission, found or missing for lookup, or error.
+	// Result is allowed, denied, found, missing or error.
 	Result string
-	// Replayed is true only when AllowOnce returns a retained decision.
+	// Replayed is true only for AllowOnce returning a retained decision.
 	Replayed bool
-	// RetryAfter copies the decision wait; retained results preserve the original duration.
+	// RetryAfter is the original decision advisory wait.
 	RetryAfter time.Duration
-	// Err is the returned error; its text may contain identifiers and is unsuitable as a metric label.
+	// Err is the returned error; do not label metrics with its text.
 	Err error
 }
 
-// observe starts timing and returns a completion hook; absent observers use a no-op hook.
 func (l *Limiter) observe(ctx context.Context, op string, count int) func(Decision, bool, error) {
 	if l == nil || l.observer == nil {
 		return func(Decision, bool, error) {}

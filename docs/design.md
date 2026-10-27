@@ -2,21 +2,30 @@
 
 状态：已实现已知消耗的联合准入、有保留期限的幂等准入与结果查询；输出预留及用量校正仍为提案。商用加固契约见 [commercial-readiness.md](commercial-readiness.md)。
 
+## 已实现：可替换 Driver
+
+核心模块只依赖标准库，公共构造函数接受 `Driver`，这是 pre-v1 破坏性变更。
+Driver 以 `Admit` / `Lookup` 表达完整原子操作，Redis 和 PostgreSQL 是独立模块。
+Redis 协议保持 v1；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
+当前不支持调用者业务事务接入，不提供跨后端债务迁移或故障自动切换。
+统一契约见 [drivers.md](drivers.md)，PG 部署边界见[指南](../drivers/postgres/README.zh-CN.md)。
+下文 Redis 数据布局、Lua 故障与 TTL 说明专属于 Redis Driver。
+
 ## 目标与边界
 
-多个实例调用同一个供应商账户时，各实例独立限流无法保证总量。Pacelock 把额度状态放在 Redis，使用一次 Lua 脚本完成联合准入。首版围绕已知消耗提供小而明确的接口，不执行工作、不管理队列、不统计批次完成、不持有并发 permit。
+多个实例调用同一个供应商账户时，各实例独立限流无法保证总量。Redis Driver 把额度状态放在 Redis，使用一次 Lua 脚本完成联合准入；PostgreSQL Driver 使用行锁与短事务。首版围绕已知消耗提供小而明确的接口，不执行工作、不管理队列、不统计批次完成、不持有并发 permit。
 
-与通用单维限流器相比，首版着重支持请求数与 token 数的联合准入，以及便于后续扩展的明确错误语义。Go-Redis 是有意引入的运行时依赖：复用连接池、认证、TLS、Cluster 路由和脚本缓存，不自行实现 Redis 协议。
+与通用单维限流器相比，首版着重支持请求数与 token 数的联合准入，以及便于后续扩展的明确错误语义。Redis Driver 中的 Go-Redis 是有意引入的运行时依赖：复用连接池、认证、TLS、Cluster 路由和脚本缓存，不自行实现 Redis 协议。
 
 ## 公开契约
 
 ```go
-New(client redis.Scripter, namespace, domain string) (*Limiter, error)
+New(driver Driver, namespace, domain string) (*Limiter, error)
 (*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 Validate(rules ...Rule) error
-NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error)
+NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error)
 ```
 
 一次请求传入 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost。

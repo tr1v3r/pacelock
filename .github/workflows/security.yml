@@ -11,10 +11,16 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ['.', 'drivers/redis', 'drivers/postgres', 'tests/contracts', 'examples/postgres']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: ${{ matrix.module }}

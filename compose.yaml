@@ -1,5 +1,17 @@
 # Disposable fixtures. No production credentials or persistent data.
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pacelock
+      POSTGRES_PASSWORD: pacelock-test-only
+      POSTGRES_DB: pacelock
+    ports: ["127.0.0.1:15439:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pacelock -d pacelock"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
   redis:
     image: redis:7-alpine
     ports: ["127.0.0.1:16379:6379"]

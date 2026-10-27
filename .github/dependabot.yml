@@ -1,7 +1,12 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /drivers/redis
+      - /drivers/postgres
+      - /tests/contracts
+      - /examples/postgres
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
