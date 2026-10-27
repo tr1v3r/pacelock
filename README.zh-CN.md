@@ -7,7 +7,7 @@
 
 Pacelock 协调多个服务实例的共享额度。一次准入可以同时扣减请求数、已知输入 token 和租户额度：全部通过才扣减；任一额度不足则全部不扣减。LLM API 是主要场景，底层支持任意已知的正数消耗。
 
-API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约和有保留期限的幂等能力，不实现 LLM 网关或计费账本。最低要求为 Go 1.24+，后端选择 Redis 7+ 或 PostgreSQL 16+；生产构建应使用仍在安全维护的 Go 分支及其最新修补版。已验证配置见[兼容性说明](docs/compatibility.md)和[验证记录](docs/verification.md)。
+API 仍处于 pre-v1 阶段。本 SDK 提供速率准入、明确的故障契约和有保留期限的幂等能力，不实现 LLM 网关或计费账本。最低要求为 Go 1.26+，后端选择 Redis 7+ 或 PostgreSQL 16+；生产构建应使用仍在安全维护的 Go 分支及其最新修补版。已验证配置见[兼容性说明](docs/compatibility.md)和[验证记录](docs/verification.md)。
 
 ## 方便 agent 使用的完整注释 SDK
 
@@ -206,7 +206,7 @@ PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
 docker compose down
 ```
 
-CI 覆盖 Go 1.24/stable、Redis 7.0/7/8、三主节点 Cluster 和 PostgreSQL 16/17/18。
+CI 覆盖 Go 1.26/stable、Redis 7.0/7/8、三主节点 Cluster 和 PostgreSQL 16/17/18。
 共用契约及 PG 回滚/提交恢复测试启用 race 检查。
 默认测试包含 100/500/1000 个同时调用、最多 32 个额度维度、加权与共享额度、租户隔离、幂等竞争、取消、连接池耗尽、响应丢失恢复和四进程竞争。
 CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次。
@@ -216,5 +216,5 @@ CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次
 
 MIT 许可证。
 
-核心及两个运行时 Driver 保持 Go 1.24 兼容性。可选的 pgx 示例和集成测试模块要求
-Go 1.25+，以使用已修复的 pgx/text 依赖。生产应用应使用仍在维护的 Go 版本。
+核心、两个运行时 Driver、可选的 pgx 示例及集成测试模块统一要求 Go 1.26+
+（pgx/text 依赖原要求 1.25，go-redis v9.23 将下限抬至 1.26）。生产应用应使用仍在维护的 Go 版本。

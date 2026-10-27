@@ -11,7 +11,7 @@ are preserved. Moving to PostgreSQL does not transfer existing debt or IDs. See 
 
 ## Supported contract
 
-The core targets Go 1.24+; independent drivers target Redis 7+ or PostgreSQL 16+. CI configuration tests Go 1.24/stable with
+The core targets Go 1.26+; independent drivers target Redis 7+ or PostgreSQL 16+. CI configuration tests Go 1.26/stable with
 Redis 7.0, the current Redis 7 image and Redis 8. Cluster routing is tested with
 three Redis 7 masters. PostgreSQL CI includes 16/17/18 and common Driver contracts. Live results and exact local versions are recorded in
 [verification.md](verification.md); configured CI is not evidence of a completed
@@ -109,6 +109,7 @@ attempts. Implement business execution coordination outside this limiter. This
 SDK does not provide exactly-once execution, crash-proof quota accounting, refund,
 output reservation or billing. Those are not implied by a successful release.
 
-The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
-example and integration-test modules require Go 1.25+ to use patched pgx/text
-dependencies. Production applications should use a maintained Go release.
+The core, both runtime drivers, the optional pgx example and the
+integration-test modules require Go 1.26+. The pgx/text floor was 1.25; the
+go-redis v9.23 dependency raises it to 1.26. Production applications should
+use a maintained Go release.
