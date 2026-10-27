@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-独立模块：`github.com/tr1v3r/pacelock/drivers/postgres`，目标版本 PostgreSQL 16+。
+独立模块：`github.com/tr1v3r/pacelock/driver/postgres`，目标版本 PostgreSQL 16+。
 运行时仅依赖标准库与 Pacelock 核心。应用自行选择并注册 database/sql 传输驱动；
 共用测试使用 pgx。
 
@@ -25,7 +25,7 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 // 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
 ```
 
-导入 `"github.com/tr1v3r/pacelock/drivers/postgres"` 与核心包。使用 pgx 时，
+导入 `"github.com/tr1v3r/pacelock/driver/postgres"` 与核心包。使用 pgx 时，
 应用注册 `_ "github.com/jackc/pgx/v5/stdlib"`，调用 `sql.Open("pgx", dsn)`，
 并固定传输驱动版本。构造函数不联网、不迁移、不关闭 db。
 在初始化阶段显式使用具备建表权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
@@ -69,7 +69,7 @@ PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行
 
 使用根目录 Compose 和 `scripts/check.sh` 验证。`tests/contracts` 覆盖共用行为、
 真实 PG 回滚、提交响应丢失恢复、等锁取消、锁后取时和清理。
-详见 [Driver 契约](../../docs/drivers.md)。
+详见 [Driver 契约](../../docs/driver.md)。
 
 [可运行的 pgx 示例](../../examples/postgres/main.go)：在仓库根目录执行
 `(cd examples/postgres && go run .)`，连接 Compose 的 PostgreSQL 测试实例。

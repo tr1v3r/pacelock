@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-Independent module: `github.com/tr1v3r/pacelock/drivers/redis`. Requires Redis 7+.
+Independent module: `github.com/tr1v3r/pacelock/driver/redis`. Requires Redis 7+.
 Applications own the initialized go-redis Client/ClusterClient and close it.
 
 ```go
@@ -11,7 +11,7 @@ if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Import `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` and
+Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` and
 `"github.com/tr1v3r/pacelock"`. Construction performs no I/O or option mutation.
 One domain is one Cluster slot. Every caller must use matching scope, names and
 effective policies, and include every applicable quota in an admission.
@@ -119,7 +119,7 @@ See [compatibility](../../docs/compatibility.md).
 
 Use primary routing, TLS/authentication, controlled ACLs, noeviction and explicit
 durability settings. [Operations](../../docs/operations.md), [core usage](../../README.md)
-and [Driver contract](../../docs/drivers.md) describe the remaining limits.
+and [Driver contract](../../docs/driver.md) describe the remaining limits.
 There is no automatic PostgreSQL failover or cross-backend state migration.
 
 Run `REDIS_ADDR=localhost:16379 go run ./examples/llm` from this module.

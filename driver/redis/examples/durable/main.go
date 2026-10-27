@@ -15,7 +15,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/tr1v3r/pacelock"
-	redisdriver "github.com/tr1v3r/pacelock/drivers/redis"
+	redisdriver "github.com/tr1v3r/pacelock/driver/redis"
 )
 
 // retention bounds Redis receipts and the application's automatic recovery window.

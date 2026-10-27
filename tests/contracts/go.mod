@@ -6,8 +6,8 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/tr1v3r/pacelock v0.0.0-20261027161106-9ff3e7a851af
-	github.com/tr1v3r/pacelock/drivers/postgres v0.0.0
-	github.com/tr1v3r/pacelock/drivers/redis v0.0.0
+	github.com/tr1v3r/pacelock/driver/postgres v0.0.0
+	github.com/tr1v3r/pacelock/driver/redis v0.0.0
 )
 
 require (
@@ -23,6 +23,6 @@ require (
 
 replace github.com/tr1v3r/pacelock => ../..
 
-replace github.com/tr1v3r/pacelock/drivers/redis => ../../drivers/redis
+replace github.com/tr1v3r/pacelock/driver/redis => ../../driver/redis
 
-replace github.com/tr1v3r/pacelock/drivers/postgres => ../../drivers/postgres
+replace github.com/tr1v3r/pacelock/driver/postgres => ../../driver/postgres

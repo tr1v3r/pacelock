@@ -1,4 +1,4 @@
-module github.com/tr1v3r/pacelock/drivers/postgres
+module github.com/tr1v3r/pacelock/driver/postgres
 
 go 1.26.0
 

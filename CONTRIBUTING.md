@@ -28,8 +28,8 @@ PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .)
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 20s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 20s .)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 docker compose down
 ```

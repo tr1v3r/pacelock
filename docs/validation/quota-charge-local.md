@@ -33,8 +33,8 @@ charge-order normalization and binding-order fingerprint conflicts.
 All three migrated examples executed successfully against these fixtures:
 
 ```sh
-REDIS_ADDR=localhost:16379 go -C drivers/redis run ./examples/llm
-REDIS_ADDR=localhost:16379 go -C drivers/redis run ./examples/idempotency
+REDIS_ADDR=localhost:16379 go -C driver/redis run ./examples/llm
+REDIS_ADDR=localhost:16379 go -C driver/redis run ./examples/idempotency
 DATABASE_URL='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
   go -C examples/postgres run .
 ```
@@ -45,8 +45,8 @@ the PostgreSQL example reported `allowed=true`.
 Additional contribution checks passed:
 
 ```sh
-go -C drivers/redis/internal/engine test -run '^$' -fuzz FuzzInterval -fuzztime 20s .
-go -C drivers/redis/internal/engine test -run '^$' -fuzz FuzzRecord -fuzztime 20s .
+go -C driver/redis/internal/engine test -run '^$' -fuzz FuzzInterval -fuzztime 20s .
+go -C driver/redis/internal/engine test -run '^$' -fuzz FuzzRecord -fuzztime 20s .
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 ```
 

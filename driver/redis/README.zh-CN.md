@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-独立模块：`github.com/tr1v3r/pacelock/drivers/redis`，要求 Redis 7+。
+独立模块：`github.com/tr1v3r/pacelock/driver/redis`，要求 Redis 7+。
 应用负责初始化、持有并关闭 go-redis Client/ClusterClient。
 
 ```go
@@ -11,7 +11,7 @@ if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-导入 `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` 和
+导入 `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` 和
 `"github.com/tr1v3r/pacelock"`。构造不联网、不修改客户端配置。
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域、名称和有效策略，
 每次准入必须包含全部适用额度。
@@ -101,7 +101,7 @@ for step := 0; step < 8; step++ {
 
 使用主节点、TLS/认证、受控 ACL、noeviction 和明确的持久化配置。
 [运维说明](../../docs/operations.md)、[核心用法](../../README.zh-CN.md)及
-[Driver 契约](../../docs/drivers.md)说明其他限制。不提供自动 PostgreSQL 故障切换或状态迁移。
+[Driver 契约](../../docs/driver.md)说明其他限制。不提供自动 PostgreSQL 故障切换或状态迁移。
 
 在本模块执行 `REDIS_ADDR=localhost:16379 go run ./examples/llm`。
 根目录执行 `sh scripts/check.sh` 检查全部模块；Redis 测试覆盖模型对照、并发、逻辑过期、

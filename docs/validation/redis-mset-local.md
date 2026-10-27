@@ -14,7 +14,7 @@ expired-state setup; it measures only recheck/deletion, not total cycle cost.
 No whole-domain aggregate key is written. Key/record memory still requires
 application-scheduled cleanup, and per-scope discovery scans the node keyspace.
 
-Commands (run in `drivers/redis/internal/engine` with PACELOCK_REDIS_ADDR set):
+Commands (run in `driver/redis/internal/engine` with PACELOCK_REDIS_ADDR set):
 
 ```sh
 go test -run '^$' -bench 'BenchmarkRedis/(allow|once)/rules=(1|4|32)$' -benchtime=200ms -count=3 -benchmem .
@@ -55,7 +55,7 @@ and 200 concurrent cleanup/admission calls preserving exact shared capacity.
 ```text
 goos: darwin
 goarch: arm64
-pkg: github.com/tr1v3r/pacelock/drivers/redis/internal/engine
+pkg: github.com/tr1v3r/pacelock/driver/redis/internal/engine
 cpu: Apple M3 Pro
 BenchmarkRedis/allow/rules=1-12         	    1669	    157490 ns/op	     875 B/op	      19 allocs/op
 BenchmarkRedis/allow/rules=1-12         	    1904	    123956 ns/op	     870 B/op	      19 allocs/op
@@ -76,7 +76,7 @@ BenchmarkRedis/once/rules=32-12         	     835	    270131 ns/op	   25599 B/op
 BenchmarkRedis/once/rules=32-12         	     850	    290418 ns/op	   25605 B/op	     505 allocs/op
 BenchmarkRedis/once/rules=32-12         	     877	    278167 ns/op	   25583 B/op	     505 allocs/op
 PASS
-ok  	github.com/tr1v3r/pacelock/drivers/redis/internal/engine	7.721s
+ok  	github.com/tr1v3r/pacelock/driver/redis/internal/engine	7.721s
 ```
 
 ## Raw MSET admission
@@ -84,7 +84,7 @@ ok  	github.com/tr1v3r/pacelock/drivers/redis/internal/engine	7.721s
 ```text
 goos: darwin
 goarch: arm64
-pkg: github.com/tr1v3r/pacelock/drivers/redis/internal/engine
+pkg: github.com/tr1v3r/pacelock/driver/redis/internal/engine
 cpu: Apple M3 Pro
 BenchmarkRedis/allow/rules=1-12         	    1736	    176137 ns/op	     874 B/op	      19 allocs/op
 BenchmarkRedis/allow/rules=1-12         	    1862	    123200 ns/op	     871 B/op	      19 allocs/op
@@ -111,7 +111,7 @@ BenchmarkRedis/once/rules=32-12         	     920	    257809 ns/op	   25598 B/op
 ```text
 goos: darwin
 goarch: arm64
-pkg: github.com/tr1v3r/pacelock/drivers/redis/internal/engine
+pkg: github.com/tr1v3r/pacelock/driver/redis/internal/engine
 cpu: Apple M3 Pro
 BenchmarkPruneCandidates/keys=1-12         	    1797	    132052 ns/op	         1.000 candidates/op	     280 B/op	       8 allocs/op
 BenchmarkPruneCandidates/keys=1-12         	    1737	    133421 ns/op	         1.000 candidates/op	     280 B/op	       8 allocs/op
@@ -123,5 +123,5 @@ BenchmarkPruneCandidates/keys=64-12        	     865	    271629 ns/op	        64
 BenchmarkPruneCandidates/keys=64-12        	    1063	    228932 ns/op	        64.00 candidates/op	    2378 B/op	      71 allocs/op
 BenchmarkPruneCandidates/keys=64-12        	    1054	    256941 ns/op	        64.00 candidates/op	    2378 B/op	      71 allocs/op
 PASS
-ok  	github.com/tr1v3r/pacelock/drivers/redis/internal/engine	6.093s
+ok  	github.com/tr1v3r/pacelock/driver/redis/internal/engine	6.093s
 ```

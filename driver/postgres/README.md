@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-Independent module: `github.com/tr1v3r/pacelock/drivers/postgres`. Targets PostgreSQL
+Independent module: `github.com/tr1v3r/pacelock/driver/postgres`. Targets PostgreSQL
 16+. Runtime dependencies are the standard library and the Pacelock core. The
 application chooses/registers its database/sql transport; shared tests use pgx.
 
@@ -25,7 +25,7 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
-Import `"github.com/tr1v3r/pacelock/drivers/postgres"` and the core package. For pgx,
+Import `"github.com/tr1v3r/pacelock/driver/postgres"` and the core package. For pgx,
 register `_ "github.com/jackc/pgx/v5/stdlib"` in the application and use
 `sql.Open("pgx", dsn)`. Pin the transport version in the application. Constructors do
 not connect, migrate or close db. Run Migrate explicitly during setup with a
@@ -81,7 +81,7 @@ Upstream execution still needs application coordination.
 
 Use the root Compose fixture and `scripts/check.sh`. `tests/contracts` exercises
 both drivers plus real PG rollback, lost-commit-reply recovery, lock cancellation,
-post-lock time and cleanup. See [Driver contract](../../docs/drivers.md).
+post-lock time and cleanup. See [Driver contract](../../docs/driver.md).
 
 [Runnable pgx example](../../examples/postgres/main.go): from the repository root,
 run `(cd examples/postgres && go run .)` against the Compose PostgreSQL fixture.

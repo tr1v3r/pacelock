@@ -48,7 +48,7 @@ are not a joint transaction.
 This README documents the pre-release `dev` line. Install that line explicitly:
 
 ```sh
-go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/drivers/redis@dev
+go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/driver/redis@dev
 ```
 
 The default `@latest` currently selects an older API and does not include all APIs
@@ -56,7 +56,7 @@ shown here. Keep the resolved pseudo-version in your application's `go.mod` for
 reproducible builds; `@dev` moves as development continues and is not a stable release.
 
 The constructor now accepts `pacelock.Driver`, a breaking pre-v1 change.
-Import `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` for the example.
+Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` for the example.
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -180,16 +180,16 @@ combines a quota's name, per-attempt cost and the same shared `Policy` type used
 by `Quota`, so the two layers describe replenishment exactly once. This path checks only the
 supplied rules and cannot detect omitted applicable quotas. Bound admissions use the same execution path and quota
 state; they add complete-set validation and normalize charges to binding order.
-The versioned trusted builder in the [durable example](drivers/redis/examples/durable/README.md)
+The versioned trusted builder in the [durable example](driver/redis/examples/durable/README.md)
 continues to demonstrate the low-level API.
 
 ## PostgreSQL and the Driver boundary
 
-Install `github.com/tr1v3r/pacelock/drivers/postgres@dev` for PostgreSQL.
+Install `github.com/tr1v3r/pacelock/driver/postgres@dev` for PostgreSQL.
 The application registers a `database/sql` transport and owns a primary DB:
 
 ```go
-driver, err := postgres.New(db) // import github.com/tr1v3r/pacelock/drivers/postgres
+driver, err := postgres.New(db) // import github.com/tr1v3r/pacelock/driver/postgres
 if err != nil { return err }
 if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not per request
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
@@ -203,8 +203,8 @@ Domain contention, WAL, pools and vacuum need deployment testing; no throughput
 advantage is claimed. `Prune` offers bounded caller-scheduled physical cleanup;
 logical expiry works without cleanup. The SDK starts no background workers.
 
-See the [PostgreSQL guide](drivers/postgres/README.md), [Redis guide](drivers/redis/README.md),
-and [custom-driver contract](docs/drivers.md). Drivers are alternatives: switching
+See the [PostgreSQL guide](driver/postgres/README.md), [Redis guide](driver/redis/README.md),
+and [custom-driver contract](docs/driver.md). Drivers are alternatives: switching
 backends does not transfer quota debt or retained IDs and is not automatic failover.
 
 ## Blocking admission
@@ -276,14 +276,14 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
   checks/encoding. New operations do not create Pending. Legacy pending records
   still return `ErrOutcomeUnknown`; do not delete or refund them automatically.
   Redis expiry is logical; schedule bounded physical cleanup for every scope.
-  See the [Redis protocol and cleanup guide](drivers/redis/README.md).
+  See the [Redis protocol and cleanup guide](driver/redis/README.md).
 - `found=false` does **not** prove no debit. The command may still be in flight,
   or the record may have expired or been lost. Expiry, eviction, deletion and
   failover loss end deduplication. Never reuse an old ID after that boundary.
 - Deduplicating admission does not deduplicate upstream execution. Coordinate the
   business attempt separately. A new actual model call needs a new admission ID.
 
-For a complete application-owned flow, see the [durable admission example](drivers/redis/examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
+For a complete application-owned flow, see the [durable admission example](driver/redis/examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
 
 ## Errors and observation
 
@@ -311,7 +311,7 @@ operation, duration, result, supplied rule/charge count, replay status, delay an
 raw IDs or quota names as fields. Callbacks must be fast and concurrency-safe;
 panics propagate. Bound calls emit one event including local charge validation
 and assembly; `Bind` emits no event. Do not label metrics with error text or user identifiers. See
-[runnable observation/recovery example](drivers/redis/examples/idempotency/main.go).
+[runnable observation/recovery example](driver/redis/examples/idempotency/main.go).
 
 ## Quota and operational contracts
 
@@ -345,16 +345,16 @@ See [operations and incident recovery](docs/operations.md),
 
 ```sh
 docker compose up -d --wait
-(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
-(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
+(cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
+(cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
 (cd examples/postgres && go run .)
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
 PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
 docker compose down
 ```
 

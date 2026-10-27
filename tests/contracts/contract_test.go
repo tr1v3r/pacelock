@@ -16,8 +16,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 	"github.com/tr1v3r/pacelock"
-	"github.com/tr1v3r/pacelock/drivers/postgres"
-	redisdriver "github.com/tr1v3r/pacelock/drivers/redis"
+	"github.com/tr1v3r/pacelock/driver/postgres"
+	redisdriver "github.com/tr1v3r/pacelock/driver/redis"
 )
 
 type backend struct {

@@ -7,7 +7,7 @@ This pre-v1 change replaces `pacelock.New(client, ns, domain)` with
 `NewWithOptions` now accepts Driver too. Install the selected driver module explicitly;
 core consumers do not import Redis. Redis key names and v1 readers are preserved;
 new writes use the v2 protocol described below. Moving to PostgreSQL does not transfer existing debt or IDs. See the
-[Driver contract](drivers.md) and [PostgreSQL guide](../drivers/postgres/README.md).
+[Driver contract](driver.md) and [PostgreSQL guide](../driver/postgres/README.md).
 
 ## Supported contract
 

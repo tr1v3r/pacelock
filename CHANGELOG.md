@@ -10,7 +10,11 @@
   of flattening `Rate`/`Period`/`Burst` into top-level fields. Access and
   construct them as `rule.Policy.Rate` and `Policy{Rate: ..., Period: ...,
   Burst: ...}`; wire format, validation and behavior are unchanged.
-- Redis examples and backend tests moved into `drivers/redis`; use
+- The `drivers/` directory is now `driver/` (singular, matching Go package-name
+  conventions). Module paths move to `github.com/tr1v3r/pacelock/driver/redis`
+  and `.../driver/postgres`; update imports, `replace` directives and CI paths.
+  `docs/drivers.md` moved to `docs/driver.md` as well.
+- Redis examples and backend tests moved into `driver/redis`; use
   `scripts/check.sh` to check every module. The core has no third-party dependencies.
 
 ### Added

@@ -7,7 +7,7 @@ not an SDK execution API or a distributed transaction.
 ## Run against disposable Redis
 
 From the repository root, start the disposable fixtures with `docker compose up
--d --wait`, then build `(cd drivers/redis && go build -o /tmp/pacelock-durable ./examples/durable)`.
+-d --wait`, then build `(cd driver/redis && go build -o /tmp/pacelock-durable ./examples/durable)`.
 The default address is localhost:16379; override with `REDIS_ADDR`.
 Choose fresh directories for these commands:
 

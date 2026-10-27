@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/tr1v3r/pacelock"
-	"github.com/tr1v3r/pacelock/drivers/redis/internal/engine"
+	"github.com/tr1v3r/pacelock/driver/redis/internal/engine"
 )
 
 // Driver is concurrency-safe when its caller-owned Scripter is concurrency-safe.

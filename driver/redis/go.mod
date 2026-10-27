@@ -1,4 +1,4 @@
-module github.com/tr1v3r/pacelock/drivers/redis
+module github.com/tr1v3r/pacelock/driver/redis
 
 go 1.26.0
 

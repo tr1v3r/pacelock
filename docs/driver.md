@@ -62,11 +62,11 @@ lookup results do not prove no debit or upstream exactly-once execution.
 
 ## Backend modules and migration
 
-- `drivers/redis`: go-redis transport, single-command MSET commit, v2 logical
+- `driver/redis`: go-redis transport, single-command MSET commit, v2 logical
   expiry, bounded cursor cleanup and guarded command replay/Cluster redirects.
   Keys stay unchanged; v1 values remain readable. Quiesce old writers before
   upgrading; mixed writers/unconverted rollback are unsupported. See its guide.
-- `drivers/postgres`: database/sql primary handle, explicit `Migrate`, one locked
+- `driver/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
   maintenance; no worker starts automatically. See its deployment guide.
 

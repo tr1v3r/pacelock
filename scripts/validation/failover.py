@@ -74,7 +74,7 @@ for loss in (False, True):
             assert oom['allowed'] == 0 and oom['errors'] == 10, oom
             assert redis(replica, 'CONFIG', 'SET', 'maxmemory', '0') == 'OK'
             results['scenarios']['noeviction_oom'] = oom
-            source = (root / 'drivers/redis/internal/engine/gcra.lua').read_text()
+            source = (root / 'driver/redis/internal/engine/gcra.lua').read_text()
             clock = 'local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])'
             now = int(time.time() * 1000000)
 
