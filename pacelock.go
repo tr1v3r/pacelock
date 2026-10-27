@@ -1,4 +1,5 @@
-// Package pacelock provides immediate, weighted, multidimensional GCRA admission.
+// Package pacelock provides weighted, multidimensional GCRA admission with
+// immediate decisions and context-aware blocking waits.
 // Drivers own backend time, atomic persistence and retained admission records.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
 package pacelock

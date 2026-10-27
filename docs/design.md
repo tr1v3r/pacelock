@@ -22,6 +22,7 @@ Redis 协议保持 v1；PG 用 domain 行锁、服务端时间和短事务，复
 ```go
 New(driver Driver, namespace, domain string) (*Limiter, error)
 (*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
+(*Limiter).Wait(ctx context.Context, rules ...Rule) error
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 Validate(rules ...Rule) error
@@ -40,6 +41,12 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 - Allow 不存储请求身份，不防重复扣减；AllowOnce 提供保留期内的准入去重。两者都不提供反向退款。
 
 对同一额度漏传规则或使用不同 domain，会绕开共享限制。调用层必须负责规则覆盖和命名一致性。
+
+## 已实现：阻塞等待封装
+
+`Wait` 在调用方 goroutine 中立即尝试普通准入，仅在正常额度拒绝后按 `RetryAfter` 休眠并重新判定。所有后端错误立即返回，保留原始扣减确定性；两次尝试之间取消为 `NotCharged`，已确认扣减则返回 nil，不因并发取消而伪装成未扣减。错误的 `Op` 为 `wait`，Observer 为整次等待发出一个事件。
+
+规则在调用开始时复制，支持原有多维与 Cost。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。没有幂等 Wait：同一个 `AllowOnce` ID 会保留拒绝，不能轮询等待恢复，`Wait` 也不生成可恢复的 ID。
 
 ## GCRA 与加权消耗
 

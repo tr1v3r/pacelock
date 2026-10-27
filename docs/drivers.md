@@ -23,6 +23,15 @@ not retry an ambiguous mutation. Validate direct requests too. Return `*Error` w
 errors conservatively as `ErrBackend` / `Unknown`; errors never expose a usable
 decision. `NotCharged` on a later call cannot resolve an earlier unknown outcome.
 
+## Blocking wrapper
+
+`Limiter.Wait` is implemented entirely in the core using ordinary `Admit` calls
+with an empty ID. Drivers remain immediate: the core sleeps for a validated
+`RetryAfter` only after a normal denial. Any error stops the loop and preserves
+its accounting certainty. No driver API, persistence protocol or backend-side
+queue is added. Sleeping holds no driver resources; the caller owns the context
+deadline. One `wait` observation covers the complete operation.
+
 ## GCRA and policy identity
 
 Use `Rule.Interval()` for conservative microsecond rounding. Effective interval

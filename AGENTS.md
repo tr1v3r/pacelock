@@ -1,6 +1,6 @@
 # Pacelock
 
-Pacelock provides immediate, weighted, multidimensional GCRA admission through a standard-library core and independent Redis/PostgreSQL drivers.
+Pacelock provides immediate and context-aware blocking weighted, multidimensional GCRA admission through a standard-library core and independent Redis/PostgreSQL drivers.
 
 - Keep the primary checkout on `dev`, clean; develop in `.worktrees/`.
 - Define quota, failure, cancellation, and accounting contracts before changing behavior.
