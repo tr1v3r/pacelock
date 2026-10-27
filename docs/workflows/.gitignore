@@ -1,0 +1,3 @@
+# Machine-local delivery receipts and transient Archify locks.
+/*.delivery.json
+/.archify-*

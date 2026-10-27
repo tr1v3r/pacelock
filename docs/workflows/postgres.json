@@ -1,0 +1,500 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Pacelock · PostgreSQL 单次准入事务",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/workflows/postgres.html",
+    "repository": {
+      "url": "https://github.com/tr1v3r/pacelock",
+      "revision": "6a8d58fc558fb8896ac9b8919c62f1bd7f3f8109",
+      "link_mode": "web"
+    }
+  },
+  "lanes": [
+    {
+      "id": "sync",
+      "label": "① 验证 / 事务同步"
+    },
+    {
+      "id": "evaluate",
+      "label": "② 读取 / 纯计算"
+    },
+    {
+      "id": "persist",
+      "label": "③ 条件写入 / 原子提交"
+    },
+    {
+      "id": "exit",
+      "label": "④ 返回 / 失败出口"
+    }
+  ],
+  "mainPath": [
+    "validate",
+    "begin",
+    "guard",
+    "clock",
+    "receipt",
+    "quotas"
+  ],
+  "nodes": [
+    {
+      "id": "validate",
+      "lane": "sync",
+      "col": 0,
+      "type": "security",
+      "label": "Driver.Admit 校验",
+      "sublabel": "Admission / context / DB",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 111,
+          "end_line": 124
+        }
+      ]
+    },
+    {
+      "id": "begin",
+      "lane": "sync",
+      "col": 1,
+      "type": "database",
+      "label": "BeginTx",
+      "sublabel": "ReadCommitted；defer Rollback",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 125,
+          "end_line": 129
+        }
+      ]
+    },
+    {
+      "id": "guard",
+      "lane": "sync",
+      "col": 2,
+      "type": "database",
+      "label": "锁定 scope guard 行",
+      "sublabel": "INSERT 防缺行；FOR UPDATE",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 84,
+          "end_line": 92
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 130,
+          "end_line": 133
+        }
+      ]
+    },
+    {
+      "id": "clock",
+      "lane": "sync",
+      "col": 3,
+      "type": "database",
+      "icon": "clock",
+      "label": "锁后取一次后端时间",
+      "sublabel": "clock_timestamp() → 微秒",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 94,
+          "end_line": 98
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 134,
+          "end_line": 138
+        }
+      ]
+    },
+    {
+      "id": "receipt",
+      "lane": "sync",
+      "col": 4,
+      "type": "database",
+      "icon": "decision",
+      "label": "有效 receipt？",
+      "sublabel": "仅非空 ID 查询；expiry > now",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 139,
+          "end_line": 150
+        }
+      ]
+    },
+    {
+      "id": "replay",
+      "lane": "sync",
+      "col": 5,
+      "type": "backend",
+      "label": "解码原 Decision",
+      "sublabel": "成功返回 Replayed；回滚解锁",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 151,
+          "end_line": 158
+        }
+      ]
+    },
+    {
+      "id": "quotas",
+      "lane": "evaluate",
+      "col": 4,
+      "type": "database",
+      "label": "SELECT 全部 quota",
+      "sublabel": "按规则顺序；缺行视零态",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 160,
+          "end_line": 167
+        }
+      ]
+    },
+    {
+      "id": "evaluate",
+      "lane": "evaluate",
+      "col": 3,
+      "type": "backend",
+      "label": "Go Evaluate",
+      "sublabel": "校验活跃策略；计算全部 wait",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 168,
+          "end_line": 171
+        },
+        {
+          "path": "gcra.go",
+          "line": 43,
+          "end_line": 71
+        }
+      ]
+    },
+    {
+      "id": "allowed",
+      "lane": "evaluate",
+      "col": 2,
+      "type": "backend",
+      "icon": "decision",
+      "label": "全部 wait = 0？",
+      "sublabel": "任一不足则 next = nil",
+      "sources": [
+        {
+          "path": "gcra.go",
+          "line": 59,
+          "end_line": 71
+        }
+      ]
+    },
+    {
+      "id": "upsert",
+      "lane": "evaluate",
+      "col": 1,
+      "type": "database",
+      "label": "UPSERT 全部 quota",
+      "sublabel": "TAT / interval / burst / expiry",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 172,
+          "end_line": 179
+        }
+      ]
+    },
+    {
+      "id": "deny",
+      "lane": "persist",
+      "col": 2,
+      "type": "backend",
+      "label": "拒绝：跳过 quota 写入",
+      "sublabel": "保留原有债务与策略",
+      "sources": [
+        {
+          "path": "gcra.go",
+          "line": 68,
+          "end_line": 71
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 172,
+          "end_line": 180
+        }
+      ]
+    },
+    {
+      "id": "retain",
+      "lane": "persist",
+      "col": 1,
+      "type": "database",
+      "label": "有 ID 则保存 receipt",
+      "sublabel": "放行 / 拒绝均写；无 ID 跳过",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 180,
+          "end_line": 189
+        }
+      ]
+    },
+    {
+      "id": "commit",
+      "lane": "persist",
+      "col": 0,
+      "type": "database",
+      "label": "tx.Commit()",
+      "sublabel": "quota 与 receipt 一起提交",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 172,
+          "end_line": 193
+        }
+      ]
+    },
+    {
+      "id": "done",
+      "lane": "exit",
+      "col": 0,
+      "type": "backend",
+      "icon": "success",
+      "label": "返回新决策",
+      "sublabel": "Replayed = false",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 190,
+          "end_line": 193
+        }
+      ]
+    },
+    {
+      "id": "unknown",
+      "lane": "exit",
+      "col": 1,
+      "type": "backend",
+      "icon": "failure",
+      "label": "Unknown",
+      "sublabel": "任何 Commit 错误；忽略 Receipt",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 190,
+          "end_line": 192
+        },
+        {
+          "path": "errors.go",
+          "line": 8,
+          "end_line": 16
+        }
+      ]
+    },
+    {
+      "id": "rollback",
+      "lane": "exit",
+      "col": 3,
+      "type": "database",
+      "icon": "failure",
+      "label": "回滚 / NotCharged",
+      "sublabel": "提交前 SQL / policy 等错误",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 116,
+          "end_line": 129
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 168,
+          "end_line": 189
+        }
+      ]
+    },
+    {
+      "id": "conflict",
+      "lane": "evaluate",
+      "col": 5,
+      "type": "security",
+      "icon": "failure",
+      "label": "ErrConflict",
+      "sublabel": "参数不同；NotCharged + 回滚",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 147,
+          "end_line": 150
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 129,
+          "end_line": 129
+        }
+      ]
+    },
+    {
+      "id": "recordError",
+      "lane": "persist",
+      "col": 5,
+      "type": "backend",
+      "icon": "failure",
+      "label": "坏 receipt：Unknown",
+      "sublabel": "解码失败；Rollback 解锁",
+      "sources": [
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 151,
+          "end_line": 156
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "validate",
+      "to": "begin",
+      "label": "通过",
+      "role": "main"
+    },
+    {
+      "from": "begin",
+      "to": "guard",
+      "role": "main"
+    },
+    {
+      "from": "guard",
+      "to": "clock",
+      "label": "获锁",
+      "role": "main"
+    },
+    {
+      "from": "clock",
+      "to": "receipt",
+      "role": "main"
+    },
+    {
+      "from": "receipt",
+      "to": "replay",
+      "label": "有效且参数相同",
+      "role": "branch"
+    },
+    {
+      "from": "receipt",
+      "to": "quotas",
+      "label": "无 ID / 未命中 / 过期",
+      "role": "main"
+    },
+    {
+      "from": "receipt",
+      "to": "conflict",
+      "label": "有效但参数不同",
+      "role": "error"
+    },
+    {
+      "from": "replay",
+      "to": "recordError",
+      "label": "解码失败",
+      "role": "error"
+    },
+    {
+      "from": "quotas",
+      "to": "evaluate",
+      "role": "main"
+    },
+    {
+      "from": "evaluate",
+      "to": "allowed",
+      "label": "有效",
+      "role": "main"
+    },
+    {
+      "from": "evaluate",
+      "to": "rollback",
+      "label": "policy / state 错误",
+      "role": "error"
+    },
+    {
+      "from": "allowed",
+      "to": "upsert",
+      "label": "是",
+      "role": "main"
+    },
+    {
+      "from": "allowed",
+      "to": "deny",
+      "label": "否",
+      "role": "branch"
+    },
+    {
+      "from": "upsert",
+      "to": "retain",
+      "role": "main"
+    },
+    {
+      "from": "deny",
+      "to": "retain",
+      "role": "branch"
+    },
+    {
+      "from": "retain",
+      "to": "commit",
+      "role": "main"
+    },
+    {
+      "from": "retain",
+      "to": "rollback",
+      "label": "编码 / SQL 错误",
+      "role": "error"
+    },
+    {
+      "from": "commit",
+      "to": "done",
+      "label": "成功",
+      "role": "main"
+    },
+    {
+      "from": "commit",
+      "to": "unknown",
+      "label": "失败",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "锁与时间：一整个 scope 串行，不是逐额度锁",
+      "items": [
+        "lockScope 先 INSERT pacelock_domains(scope_id) ON CONFLICT DO NOTHING，再 SELECT ... FOR UPDATE；这是永久 domain guard 行，覆盖尚不存在的 quota / receipt。不是 advisory lock，也不对每个 quota 单独 FOR UPDATE。",
+        "获得行锁后才采样一次 clock_timestamp()，所有规则共用 now；不是事务起点 now()，也不是客户端时间。单次 Admit 不等配额恢复，但连接 / 行锁可等待，受 context 与服务端超时约束。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "GCRA：先算完，再决定是否写入",
+      "items": [
+        "活跃态须通过结构验证，并匹配有效 interval 与 Burst；正常过期态从 now 重开，不受旧策略约束。tat=max(now, active TAT)；candidate=tat+Cost×step；wait=max(0,candidate−Burst×step−now)。",
+        "任一 wait>0：Allowed=false、Limited 按规则顺序列出、RetryAfter=max(wait)，next=nil。全部通过才 UPSERT 全部 quota。ExpiresAt=now+ceil((candidate−now)/1000)×1000（微秒单位）；不依赖 Prune 才恢复。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "幂等命中提前退出；拒绝也可能写数据",
+      "items": [
+        "有效 receipt 在 quota SELECT / policy 检查 / Evaluate 之前命中。相同 fingerprint 重放原 Decision，不重新计算、不续期、不再次 Commit；通过 defer Rollback 释放锁。指纹包含有序名称、有效 interval、Burst、Cost、retention。",
+        "AllowOnce 的新放行和拒绝均在事务中保存完整 Decision，expiry=now+retention；普通 Allow 不写 receipt。拒绝不写 quota，但仍 Commit：首次 domain guard INSERT 也可能被提交。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "失败与旁路边界",
+      "items": [
+        "输入 / context / BeginTx / 获锁 / 读取 / Evaluate / UPSERT 等 Commit 前失败走 NotCharged；事务内变更被回滚。任意 Commit 错误一律 Unknown。坏 retained Decision 解码也是 Unknown，不能把所有失败都归为未扣额。",
+        "Migrate 为显式初始化，不在单次请求里执行。Lookup 不锁 domain、不等进行中的准入、不续期，未命中不能证明未扣。Prune 由调用方单独调度并使用同一 guard 锁；guard 保留、无后台 worker。未画这些维护旁路。依据：postgres.go:31–43、196–218、235–281。"
+      ]
+    }
+  ]
+}

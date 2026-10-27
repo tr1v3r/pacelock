@@ -17,6 +17,8 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 
 可从[策略绑定 API](bound.go)、[底层准入 API](pacelock.go)、[Driver 与恢复契约](driver.go)和[错误结果](errors.go)开始。
 
+也可查看[交互式准入流程图](docs/workflows/README.zh-CN.md)，分别展开公共 API、PostgreSQL 事务和 Redis Lua 的具体操作。
+
 ## 能力
 
 - 加权 GCRA，一次调用 1～32 个具名额度的原子准入。

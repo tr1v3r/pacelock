@@ -25,6 +25,9 @@ the examples when integrating the SDK.
 
 Start with the [bound policy API](bound.go), [low-level admission API](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
 
+For a visual walkthrough, see the [interactive admission workflows](docs/workflows/README.md)
+for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplified Chinese).
+
 ## Capabilities
 
 - Weighted GCRA and atomic admission across 1–32 named quotas.
