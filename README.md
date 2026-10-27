@@ -12,7 +12,7 @@ the core accepts any known positive cost.
 
 The API is pre-v1. This SDK is a rate-admission component, with explicit failure
 contracts and bounded idempotency; it does not implement an LLM gateway or billing
-ledger. Requires Go 1.24+. Choose Redis 7+ or PostgreSQL 16+. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
+ledger. Requires Go 1.26+. Choose Redis 7+ or PostgreSQL 16+. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
 and the [verification record](docs/verification.md) for tested configurations.
 
 ## Fully commented SDK for agents
@@ -250,7 +250,7 @@ PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
 docker compose down
 ```
 
-CI covers Go 1.24/stable, Redis 7.0/7/8, a three-master Cluster, and PostgreSQL 16/17/18.
+CI covers Go 1.26/stable, Redis 7.0/7/8, a three-master Cluster, and PostgreSQL 16/17/18.
 Shared contracts and PG rollback/commit-recovery tests run with race detection.
 The default suite includes synchronized bursts of 100/500/1000 callers, up to
 32 quota dimensions, weighted/shared quotas, tenant isolation, idempotency races,
@@ -264,6 +264,7 @@ Deployment load, memory and failover tools with raw local observations are docum
 
 MIT licensed.
 
-The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
-example and integration-test modules require Go 1.25+ to use patched pgx/text
-dependencies. Production applications should use a maintained Go release.
+The core, both runtime drivers, the optional pgx example and the
+integration-test modules require Go 1.26+ (the pgx/text floor was 1.25; the
+go-redis v9.23 dependency raises it to 1.26). Production applications should
+use a maintained Go release.

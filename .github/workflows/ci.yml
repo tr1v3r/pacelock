@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.24.x', 'stable']
+        go: ['1.26.x', 'stable']
         redis: ['7.0-alpine', '7-alpine', '8-alpine']
     services:
       redis:
@@ -103,7 +103,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {go: '1.24.x', postgres: '16-alpine'}
+          - {go: '1.26.x', postgres: '16-alpine'}
           - {go: 'stable', postgres: '17-alpine'}
           - {go: 'stable', postgres: '18-alpine'}
     services:
