@@ -13,6 +13,13 @@ for module in . drivers/redis drivers/postgres tests/contracts examples/postgres
         cd "$root/$module"
         go mod verify
         go vet ./...
-        go test -race -count=1 -timeout=5m "$@" ./...
+        if [ "$module" = examples/postgres ]; then
+            # The runnable example has no tests. Compile it without forwarding
+            # coverage flags: auto-selected Go 1.25.0 lacks the covdata tool
+            # needed to synthesize coverage for a package without test files.
+            go test -race -count=1 -timeout=5m ./...
+        else
+            go test -race -count=1 -timeout=5m "$@" ./...
+        fi
     )
 done
