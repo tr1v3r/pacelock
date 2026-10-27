@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/jackc/pgx/v5 v5.7.6
-	github.com/tr1v3r/pacelock v0.0.0
+	github.com/tr1v3r/pacelock v0.0.0-20261027041359-ff7d850a7bd5
 	github.com/tr1v3r/pacelock/drivers/postgres v0.0.0
 )
 
