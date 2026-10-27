@@ -35,6 +35,7 @@ var (
 )
 
 type Rule = pacelock.Rule
+type Policy = pacelock.Policy
 type Decision = pacelock.Decision
 
 // Limiter is safe for concurrent use when its Redis client is safe for concurrent use.
@@ -171,7 +172,7 @@ func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 	for i, r := range rules {
 		step, _ := interval(r)
 		keys[i] = l.key(r.Name)
-		args = append(args, step, r.Burst, r.Cost, r.Name)
+		args = append(args, step, r.Policy.Burst, r.Cost, r.Name)
 	}
 	return keys, args, nil
 }

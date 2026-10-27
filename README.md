@@ -134,8 +134,9 @@ be inferred. Different namespaces/domains are independent.
 
 ## Fixed policies and per-attempt costs
 
-`Policy` contains `Rate`, `Period` and `Burst`; `Quota` retains its public `Name`
-and `Policy` fields. Construct each `Charge` with `q.Charge(cost)`: this
+`Policy` contains `Rate`, `Period` and `Burst` and is embedded by the low-level
+`Rule` as well, so policy fields are declared exactly once; `Quota` retains its
+public `Name` and `Policy` fields. Construct each `Charge` with `q.Charge(cost)`: this
 value-receiver method captures a copy of the entire quota and the known cost in
 private fields. It performs no validation or I/O; bound admission validates them.
 Do not construct charges with field literals.
@@ -175,7 +176,8 @@ Do not construct charges with field literals.
 `Rule`, `Validate`, `limiter.Allow(ctx, rules...)` and
 `limiter.AllowOnce(ctx, id, retention, rules...)` remain supported without a
 signature, Driver contract or storage/protocol change from the bound API. A `Rule`
-combines a quota's name, policy and per-attempt cost. This path checks only the
+combines a quota's name, per-attempt cost and the same shared `Policy` type used
+by `Quota`, so the two layers describe replenishment exactly once. This path checks only the
 supplied rules and cannot detect omitted applicable quotas. Bound admissions use the same execution path and quota
 state; they add complete-set validation and normalize charges to binding order.
 The versioned trusted builder in the [durable example](drivers/redis/examples/durable/README.md)
@@ -214,8 +216,8 @@ error occurs:
 
 ```go
 rules := []pacelock.Rule{
-    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+    {Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
+    {Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: 1500},
 }
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()

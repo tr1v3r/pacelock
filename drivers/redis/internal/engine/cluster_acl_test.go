@@ -88,7 +88,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 		}
 		return l
 	}
-	r := Rule{Name: "quota", Rate: 1, Period: time.Hour, Burst: 3, Cost: 1}
+	r := Rule{Name: "quota", Policy: Policy{Rate: 1, Period: time.Hour, Burst: 3}, Cost: 1}
 	t.Run("standalone_grants_cannot_discover_cluster", func(t *testing.T) {
 		d, err := connect(t).Allow(ctx, r)
 		if err == nil || !errors.Is(err, ErrBackend) || !strings.Contains(strings.ToLower(err.Error()), "cluster|slots") || d.Allowed {

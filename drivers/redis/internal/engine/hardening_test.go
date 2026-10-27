@@ -188,7 +188,7 @@ func FuzzInterval(f *testing.F) {
 	f.Add(int64(3), int64(time.Second), int64(3), int64(2))
 	f.Add(int64(1<<62), int64(1), int64(1), int64(1))
 	f.Fuzz(func(t *testing.T, rate, period, burst, cost int64) {
-		r := Rule{Name: "q", Rate: rate, Period: time.Duration(period), Burst: burst, Cost: cost}
+		r := Rule{Name: "q", Policy: Policy{Rate: rate, Period: time.Duration(period), Burst: burst}, Cost: cost}
 		step, err := interval(r)
 		if err != nil {
 			return
@@ -228,8 +228,8 @@ func TestFingerprintBindsParameters(t *testing.T) {
 	if fingerprint(first) == fingerprint(second) {
 		t.Fatal("order not bound")
 	}
-	a.Rate = 2
-	a.Period = 2 * time.Hour
+	a.Policy.Rate = 2
+	a.Policy.Period = 2 * time.Hour
 	_, equivalent, _ := l.prepare([]Rule{a, b})
 	equivalent[0] = int64(1000)
 	if fingerprint(first) != fingerprint(equivalent) {

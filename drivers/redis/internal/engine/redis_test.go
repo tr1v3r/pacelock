@@ -43,7 +43,7 @@ func integration(t *testing.T) (*Limiter, *redis.Client) {
 }
 
 func rule(name string, burst, cost int64) Rule {
-	return Rule{Name: name, Rate: 1, Period: time.Hour, Burst: burst, Cost: cost}
+	return Rule{Name: name, Policy: Policy{Rate: 1, Period: time.Hour, Burst: burst}, Cost: cost}
 }
 
 func TestRedisWeightedAndAtomic(t *testing.T) {
@@ -115,7 +115,7 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 	if _, err := l.Allow(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	r.Burst = 4
+	r.Policy.Burst = 4
 	if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("err=%v", err)
 	}
@@ -136,18 +136,18 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 func TestRedisRefillAndExpiry(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
-	r := Rule{Name: "short", Rate: 1, Period: 200 * time.Millisecond, Burst: 1, Cost: 1}
+	r := Rule{Name: "short", Policy: Policy{Rate: 1, Period: 200 * time.Millisecond, Burst: 1}, Cost: 1}
 	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
-	if d, err := l.Allow(ctx, r); err != nil || d.Allowed || d.RetryAfter <= 0 || d.RetryAfter > r.Period {
+	if d, err := l.Allow(ctx, r); err != nil || d.Allowed || d.RetryAfter <= 0 || d.RetryAfter > r.Policy.Period {
 		t.Fatalf("%+v %v", d, err)
 	}
 	time.Sleep(220 * time.Millisecond)
 	if c.Exists(ctx, l.key(r.Name)).Val() != 1 {
 		t.Fatal("test must retain physically expired logical state")
 	}
-	r.Burst = 2 // A logically expired policy may change without physical cleanup.
+	r.Policy.Burst = 2 // A logically expired policy may change without physical cleanup.
 	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}

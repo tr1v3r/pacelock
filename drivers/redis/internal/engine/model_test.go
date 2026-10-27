@@ -78,7 +78,7 @@ return {decision, states, expiries, writes}
 			if iteration < len(tinySteps) {
 				step, burst, cost, used = tinySteps[iteration], 1, 1, 0
 			}
-			rules[i] = Rule{Name: fmt.Sprintf("q%d", i), Rate: 1, Period: time.Duration(step) * time.Microsecond, Burst: burst, Cost: cost}
+			rules[i] = Rule{Name: fmt.Sprintf("q%d", i), Policy: Policy{Rate: 1, Period: time.Duration(step) * time.Microsecond, Burst: burst}, Cost: cost}
 			before[i] = fmt.Sprintf("%d:%d:%d", now+used, step, burst)
 			if err := c.Set(ctx, l.key(rules[i].Name), before[i], 0).Err(); err != nil {
 				t.Fatal(err)
@@ -129,7 +129,7 @@ return {decision, states, expiries, writes}
 			state, stateOK := states[i].(string)
 			expected := before[i]
 			if want.Allowed {
-				expected = fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Period.Microseconds(), r.Burst)
+				expected = fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst)
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
@@ -142,7 +142,7 @@ return {decision, states, expiries, writes}
 		if want.Allowed {
 			command := []interface{}{"MSET"}
 			for i, r := range rules {
-				command = append(command, keys[i], fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Period.Microseconds(), r.Burst))
+				command = append(command, keys[i], fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst))
 			}
 			expectedWrites = append(expectedWrites, command)
 		}

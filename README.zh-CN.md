@@ -106,7 +106,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ## 固定策略与单次消耗
 
-`Policy` 包含 `Rate`、`Period`、`Burst`；`Quota` 保留公开的 `Name` 和 `Policy` 字段。通过 `q.Charge(cost)` 构造每个 `Charge`：这个值接收者方法将完整额度和已知消耗复制到私有字段，不校验、不做 I/O，交由绑定准入时校验。不要通过字段字面量构造 Charge。
+`Policy` 包含 `Rate`、`Period`、`Burst`，同时也被底层 `Rule` 内嵌，策略字段只声明一次；`Quota` 保留公开的 `Name` 和 `Policy` 字段。通过 `q.Charge(cost)` 构造每个 `Charge`：这个值接收者方法将完整额度和已知消耗复制到私有字段，不校验、不做 I/O，交由绑定准入时校验。不要通过字段字面量构造 Charge。
 
 - `limiter.Bind(quotas...)` 在本地校验并复制 1～32 个名称唯一的额度，不访问后端，也不注册或更新服务端策略。定义无效时返回包装 `ErrInvalid` 的错误。
 - `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片、Quota 或策略值，既不影响绑定，也不影响先前构造的 Charge。每次调用独立组装规则，不修改传入参数。
@@ -119,7 +119,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ### 现有底层 API
 
-`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、固定策略和单次消耗合在一起。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
 [持久化示例](drivers/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
@@ -150,8 +150,8 @@ SDK 不启动后台任务。
 
 ```go
 rules := []pacelock.Rule{
-    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+    {Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
+    {Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: 1500},
 }
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()

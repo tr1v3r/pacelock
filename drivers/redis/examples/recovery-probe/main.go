@@ -30,7 +30,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	r := pacelock.Rule{Name: "quota", Rate: 1, Period: time.Hour, Burst: 10, Cost: 1}
+	r := pacelock.Rule{Name: "quota", Policy: pacelock.Policy{Rate: 1, Period: time.Hour, Burst: 10}, Cost: 1}
 	out := map[string]int{"allowed": 0, "denied": 0, "unknown": 0, "errors": 0, "found": 0, "missing": 0}
 	if *action == "check" {
 		for i := 0; i < 10; i++ {

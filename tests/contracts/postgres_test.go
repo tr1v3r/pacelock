@@ -171,7 +171,7 @@ func TestPostgresLostCommitReplyRecovery(t *testing.T) {
 func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 	db, _, s, l := postgresFixture(t)
 	r := rule("q", 1, 1)
-	r.Period = 350 * time.Millisecond
+	r.Policy.Period = 350 * time.Millisecond
 	mustAllow(t, l, r)
 	tx, err := db.Begin()
 	if err != nil {
@@ -213,7 +213,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 func TestPostgresPrunePreservesActiveDebt(t *testing.T) {
 	db, d, s, l := postgresFixture(t)
 	short := rule("expired", 1, 1)
-	short.Period = 20 * time.Millisecond
+	short.Policy.Period = 20 * time.Millisecond
 	if _, err := l.AllowOnce(context.Background(), "short", 20*time.Millisecond, short); err != nil {
 		t.Fatal(err)
 	}

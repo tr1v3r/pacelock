@@ -35,18 +35,26 @@ var (
 	ErrBackend = errors.New("pacelock: backend failure")
 )
 
-// Rule charges Cost units to Name. Rate units replenish per Period.
-// Burst is total instantaneous capacity, including the first unit.
-// This low-level API combines policy and cost; use Limiter.Bind to separate them.
+// Policy defines replenishment and total burst capacity independently of a
+// charge. The same named quota must use the same effective policy throughout
+// a domain.
+type Policy struct {
+	// Rate is the positive number of units replenished per Period.
+	Rate int64
+	// Period is positive and at most MaxHorizon; unit intervals round up to microseconds.
+	Period time.Duration
+	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
+	Burst int64
+}
+
+// Rule charges Cost units to the quota named by Name under Policy. Burst is
+// total instantaneous capacity, including the first unit. Rule is the driver
+// wire format combining policy and cost; use Limiter.Bind to separate them.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
-	// Rate is the positive number of units replenished per Period.
-	Rate int64
-	// Period is positive and at most MaxHorizon.
-	Period time.Duration
-	// Burst is positive; its effective refill time is at most MaxHorizon.
-	Burst int64
+	// Policy specifies how the named quota replenishes and how much it can accumulate.
+	Policy Policy
 	// Cost is the known charge for this attempt, from 1 through Burst.
 	Cost int64
 }
@@ -54,15 +62,16 @@ type Rule struct {
 // Interval validates the rule and returns its per-unit recovery interval, rounded
 // upward to whole microseconds. Drivers must use this effective interval.
 func (r Rule) Interval() (time.Duration, error) {
-	if r.Name == "" || len(r.Name) > 256 || r.Rate <= 0 || r.Period <= 0 || r.Period > MaxHorizon || r.Burst <= 0 || r.Cost <= 0 || r.Cost > r.Burst {
+	p := r.Policy
+	if r.Name == "" || len(r.Name) > 256 || p.Rate <= 0 || p.Period <= 0 || p.Period > MaxHorizon || p.Burst <= 0 || r.Cost <= 0 || r.Cost > p.Burst {
 		return 0, fmt.Errorf("%w: invalid quota %q", ErrInvalid, r.Name)
 	}
-	us := (r.Period.Nanoseconds() + 999) / 1000
-	step := us / r.Rate
-	if us%r.Rate != 0 {
+	us := (p.Period.Nanoseconds() + 999) / 1000
+	step := us / p.Rate
+	if us%p.Rate != 0 {
 		step++
 	}
-	if r.Burst > MaxHorizon.Microseconds()/step {
+	if p.Burst > MaxHorizon.Microseconds()/step {
 		return 0, fmt.Errorf("%w: burst refill horizon exceeds 24 hours for %q", ErrInvalid, r.Name)
 	}
 	return time.Duration(step) * time.Microsecond, nil

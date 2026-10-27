@@ -54,8 +54,8 @@ func TestRedisIdempotentAdmission(t *testing.T) {
 		t.Fatal("conflict charged")
 	}
 	// Same effective policy is a valid replay, even with a different expression.
-	rules[0].Rate = 2
-	rules[0].Period = 2 * time.Hour
+	rules[0].Policy.Rate = 2
+	rules[0].Policy.Period = 2 * time.Hour
 	if d, err := l.AllowOnce(ctx, "request-1", time.Minute, rules...); err != nil || !d.Replayed {
 		t.Fatalf("%+v %v", d, err)
 	}

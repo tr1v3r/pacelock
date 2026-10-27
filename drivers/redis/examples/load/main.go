@@ -166,11 +166,11 @@ func run() error {
 	prefixes := make([]string, *domains)
 	rules := make([]pacelock.Rule, *dimensions)
 	for i := range rules {
-		rules[i] = pacelock.Rule{Name: fmt.Sprintf("quota-%d", i), Rate: 1000000, Period: time.Second, Burst: 1000000, Cost: 1}
+		rules[i] = pacelock.Rule{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000}, Cost: 1}
 		if *mode == "deny" || *mode == "once-deny" {
-			rules[i].Rate = 1
-			rules[i].Period = 24 * time.Hour
-			rules[i].Burst = 1
+			rules[i].Policy.Rate = 1
+			rules[i].Policy.Period = 24 * time.Hour
+			rules[i].Policy.Burst = 1
 		}
 	}
 	for i := range limiters {

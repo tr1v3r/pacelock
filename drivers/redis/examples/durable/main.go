@@ -49,9 +49,9 @@ func rules(a attempt) ([]pacelock.Rule, error) {
 		return nil, errors.New("unsupported policy, tenant or known input cost")
 	}
 	r := []pacelock.Rule{
-		{Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-		{Name: "model:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: a.Tokens},
-		{Name: "tenant:" + a.Tenant + ":input-tpm", Rate: 6000, Period: time.Minute, Burst: 1000, Cost: a.Tokens},
+		{Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
+		{Name: "model:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: a.Tokens},
+		{Name: "tenant:" + a.Tenant + ":input-tpm", Policy: pacelock.Policy{Rate: 6000, Period: time.Minute, Burst: 1000}, Cost: a.Tokens},
 	}
 	return r, pacelock.Validate(r...)
 }

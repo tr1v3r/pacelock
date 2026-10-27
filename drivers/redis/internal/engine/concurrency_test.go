@@ -20,7 +20,7 @@ import (
 // These are bounded contention/correctness tests, not throughput or latency SLOs.
 // A minute per unit prevents refill during each 20-second synchronized wave.
 func contentionRule(name string, burst, cost int64) Rule {
-	return Rule{Name: name, Rate: 1, Period: time.Minute, Burst: burst, Cost: cost}
+	return Rule{Name: name, Policy: Policy{Rate: 1, Period: time.Minute, Burst: burst}, Cost: cost}
 }
 
 type contentionFixture struct {
@@ -248,7 +248,7 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 					}
 					var want []string
 					for j := range r {
-						if r[j].Burst/r[j].Cost == 37 {
+						if r[j].Policy.Burst/r[j].Cost == 37 {
 							want = append(want, r[j].Name)
 						}
 					}

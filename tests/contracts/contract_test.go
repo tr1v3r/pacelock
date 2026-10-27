@@ -92,7 +92,7 @@ func limiter(t *testing.T, b backend, index int, domain string) *pacelock.Limite
 }
 func freshDomain() string { return fmt.Sprintf("%d-%d", time.Now().UnixNano(), sequence.Add(1)) }
 func rule(name string, burst, cost int64) pacelock.Rule {
-	return pacelock.Rule{Name: name, Rate: 1, Period: time.Minute, Burst: burst, Cost: cost}
+	return pacelock.Rule{Name: name, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: burst}, Cost: cost}
 }
 func mustAllow(t *testing.T, l *pacelock.Limiter, rules ...pacelock.Rule) {
 	t.Helper()
@@ -119,7 +119,7 @@ func TestDriverContract(t *testing.T) {
 				slow := rule("slow", 1, 1)
 				fast := slow
 				fast.Name = "fast"
-				fast.Period = 10 * time.Second
+				fast.Policy.Period = 10 * time.Second
 				mustAllow(t, l, slow, fast)
 				d, err := l.Allow(context.Background(), fast, slow)
 				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"fast", "slow"}) || d.RetryAfter < 50*time.Second || d.RetryAfter > time.Minute {
@@ -226,8 +226,8 @@ func TestDriverContract(t *testing.T) {
 				if _, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil {
 					t.Fatal(err)
 				}
-				rules[0].Rate = 60
-				rules[0].Period = time.Hour
+				rules[0].Policy.Rate = 60
+				rules[0].Policy.Period = time.Hour
 				if r, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
 					t.Fatal(r, err)
 				}
@@ -239,7 +239,7 @@ func TestDriverContract(t *testing.T) {
 			t.Run("expiry recovery and no retention extension", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				r := rule("q", 1, 1)
-				r.Period = 20 * time.Millisecond
+				r.Policy.Period = 20 * time.Millisecond
 				if _, err := l.AllowOnce(context.Background(), "short", time.Second, r); err != nil {
 					t.Fatal(err)
 				}
@@ -252,7 +252,7 @@ func TestDriverContract(t *testing.T) {
 				if _, found, err := l.Lookup(context.Background(), "short"); err != nil || found {
 					t.Fatal(found, err)
 				}
-				r.Burst = 2
+				r.Policy.Burst = 2
 				mustAllow(t, l, r)
 			})
 			t.Run("32 dimensions and cancellation", func(t *testing.T) {
@@ -294,7 +294,7 @@ func TestWaitDriverContract(t *testing.T) {
 			t.Run("weighted recovery charges all quotas once", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				slow := rule("slow", 2, 2)
-				slow.Period = 50 * time.Millisecond
+				slow.Policy.Period = 50 * time.Millisecond
 				mustAllow(t, l, slow)
 				fresh := rule("fresh", 5, 3)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -325,14 +325,14 @@ func TestWaitDriverContract(t *testing.T) {
 				if err := second.Wait(ctx, fresh, blocked); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
-				fresh.Cost = fresh.Burst
+				fresh.Cost = fresh.Policy.Burst
 				mustAllow(t, first, fresh)
 			})
 			t.Run("concurrent cross client waits", func(t *testing.T) {
 				domain := freshDomain()
 				ls := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
 				r := rule("weighted", 2, 2)
-				r.Period = 10 * time.Millisecond
+				r.Policy.Period = 10 * time.Millisecond
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				const callers = 12

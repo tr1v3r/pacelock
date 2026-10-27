@@ -15,7 +15,7 @@ func BenchmarkValidate(b *testing.B) {
 		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
 			rules := make([]Rule, n)
 			for i := range rules {
-				rules[i] = Rule{Name: fmt.Sprint(i), Rate: 1000, Period: time.Second, Burst: 1000, Cost: 1}
+				rules[i] = Rule{Name: fmt.Sprint(i), Policy: Policy{Rate: 1000, Period: time.Second, Burst: 1000}, Cost: 1}
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -53,7 +53,7 @@ func BenchmarkRedis(b *testing.B) {
 				})
 				rules := make([]Rule, n)
 				for i := range rules {
-					rules[i] = Rule{Name: fmt.Sprint(i), Rate: 1000000, Period: time.Second, Burst: 1000000000, Cost: 1}
+					rules[i] = Rule{Name: fmt.Sprint(i), Policy: Policy{Rate: 1000000, Period: time.Second, Burst: 1000000000}, Cost: 1}
 					if mode == "deny" {
 						rules[i] = rule(fmt.Sprint(i), 1, 1)
 					}

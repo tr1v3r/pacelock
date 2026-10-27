@@ -347,7 +347,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 		l := f.limiter(t)
 		// With a fast real clock, don't assert an exact burst count: Redis service
 		// time can span replenishment. Bound accepted cost by server elapsed time.
-		r := Rule{Name: "q", Rate: 1, Period: 10 * time.Millisecond, Burst: 20, Cost: 1}
+		r := Rule{Name: "q", Policy: Policy{Rate: 1, Period: 10 * time.Millisecond, Burst: 20}, Cost: 1}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		for wave := 0; wave < 3; wave++ {
@@ -368,11 +368,11 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			bound := r.Burst + int64(after.Sub(before)/r.Period)
-			if got := admitted.Load(); got < r.Burst || got > bound {
-				t.Fatalf("wave %d admitted %d outside [%d,%d]", wave, got, r.Burst, bound)
+			bound := r.Policy.Burst + int64(after.Sub(before)/r.Policy.Period)
+			if got := admitted.Load(); got < r.Policy.Burst || got > bound {
+				t.Fatalf("wave %d admitted %d outside [%d,%d]", wave, got, r.Policy.Burst, bound)
 			}
-			time.Sleep(time.Duration(r.Burst)*r.Period + 10*time.Millisecond) // Logical recovery requires no physical deletion.
+			time.Sleep(time.Duration(r.Policy.Burst)*r.Policy.Period + 10*time.Millisecond) // Logical recovery requires no physical deletion.
 		}
 	})
 	t.Run("record_expiry", func(t *testing.T) {
