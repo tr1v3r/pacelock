@@ -23,6 +23,7 @@ Redis 协议保持 v1；PG 用 domain 行锁、服务端时间和短事务，复
 New(driver Driver, namespace, domain string) (*Limiter, error)
 (*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
 (*Limiter).Wait(ctx context.Context, rules ...Rule) error
+(*Limiter).WaitOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 Validate(rules ...Rule) error
@@ -46,7 +47,9 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 `Wait` 在调用方 goroutine 中立即尝试普通准入，仅在正常额度拒绝后按 `RetryAfter` 休眠并重新判定。所有后端错误立即返回，保留原始扣减确定性；两次尝试之间取消为 `NotCharged`，已确认扣减则返回 nil，不因并发取消而伪装成未扣减。错误的 `Op` 为 `wait`，Observer 为整次等待发出一个事件。
 
-规则在调用开始时复制，支持原有多维与 Cost。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。没有幂等 Wait：同一个 `AllowOnce` ID 会保留拒绝，不能轮询等待恢复，`Wait` 也不生成可恢复的 ID。
+规则在调用开始时复制，支持原有多维与 Cost。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。`Wait` 不生成可恢复的 ID。`WaitOnce` 使用同一 ID 等待，只保存成功结果；普通拒绝不扣减、不写记录，参数在成功或 pending 时才绑定。成功保留期从后端准入决策起算，不包含此前等待；成功可供 `Lookup` 查询并由两个 Once 接口重放。已有 `AllowOnce` 拒绝保持不可变，传给 `WaitOnce` 会返回 `ErrConflict` / `NotCharged`。记录过期或丢失后不得复用旧 ID。
+
+可选 `WaitOnceDriver.AdmitWaitOnce` 表达一次立即的成功保留原子准入，不扩展基础 Driver；不支持时返回 `ErrUnsupported` / `NotCharged`。Redis 通过可选尾参数跳过拒绝写入，成功沿用 v1 pending/complete 记录与原始指纹，保证部分写入后不重放。PG 的拒绝回滚，成功与额度一起提交。未知结果不自动重试；整个 WaitOnce 调用只发出一个 `wait_once` 事件。同 ID 并发调用只去重准入，不能去重业务执行。
 
 ## GCRA 与加权消耗
 

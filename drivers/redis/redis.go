@@ -17,7 +17,7 @@ import (
 // hooks, factories and proxies must preserve this contract. Ring is unsupported.
 type Driver struct{ client redis.Scripter }
 
-var _ pacelock.Driver = (*Driver)(nil)
+var _ pacelock.WaitOnceDriver = (*Driver)(nil)
 
 // New validates an initialized go-redis client without connecting or changing its
 // options. Configure the client before use. The constructor accepts Client,
@@ -32,9 +32,27 @@ func New(client redis.Scripter) (*Driver, error) {
 // Admit executes all dimensions and optional retained deduplication in one Lua
 // operation. Runtime write errors may partially debit; errors retain their Outcome.
 func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
+	return d.admit(ctx, request, false)
+}
+
+// AdmitWaitOnce atomically retains successes only; it never waits for recovery.
+// Denials write no quota or receipt. Existing AllowOnce denials conflict, while
+// successes and pending records share AllowOnce's fingerprint and recovery path.
+func (d *Driver) AdmitWaitOnce(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
+	if request.ID == "" {
+		return pacelock.Receipt{}, inputError("wait_once", pacelock.ErrInvalid)
+	}
+	return d.admit(ctx, request, true)
+}
+
+// admit dispatches either ordinary or success-only retained Lua admission.
+func (d *Driver) admit(ctx context.Context, request pacelock.Admission, successOnly bool) (pacelock.Receipt, error) {
 	op := "allow"
 	if request.ID != "" {
 		op = "allow_once"
+	}
+	if successOnly {
+		op = "wait_once"
 	}
 	if err := request.Validate(); err != nil {
 		return pacelock.Receipt{}, inputError(op, err)
@@ -45,6 +63,9 @@ func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (paceloc
 	l, err := engine.New(d.client, request.Namespace, request.Domain)
 	if err != nil {
 		return pacelock.Receipt{}, inputError(op, err)
+	}
+	if successOnly {
+		return l.AdmitWaitOnce(ctx, request.ID, request.Retention, request.Rules...)
 	}
 	if request.ID != "" {
 		return l.AllowOnce(ctx, request.ID, request.Retention, request.Rules...)

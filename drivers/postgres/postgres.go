@@ -23,7 +23,7 @@ import (
 // bounded by the caller's context and server timeouts. No automatic retries occur.
 type Driver struct{ db *sql.DB }
 
-var _ pacelock.Driver = (*Driver)(nil)
+var _ pacelock.WaitOnceDriver = (*Driver)(nil)
 
 //go:embed schema.sql
 var schema string
@@ -109,9 +109,27 @@ func fail(op string, outcome pacelock.Outcome, err error) error {
 // Before Commit is sent, failures are NotCharged; any Commit error is conservatively
 // Unknown. A prior ambiguous invocation remains ambiguous even after a later error.
 func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+	return d.admit(ctx, a, false)
+}
+
+// AdmitWaitOnce makes an immediate success-only retained admission. Denials roll
+// back without quota or receipt writes; existing AllowOnce denials conflict.
+// A success and its receipt commit atomically with the ordinary v1 fingerprint.
+func (d *Driver) AdmitWaitOnce(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+	if a.ID == "" {
+		return pacelock.Receipt{}, fail("wait_once", pacelock.NotCharged, pacelock.ErrInvalid)
+	}
+	return d.admit(ctx, a, true)
+}
+
+// admit keeps both retained modes within the same domain transaction boundary.
+func (d *Driver) admit(ctx context.Context, a pacelock.Admission, successOnly bool) (pacelock.Receipt, error) {
 	op := "allow"
 	if a.ID != "" {
 		op = "allow_once"
+	}
+	if successOnly {
+		op = "wait_once"
 	}
 	uncharged := func(err error) (pacelock.Receipt, error) {
 		return pacelock.Receipt{}, fail(op, pacelock.NotCharged, err)
@@ -152,6 +170,9 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Rece
 			if decodeErr != nil {
 				return pacelock.Receipt{}, fail(op, pacelock.Unknown, decodeErr)
 			}
+			if successOnly && !decision.Allowed {
+				return uncharged(fmt.Errorf("%w: ID retains an AllowOnce denial", pacelock.ErrConflict))
+			}
 			// A retained replay performs no quota mutation; ending the transaction
 			// with Rollback releases the lock without a second commit ambiguity.
 			return pacelock.Receipt{Decision: decision, Replayed: true}, nil
@@ -168,6 +189,9 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Rece
 	decision, next, err := pacelock.Evaluate(now, a.Rules, states)
 	if err != nil {
 		return uncharged(err)
+	}
+	if successOnly && !decision.Allowed {
+		return pacelock.Receipt{Decision: decision}, nil
 	}
 	if decision.Allowed {
 		for i, s := range next {

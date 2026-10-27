@@ -22,6 +22,8 @@ const (
 var (
 	// ErrInvalid reports invalid input before dispatch.
 	ErrInvalid = errors.New("pacelock: invalid argument")
+	// ErrUnsupported reports a driver without support for an optional operation.
+	ErrUnsupported = errors.New("pacelock: unsupported driver operation")
 	// ErrPolicyMismatch reports a policy conflict with active quota state.
 	ErrPolicyMismatch = errors.New("pacelock: policy differs from active backend state")
 	// ErrState reports malformed state or replies; inspect OutcomeOf.
@@ -155,7 +157,7 @@ func (l *Limiter) ready(ctx context.Context) error {
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
 	finish := l.observe(ctx, "allow", len(rules))
 	defer func() { finish(decision, false, err) }()
-	r, err := l.admit(ctx, "", 0, rules)
+	r, err := l.admit(ctx, "", 0, rules, false)
 	return r.Decision, err
 }
 
@@ -169,13 +171,16 @@ func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Durat
 	if id == "" {
 		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return l.admit(ctx, id, retention, rules)
+	return l.admit(ctx, id, retention, rules, false)
 }
 
-func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
+func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule, successOnly bool) (Receipt, error) {
 	op := "allow"
 	if id != "" {
 		op = "allow_once"
+	}
+	if successOnly {
+		op = "wait_once"
 	}
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
@@ -184,12 +189,25 @@ func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration,
 	if err := request.Validate(); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	result, err := l.driver.Admit(ctx, request)
+	var result Receipt
+	var err error
+	if successOnly {
+		driver, ok := l.driver.(WaitOnceDriver)
+		if !ok {
+			return Receipt{}, failure(op, NotCharged, ErrUnsupported)
+		}
+		result, err = driver.AdmitWaitOnce(ctx, request)
+	} else {
+		result, err = l.driver.Admit(ctx, request)
+	}
 	if err != nil {
 		return Receipt{}, driverFailure(op, err)
 	}
 	if err := validateDecision(result.Decision, rules); err != nil {
 		return Receipt{}, failure(op, Unknown, err)
+	}
+	if successOnly && result.Replayed && !result.Allowed {
+		return Receipt{}, failure(op, NotCharged, fmt.Errorf("%w: ID retains an AllowOnce denial", ErrConflict))
 	}
 	if id == "" && result.Replayed {
 		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: replay of ordinary admission", ErrState))

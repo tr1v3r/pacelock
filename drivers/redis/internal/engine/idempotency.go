@@ -26,48 +26,71 @@ type Receipt = pacelock.Receipt
 func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
 	finish := l.observe(ctx, "allow_once", len(rules))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
+	return l.admitOnce(ctx, id, retention, rules, false)
+}
+
+// AdmitWaitOnce makes one immediate attempt, retaining only successful admission.
+// Denials write nothing. Existing AllowOnce denials conflict; pending records
+// preserve Unknown. The outer core owns waiting and observes the complete call.
+func (l *Limiter) AdmitWaitOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error) {
+	return l.admitOnce(ctx, id, retention, rules, true)
+}
+
+// admitOnce shares the v1 record and fingerprint protocol across retained modes.
+func (l *Limiter) admitOnce(ctx context.Context, id string, retention time.Duration, rules []Rule, successOnly bool) (Receipt, error) {
+	op := "allow_once"
+	if successOnly {
+		op = "wait_once"
+	}
 	if err := l.ready(ctx); err != nil {
-		return Receipt{}, failure("allow_once", NotCharged, err)
+		return Receipt{}, failure(op, NotCharged, err)
 	}
 	if err := validID(id); err != nil {
-		return Receipt{}, failure("allow_once", NotCharged, err)
+		return Receipt{}, failure(op, NotCharged, err)
 	}
 	if retention < time.Millisecond || retention > MaxHorizon || retention%time.Millisecond != 0 {
-		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: retention must be whole milliseconds in [1ms, 24h]", ErrInvalid))
+		return Receipt{}, failure(op, NotCharged, fmt.Errorf("%w: retention must be whole milliseconds in [1ms, 24h]", ErrInvalid))
 	}
 	keys, args, err := l.prepare(rules)
 	if err != nil {
-		return Receipt{}, failure("allow_once", NotCharged, err)
+		return Receipt{}, failure(op, NotCharged, err)
 	}
 	// JSON records require valid UTF-8; Allow continues to accept opaque names.
 	for _, r := range rules {
 		if !utf8.ValidString(r.Name) {
-			return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: idempotent quota names must be UTF-8", ErrInvalid))
+			return Receipt{}, failure(op, NotCharged, fmt.Errorf("%w: idempotent quota names must be UTF-8", ErrInvalid))
 		}
 	}
 	args[0] = retention.Milliseconds()
 	fp := fingerprint(args)
 	args[1] = fp
+	if successOnly {
+		// Append after hashing: successful records remain AllowOnce-compatible.
+		args = append(args, "success_only")
+	}
 	keys = append(keys, l.attemptKey(id))
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
-		return Receipt{}, scriptFailure("allow_once", err)
+		return Receipt{}, scriptFailure(op, err)
 	}
 	values, err := cmd.Slice()
 	if err != nil {
-		return Receipt{}, failure("allow_once", Unknown, fmt.Errorf("%w: invalid receipt reply: %v", ErrState, err))
+		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: invalid receipt reply: %v", ErrState, err))
 	}
 	if len(values) != 2 {
-		return Receipt{}, failure("allow_once", Unknown, fmt.Errorf("%w: invalid receipt", ErrState))
+		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: invalid receipt", ErrState))
 	}
 	replay, ok := values[0].(int64)
 	raw, textOK := values[1].(string)
 	if !ok || !textOK || (replay != 0 && replay != 1) {
-		return Receipt{}, failure("allow_once", Unknown, fmt.Errorf("%w: invalid receipt", ErrState))
+		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: invalid receipt", ErrState))
 	}
 	d, err := decodeRecord(raw, fp, namesOf(rules))
 	if err != nil {
-		return Receipt{}, failure("allow_once", Unknown, err)
+		return Receipt{}, failure(op, Unknown, err)
+	}
+	if successOnly && replay == 1 && !d.Allowed {
+		return Receipt{}, failure(op, NotCharged, fmt.Errorf("%w: ID retains an AllowOnce denial", ErrConflict))
 	}
 	return Receipt{Decision: d, Replayed: replay == 1}, nil
 }

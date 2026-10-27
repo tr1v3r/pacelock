@@ -16,7 +16,12 @@ Import `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` and
 One domain is one Cluster slot. All instances need matching scope, names and
 effective policies. Each call must include every applicable quota.
 
-The v1 Lua script, key hashes and retained record protocol remain unchanged.
+`Wait` and `WaitOnce` are core wrappers over immediate driver operations.
+`AdmitWaitOnce` implements success-only retention: denials write nothing, successes
+use the existing v1 pending/complete records, and retained AllowOnce denials
+conflict. Success replay/Lookup do not charge or extend retention. Key hashes,
+record encoding, and ordinary Allow/AllowOnce arguments remain compatible; the
+Lua script adds an optional trailing mode argument for success-only retention.
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects; Ring is unsupported. Custom Scripters/hooks/factories/proxies must
 preserve no-replay and primary-routing behavior. Runtime script errors can leave

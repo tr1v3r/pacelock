@@ -26,6 +26,24 @@ type Driver interface {
 	Lookup(context.Context, LookupRequest) (Decision, bool, error)
 }
 
+// WaitOnceDriver optionally supports success-only retained admission for WaitOnce.
+// Existing Driver implementations remain usable for Allow, AllowOnce and Wait.
+// The core returns ErrUnsupported before dispatch if this interface is absent.
+// Implementations must satisfy Driver's synchronization and failure contracts.
+type WaitOnceDriver interface {
+	Driver
+	// AdmitWaitOnce makes one immediate atomic attempt with a required ID.
+	// Denials neither debit quota nor create or refresh a retained record. A
+	// successful admission retains its receipt for Admission.Retention starting
+	// at admission, with the same fingerprint and ID namespace as AllowOnce.
+	// Replay returns the original success without extending retention. A retained
+	// AllowOnce denial must return ErrConflict / NotCharged, never be replaced.
+	// Denied attempts do not bind ID parameters; the first successful or pending
+	// admission does. Redis-style partial writes must retain a pending marker.
+	// This method must not wait for quota recovery or retry ambiguous mutations.
+	AdmitWaitOnce(context.Context, Admission) (Receipt, error)
+}
+
 // Scope identifies one application's atomic quota domain. Each field contains
 // 1..256 bytes. Different scopes have independent quotas and admission IDs.
 type Scope struct {
@@ -44,8 +62,9 @@ func (s Scope) Validate() error {
 }
 
 // Admission requests a single atomic operation. An empty ID requires Retention=0
-// and means ordinary, non-idempotent admission. A nonempty ID retains either
-// decision. Drivers must not retain or mutate the caller's Rules slice.
+// and means ordinary, non-idempotent admission. With a nonempty ID, Admit
+// retains either decision; AdmitWaitOnce retains successes only. Drivers must
+// not retain or mutate the caller's Rules slice.
 type Admission struct {
 	// Scope identifies the atomic quota and ID domain.
 	Scope

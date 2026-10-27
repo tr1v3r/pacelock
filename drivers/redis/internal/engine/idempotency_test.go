@@ -160,12 +160,22 @@ func (s *lostResponse) Eval(ctx context.Context, src string, keys []string, args
 }
 
 func TestRedisLostResponseRecovery(t *testing.T) {
+	for _, mode := range []string{"allow_once", "wait_once"} {
+		t.Run(mode, func(t *testing.T) { testRedisLostResponseRecovery(t, mode == "wait_once") })
+	}
+}
+
+func testRedisLostResponseRecovery(t *testing.T, successOnly bool) {
 	l, c := integration(t)
 	ctx := context.Background()
 	wrapped := &lostResponse{Scripter: c}
 	broken := &Limiter{client: wrapped, prefix: l.prefix}
+	admit, recover := broken.AllowOnce, l.AllowOnce
+	if successOnly {
+		admit, recover = broken.AdmitWaitOnce, l.AdmitWaitOnce
+	}
 	r := rule("q", 2, 1)
-	if _, err := broken.AllowOnce(ctx, "lost", time.Minute, r); !errors.Is(err, io.ErrUnexpectedEOF) || OutcomeOf(err) != Unknown {
+	if _, err := admit(ctx, "lost", time.Minute, r); !errors.Is(err, io.ErrUnexpectedEOF) || OutcomeOf(err) != Unknown {
 		t.Fatal(err)
 	}
 	if wrapped.calls != 1 {
@@ -174,7 +184,7 @@ func TestRedisLostResponseRecovery(t *testing.T) {
 	if d, found, err := l.Lookup(ctx, "lost"); err != nil || !found || !d.Allowed {
 		t.Fatalf("%+v %v %v", d, found, err)
 	}
-	if d, err := l.AllowOnce(ctx, "lost", time.Minute, r); err != nil || !d.Replayed || !d.Allowed {
+	if d, err := recover(ctx, "lost", time.Minute, r); err != nil || !d.Replayed || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
 	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
@@ -186,6 +196,12 @@ func TestRedisLostResponseRecovery(t *testing.T) {
 }
 
 func TestRedisPendingAfterWriteFailure(t *testing.T) {
+	for _, mode := range []string{"allow_once", "wait_once"} {
+		t.Run(mode, func(t *testing.T) { testRedisPendingAfterWriteFailure(t, mode == "wait_once") })
+	}
+}
+
+func testRedisPendingAfterWriteFailure(t *testing.T, successOnly bool) {
 	l, admin := integration(t)
 	ctx := context.Background()
 	user := fmt.Sprintf("pacelock-test-%d", time.Now().UnixNano())
@@ -201,14 +217,18 @@ func TestRedisPendingAfterWriteFailure(t *testing.T) {
 	defer restricted.Close()
 	r := []Rule{rule("first", 2, 1), rule("second", 2, 1)}
 	limited := &Limiter{client: restricted, prefix: l.prefix}
-	if _, err := limited.AllowOnce(ctx, "partial", time.Minute, r...); err == nil || OutcomeOf(err) != Unknown {
+	admit, recover := limited.AllowOnce, l.AllowOnce
+	if successOnly {
+		admit, recover = limited.AdmitWaitOnce, l.AdmitWaitOnce
+	}
+	if _, err := admit(ctx, "partial", time.Minute, r...); err == nil || OutcomeOf(err) != Unknown {
 		t.Fatalf("expected runtime failure: %v", err)
 	}
 	if admin.Exists(ctx, l.key("first")).Val() != 1 || admin.Exists(ctx, l.key("second")).Val() != 0 {
 		t.Fatalf("test did not reach partial write; record=%q first=%q second=%q", admin.Get(ctx, l.attemptKey("partial")).Val(), admin.Get(ctx, l.key("first")).Val(), admin.Get(ctx, l.key("second")).Val())
 	}
 	before := admin.Get(ctx, l.key("first")).Val()
-	if _, err := l.AllowOnce(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) {
+	if _, err := recover(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatal(err)
 	}
 	if _, found, err := l.Lookup(ctx, "partial"); !errors.Is(err, ErrOutcomeUnknown) || found {
@@ -216,7 +236,7 @@ func TestRedisPendingAfterWriteFailure(t *testing.T) {
 	}
 	contentionWave(t, 200, func(ctx context.Context, i int) {
 		if i%2 == 0 {
-			if _, err := l.AllowOnce(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
+			if _, err := recover(ctx, "partial", time.Minute, r...); !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
 				t.Errorf("concurrent partial-write recovery: %v", err)
 			}
 		} else if _, found, err := l.Lookup(ctx, "partial"); found || !errors.Is(err, ErrOutcomeUnknown) || OutcomeOf(err) != Unknown {
