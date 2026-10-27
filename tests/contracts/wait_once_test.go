@@ -17,19 +17,19 @@ import (
 
 // cancelWaitOnceOnDenialDriver cancels only after a confirmed atomic denial.
 type cancelWaitOnceOnDenialDriver struct {
-	pacelock.WaitOnceDriver
+	pacelock.Driver
 	cancel context.CancelFunc
 }
 
-func (d cancelWaitOnceOnDenialDriver) AdmitWaitOnce(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
-	r, err := d.WaitOnceDriver.AdmitWaitOnce(ctx, a)
+func (d cancelWaitOnceOnDenialDriver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+	r, err := d.Driver.Admit(ctx, a)
 	if err == nil && !r.Allowed {
 		d.cancel()
 	}
 	return r, err
 }
 
-func TestWaitOnceDriverContract(t *testing.T) {
+func TestWaitOnceContract(t *testing.T) {
 	bs := backends(t)
 	if addresses := os.Getenv("PACELOCK_REDIS_CLUSTER_ADDRS"); addresses != "" {
 		b := backend{name: "redis-cluster"}
@@ -51,10 +51,10 @@ func TestWaitOnceDriverContract(t *testing.T) {
 				l := limiter(t, b, 0, domain)
 				r := rule("q", 1, 1)
 				mustAllow(t, l, r)
-				a := pacelock.Admission{Scope: pacelock.Scope{Namespace: "contract-" + domain, Domain: domain}, ID: "id", Retention: time.Minute, Rules: []pacelock.Rule{r}}
-				d := b.driver[1].(pacelock.WaitOnceDriver)
+				a := pacelock.Admission{Scope: pacelock.Scope{Namespace: "contract-" + domain, Domain: domain}, ID: "id", Retention: time.Minute, SuccessOnly: true, Rules: []pacelock.Rule{r}}
+				d := b.driver[1]
 				for range 2 {
-					receipt, err := d.AdmitWaitOnce(context.Background(), a)
+					receipt, err := d.Admit(context.Background(), a)
 					if err != nil || receipt.Allowed || receipt.Replayed || receipt.RetryAfter <= 0 {
 						t.Fatal(receipt, err)
 					}
@@ -65,11 +65,12 @@ func TestWaitOnceDriverContract(t *testing.T) {
 				// Without a pending/success record, parameters have not become bound.
 				a.Rules = []pacelock.Rule{rule("fresh", 2, 1)}
 				a.Retention = 2 * time.Minute
-				if receipt, err := d.AdmitWaitOnce(context.Background(), a); err != nil || !receipt.Allowed || receipt.Replayed {
+				if receipt, err := d.Admit(context.Background(), a); err != nil || !receipt.Allowed || receipt.Replayed {
 					t.Fatal(receipt, err)
 				}
 				a.ID = ""
-				if _, err := d.AdmitWaitOnce(context.Background(), a); !errors.Is(err, pacelock.ErrInvalid) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				a.Retention = 0
+				if _, err := d.Admit(context.Background(), a); !errors.Is(err, pacelock.ErrInvalid) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 			})
@@ -134,7 +135,7 @@ func TestWaitOnceDriverContract(t *testing.T) {
 				mustAllow(t, l, r)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				d := cancelWaitOnceOnDenialDriver{b.driver[1].(pacelock.WaitOnceDriver), cancel}
+				d := cancelWaitOnceOnDenialDriver{b.driver[1], cancel}
 				waiting, err := pacelock.New(d, "contract-"+domain, domain)
 				if err != nil {
 					t.Fatal(err)

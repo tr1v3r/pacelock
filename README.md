@@ -203,10 +203,10 @@ receipt; the application must coordinate business execution. Cancellation betwee
 attempts is `NotCharged` for this invocation and does not rule out a concurrent
 caller's debit.
 
-Both built-in drivers implement the optional `WaitOnceDriver.AdmitWaitOnce`
-atomic operation. A custom driver without that interface returns `ErrUnsupported`
-/ `NotCharged` before dispatch; existing driver implementations remain usable for
-`Allow`, `AllowOnce`, `Wait` and `Lookup`.
+All admission uses `Driver.Admit`. `WaitOnce` sets `Admission.SuccessOnly=true`;
+`AllowOnce` leaves it false to retain both outcomes. Custom drivers must honor
+this field as part of the Driver contract. SuccessOnly requires a nonempty ID
+and valid retention; it does not change successful receipt fingerprints.
 
 ## Idempotent admission and recovery
 
@@ -248,7 +248,7 @@ For a complete application-owned flow, see the [durable admission example](drive
 ## Errors and observation
 
 Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`, `ErrConflict`,
-`ErrOutcomeUnknown`, `ErrUnsupported`, `ErrBackend`, and wrapped context/transport errors. Admission
+`ErrOutcomeUnknown`, `ErrBackend`, and wrapped context/transport errors. Admission
 errors expose `*pacelock.Error` with `Op` and `Outcome`:
 
 | Result | Meaning | Application action |

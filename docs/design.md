@@ -49,7 +49,7 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 规则在调用开始时复制，支持原有多维与 Cost。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。`Wait` 不生成可恢复的 ID。`WaitOnce` 使用同一 ID 等待，只保存成功结果；普通拒绝不扣减、不写记录，参数在成功或 pending 时才绑定。成功保留期从后端准入决策起算，不包含此前等待；成功可供 `Lookup` 查询并由两个 Once 接口重放。已有 `AllowOnce` 拒绝保持不可变，传给 `WaitOnce` 会返回 `ErrConflict` / `NotCharged`。记录过期或丢失后不得复用旧 ID。
 
-可选 `WaitOnceDriver.AdmitWaitOnce` 表达一次立即的成功保留原子准入，不扩展基础 Driver；不支持时返回 `ErrUnsupported` / `NotCharged`。Redis 通过可选尾参数跳过拒绝写入，成功沿用 v1 pending/complete 记录与原始指纹，保证部分写入后不重放。PG 的拒绝回滚，成功与额度一起提交。未知结果不自动重试；整个 WaitOnce 调用只发出一个 `wait_once` 事件。同 ID 并发调用只去重准入，不能去重业务执行。
+`WaitOnce` 通过 `Admission.SuccessOnly=true` 统一调用 `Driver.Admit`，不增加 Driver 接口或方法。字段为 false 时维持 AllowOnce 的双结果保留语义；为 true 时要求非空 ID 和有效保留期。自定义 Driver 必须实现该字段语义，成功指纹不包含这个选项以便两个 Once 接口互相重放。Redis 通过可选尾参数跳过拒绝写入，成功沿用 v1 pending/complete 记录与原始指纹，保证部分写入后不重放。PG 的拒绝回滚，成功与额度一起提交。未知结果不自动重试；整个 WaitOnce 调用只发出一个 `wait_once` 事件。同 ID 并发调用只去重准入，不能去重业务执行。
 
 ## GCRA 与加权消耗
 

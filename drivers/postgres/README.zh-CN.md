@@ -39,7 +39,7 @@ PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行
 上游业务执行仍需应用协调。
 
 `Wait` / `WaitOnce` 在核心层的两次立即事务之间等待，休眠不持有连接或锁。
-`AdmitWaitOnce` 普通拒绝回滚、不保存记录；成功额度与结果沿用现有指纹并一起提交，
+`Driver.Admit` 在 `Admission.SuccessOnly=true` 时普通拒绝回滚、不保存记录；成功额度与结果沿用现有指纹并一起提交，
 成功保留期从该次后端决策起算。已有 AllowOnce 拒绝返回冲突，不被替换。
 提交响应丢失仍为 Unknown，按 ID 恢复，不自动重试。
 

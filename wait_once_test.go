@@ -10,21 +10,6 @@ import (
 	"time"
 )
 
-// waitOnceTestDriver distinguishes optional admission from the ordinary path.
-type waitOnceTestDriver struct {
-	waitDriver
-	ordinaryCalls int
-}
-
-func (d *waitOnceTestDriver) Admit(context.Context, Admission) (Receipt, error) {
-	d.ordinaryCalls++
-	return Receipt{}, errors.New("unexpected ordinary admission")
-}
-
-func (d *waitOnceTestDriver) AdmitWaitOnce(ctx context.Context, a Admission) (Receipt, error) {
-	return d.waitDriver.Admit(ctx, a)
-}
-
 func TestWaitOnceRetriesAndObservesReceipt(t *testing.T) {
 	for _, replayed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "new", true: "replayed"}[replayed], func(t *testing.T) {
@@ -32,9 +17,9 @@ func TestWaitOnceRetriesAndObservesReceipt(t *testing.T) {
 			original := append([]Rule(nil), rules...)
 			var last time.Time
 			const delay = 5 * time.Millisecond
-			d := &waitOnceTestDriver{}
+			d := &waitDriver{}
 			d.admit = func(_ context.Context, a Admission) (Receipt, error) {
-				if a.ID != "persisted-id" || a.Retention != time.Minute || a.Scope != (Scope{"a", "b"}) || !reflect.DeepEqual(a.Rules, original) {
+				if !a.SuccessOnly || a.ID != "persisted-id" || a.Retention != time.Minute || a.Scope != (Scope{"a", "b"}) || !reflect.DeepEqual(a.Rules, original) {
 					t.Fatalf("changed request: %+v", a)
 				}
 				if !last.IsZero() && time.Since(last) < delay {
@@ -50,8 +35,8 @@ func TestWaitOnceRetriesAndObservesReceipt(t *testing.T) {
 			var events []Event
 			l, _ := NewWithOptions(d, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
 			r, err := l.WaitOnce(context.Background(), "persisted-id", time.Minute, rules...)
-			if err != nil || !r.Allowed || r.Replayed != replayed || d.calls != 3 || d.ordinaryCalls != 0 {
-				t.Fatal(r, err, d.calls, d.ordinaryCalls)
+			if err != nil || !r.Allowed || r.Replayed != replayed || d.calls != 3 {
+				t.Fatal(r, err, d.calls)
 			}
 			if len(events) != 1 || events[0].Operation != "wait_once" || events[0].Result != "allowed" || events[0].Replayed != replayed || events[0].RuleCount != 2 || events[0].Duration < 2*delay {
 				t.Fatal(events)
@@ -60,8 +45,8 @@ func TestWaitOnceRetriesAndObservesReceipt(t *testing.T) {
 	}
 }
 
-func TestWaitOnceValidationAndUnsupportedDriver(t *testing.T) {
-	d := &waitOnceTestDriver{}
+func TestWaitOnceValidation(t *testing.T) {
+	d := &waitDriver{}
 	l, _ := New(d, "a", "b")
 	var nilLimiter *Limiter
 	for name, call := range map[string]func() error{
@@ -109,13 +94,8 @@ func TestWaitOnceValidationAndUnsupportedDriver(t *testing.T) {
 	if _, err := l.WaitOnce(ctx, "id", time.Minute, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
-	if d.calls != 0 || d.ordinaryCalls != 0 {
+	if d.calls != 0 {
 		t.Fatal("invalid request reached driver")
-	}
-	ordinary := &testDriver{}
-	l, _ = New(ordinary, "a", "b")
-	if _, err := l.WaitOnce(context.Background(), "id", time.Minute, sampleRule()); !errors.Is(err, ErrUnsupported) || OutcomeOf(err) != NotCharged || ordinary.calls != 0 {
-		t.Fatal(err, ordinary.calls)
 	}
 }
 
@@ -136,7 +116,7 @@ func TestWaitOnceStopsOnErrorsAndRetainedDenial(t *testing.T) {
 		{result: Receipt{Decision: Decision{RetryAfter: time.Second, Limited: []string{"q"}}, Replayed: true}, want: ErrConflict, outcome: NotCharged},
 	} {
 		t.Run(tc.want.Error(), func(t *testing.T) {
-			d := &waitOnceTestDriver{}
+			d := &waitDriver{}
 			d.admit = func(context.Context, Admission) (Receipt, error) {
 				if d.calls == 1 {
 					return Receipt{Decision: Decision{RetryAfter: time.Microsecond, Limited: []string{"q"}}}, nil
@@ -146,7 +126,7 @@ func TestWaitOnceStopsOnErrorsAndRetainedDenial(t *testing.T) {
 			l, _ := New(d, "a", "b")
 			_, err := l.WaitOnce(context.Background(), "id", time.Minute, sampleRule())
 			var typed *Error
-			if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome || !errors.As(err, &typed) || typed.Op != "wait_once" || d.calls != 2 || d.ordinaryCalls != 0 {
+			if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome || !errors.As(err, &typed) || typed.Op != "wait_once" || d.calls != 2 {
 				t.Fatal(err, d.calls)
 			}
 		})
@@ -156,7 +136,7 @@ func TestWaitOnceStopsOnErrorsAndRetainedDenial(t *testing.T) {
 func TestWaitOnceCancellationAccounting(t *testing.T) {
 	for _, allowed := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(context.Background())
-		d := &waitOnceTestDriver{}
+		d := &waitDriver{}
 		d.admit = func(context.Context, Admission) (Receipt, error) {
 			cancel()
 			if allowed {
@@ -179,7 +159,7 @@ func TestWaitOnceCancellationAccounting(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	d := &waitOnceTestDriver{}
+	d := &waitDriver{}
 	d.admit = func(context.Context, Admission) (Receipt, error) {
 		return Receipt{Decision: Decision{RetryAfter: time.Hour, Limited: []string{"q"}}}, nil
 	}

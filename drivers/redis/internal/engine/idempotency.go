@@ -26,18 +26,14 @@ type Receipt = pacelock.Receipt
 func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
 	finish := l.observe(ctx, "allow_once", len(rules))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
-	return l.admitOnce(ctx, id, retention, rules, false)
+	return l.AdmitOnce(ctx, id, retention, false, rules...)
 }
 
-// AdmitWaitOnce makes one immediate attempt, retaining only successful admission.
-// Denials write nothing. Existing AllowOnce denials conflict; pending records
-// preserve Unknown. The outer core owns waiting and observes the complete call.
-func (l *Limiter) AdmitWaitOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error) {
-	return l.admitOnce(ctx, id, retention, rules, true)
-}
-
-// admitOnce shares the v1 record and fingerprint protocol across retained modes.
-func (l *Limiter) admitOnce(ctx context.Context, id string, retention time.Duration, rules []Rule, successOnly bool) (Receipt, error) {
+// AdmitOnce makes one immediate retained admission. SuccessOnly denials write
+// nothing, and existing retained denials conflict. Both modes share v1 records
+// and fingerprints; partial writes preserve pending records and Unknown outcomes.
+// The core owns waiting and observes the complete public call.
+func (l *Limiter) AdmitOnce(ctx context.Context, id string, retention time.Duration, successOnly bool, rules ...Rule) (Receipt, error) {
 	op := "allow_once"
 	if successOnly {
 		op = "wait_once"

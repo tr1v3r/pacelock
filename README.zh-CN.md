@@ -149,7 +149,7 @@ if err != nil {
 
 已有的 `AllowOnce` 保留拒绝传给 `WaitOnce` 会返回 `ErrConflict` / `NotCharged`，不会覆盖原决策。任何后端错误（包括 `Unknown`）都会停止等待。同一 ID 的并发等待者可能都收到同一份成功结果，业务执行仍需应用协调。两次尝试之间取消的 `NotCharged` 只说明本次调用未扣减，不能排除另一个并发调用者已扣减。
 
-两个内置 Driver 均实现可选的 `WaitOnceDriver.AdmitWaitOnce` 原子操作。自定义 Driver 未实现时，在派发前返回 `ErrUnsupported` / `NotCharged`；原有 Driver 仍可用于 `Allow`、`AllowOnce`、`Wait` 和 `Lookup`。
+所有准入统一调用 `Driver.Admit`。`WaitOnce` 设置 `Admission.SuccessOnly=true`；`AllowOnce` 保持 false，保留两种结果。自定义 Driver 必须按更新后的契约处理该字段。SuccessOnly 要求非空 ID 和有效保留期，不改变成功记录的指纹。
 
 ## 幂等准入与恢复
 
@@ -180,7 +180,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 ## 错误与观测
 
-使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrOutcomeUnknown`、`ErrUnsupported`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
+使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrOutcomeUnknown`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
 
 | 结果 | 含义 | 业务处理 |
 |---|---|---|

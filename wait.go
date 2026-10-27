@@ -29,9 +29,9 @@ func (l *Limiter) Wait(ctx context.Context, rules ...Rule) (err error) {
 }
 
 // WaitOnce blocks until the charges are admitted once per retained ID or an error
-// occurs. It requires a WaitOnceDriver; otherwise it returns ErrUnsupported /
-// NotCharged before dispatch. ID, retention and ordered UTF-8 rules have the same
-// bounds as AllowOnce. Persist the ID before dispatch and use Lookup to recover.
+// occurs. It uses Driver.Admit with Admission.SuccessOnly=true. ID, retention
+// and ordered UTF-8 rules have the same bounds as AllowOnce. Persist the ID
+// before dispatch and use Lookup to recover.
 // On any error, ignore Receipt and inspect OutcomeOf; no error is retried.
 //
 // Ordinary denials create no record and can be retried with the same ID. The ID

@@ -19,29 +19,15 @@ import (
 // refresh retention. A missing lookup never establishes zero debit.
 // All writers to a scope must share a backend and its synchronization protocol.
 // Drivers do not migrate state or deduplicate across different backends.
+// Admit must honor Admission.SuccessOnly: denials create no retained record,
+// successes retain the ordinary fingerprint, and existing retained denials
+// return ErrConflict / NotCharged. Redis-style partial writes must retain a
+// pending marker. Denied success-only attempts do not bind ID parameters.
 type Driver interface {
 	// Admit completes one atomic multi-quota decision and optional retained receipt.
 	Admit(context.Context, Admission) (Receipt, error)
 	// Lookup reads a retained result without extending its lifetime.
 	Lookup(context.Context, LookupRequest) (Decision, bool, error)
-}
-
-// WaitOnceDriver optionally supports success-only retained admission for WaitOnce.
-// Existing Driver implementations remain usable for Allow, AllowOnce and Wait.
-// The core returns ErrUnsupported before dispatch if this interface is absent.
-// Implementations must satisfy Driver's synchronization and failure contracts.
-type WaitOnceDriver interface {
-	Driver
-	// AdmitWaitOnce makes one immediate atomic attempt with a required ID.
-	// Denials neither debit quota nor create or refresh a retained record. A
-	// successful admission retains its receipt for Admission.Retention starting
-	// at admission, with the same fingerprint and ID namespace as AllowOnce.
-	// Replay returns the original success without extending retention. A retained
-	// AllowOnce denial must return ErrConflict / NotCharged, never be replaced.
-	// Denied attempts do not bind ID parameters; the first successful or pending
-	// admission does. Redis-style partial writes must retain a pending marker.
-	// This method must not wait for quota recovery or retry ambiguous mutations.
-	AdmitWaitOnce(context.Context, Admission) (Receipt, error)
 }
 
 // Scope identifies one application's atomic quota domain. Each field contains
@@ -62,9 +48,9 @@ func (s Scope) Validate() error {
 }
 
 // Admission requests a single atomic operation. An empty ID requires Retention=0
-// and means ordinary, non-idempotent admission. With a nonempty ID, Admit
-// retains either decision; AdmitWaitOnce retains successes only. Drivers must
-// not retain or mutate the caller's Rules slice.
+// and means ordinary, non-idempotent admission. With a nonempty ID, SuccessOnly
+// selects which decisions to retain. Drivers must not retain or mutate the
+// caller's Rules slice.
 type Admission struct {
 	// Scope identifies the atomic quota and ID domain.
 	Scope
@@ -74,6 +60,13 @@ type Admission struct {
 	ID string
 	// Retention is zero for Allow or whole milliseconds in [1ms,24h].
 	Retention time.Duration
+	// SuccessOnly requires an ID and retains only successful admission. Denials
+	// neither debit nor create/refresh a receipt, so the ID can wait for recovery.
+	// Successful or pending admission binds the ID's parameters; success retention
+	// starts at that backend decision. Replays never extend retention. An existing
+	// retained denial returns ErrConflict / NotCharged and must not be replaced.
+	// False retains both outcomes for an ID, preserving AllowOnce behavior.
+	SuccessOnly bool
 }
 
 // Validate checks the complete driver request without backend access.
@@ -85,8 +78,8 @@ func (a Admission) Validate() error {
 		return err
 	}
 	if a.ID == "" {
-		if a.Retention != 0 {
-			return fmt.Errorf("%w: retention requires ID", ErrInvalid)
+		if a.Retention != 0 || a.SuccessOnly {
+			return fmt.Errorf("%w: retention and success-only admission require ID", ErrInvalid)
 		}
 		return nil
 	}
@@ -107,6 +100,7 @@ func (a Admission) Validate() error {
 // Fingerprint binds ordered names, effective intervals, bursts, costs and
 // retention to the Redis v1-compatible argument encoding. Call Validate first.
 // Scope and ID identify the record and are not part of this fingerprint.
+// SuccessOnly is excluded so AllowOnce and WaitOnce can replay the same success.
 func (a Admission) Fingerprint() string {
 	args := []any{a.Retention.Milliseconds(), ""}
 	for _, r := range a.Rules {

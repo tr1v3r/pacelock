@@ -16,7 +16,7 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 一个 domain 对应一个 Cluster 槽。所有实例需使用相同作用域、额度名称和有效策略，
 每次请求需完整包含所有适用额度。
 
-`Wait` / `WaitOnce` 由核心封装 Driver 的立即准入操作。`AdmitWaitOnce` 仅保留成功：
+`Wait` / `WaitOnce` 由核心封装 Driver 的立即准入操作。`Driver.Admit` 在 `Admission.SuccessOnly=true` 时仅保留成功：
 拒绝不写入，成功沿用 v1 pending/complete 记录，已有 AllowOnce 保留拒绝返回冲突。
 成功重放与 Lookup 不扣减、不延长保留期。键哈希、记录编码及原 Allow/AllowOnce 参数
 保持兼容；Lua 新增可选尾参数以支持仅保留成功。具体客户端通过逐命令 NoRetry 禁止不确定重放，

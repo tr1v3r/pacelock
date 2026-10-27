@@ -42,7 +42,7 @@ so missing does not prove zero debit. Replays and queries never extend retention
 Upstream execution still needs application coordination.
 
 `Wait` and `WaitOnce` wait in the core between immediate transactions, holding
-no connection or lock while sleeping. `AdmitWaitOnce` rolls back ordinary denials
+no connection or lock while sleeping. `Driver.Admit` with `Admission.SuccessOnly=true` rolls back ordinary denials
 without storing a receipt. Successful quota charges and their receipt commit
 together with the existing fingerprint; success retention starts at that backend
 decision. Existing AllowOnce denials conflict instead of being replaced. A lost

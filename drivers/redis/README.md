@@ -17,7 +17,7 @@ One domain is one Cluster slot. All instances need matching scope, names and
 effective policies. Each call must include every applicable quota.
 
 `Wait` and `WaitOnce` are core wrappers over immediate driver operations.
-`AdmitWaitOnce` implements success-only retention: denials write nothing, successes
+`Driver.Admit` with `Admission.SuccessOnly=true` implements success-only retention: denials write nothing, successes
 use the existing v1 pending/complete records, and retained AllowOnce denials
 conflict. Success replay/Lookup do not charge or extend retention. Key hashes,
 record encoding, and ordinary Allow/AllowOnce arguments remain compatible; the

@@ -22,8 +22,6 @@ const (
 var (
 	// ErrInvalid reports invalid input before dispatch.
 	ErrInvalid = errors.New("pacelock: invalid argument")
-	// ErrUnsupported reports a driver without support for an optional operation.
-	ErrUnsupported = errors.New("pacelock: unsupported driver operation")
 	// ErrPolicyMismatch reports a policy conflict with active quota state.
 	ErrPolicyMismatch = errors.New("pacelock: policy differs from active backend state")
 	// ErrState reports malformed state or replies; inspect OutcomeOf.
@@ -185,21 +183,11 @@ func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration,
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
+	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention, SuccessOnly: successOnly}
 	if err := request.Validate(); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	var result Receipt
-	var err error
-	if successOnly {
-		driver, ok := l.driver.(WaitOnceDriver)
-		if !ok {
-			return Receipt{}, failure(op, NotCharged, ErrUnsupported)
-		}
-		result, err = driver.AdmitWaitOnce(ctx, request)
-	} else {
-		result, err = l.driver.Admit(ctx, request)
-	}
+	result, err := l.driver.Admit(ctx, request)
 	if err != nil {
 		return Receipt{}, driverFailure(op, err)
 	}

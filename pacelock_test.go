@@ -141,3 +141,44 @@ func TestFingerprintAndRounding(t *testing.T) {
 		t.Fatal("ordering not bound")
 	}
 }
+
+// TestAdmissionSuccessOnlyContract covers the shared request field and ID rules.
+func TestAdmissionSuccessOnlyContract(t *testing.T) {
+	ctx := context.Background()
+	d := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+	l, _ := New(d, "a", "b")
+	for _, tc := range []struct {
+		name        string
+		call        func() error
+		successOnly bool
+	}{
+		{"allow", func() error { _, e := l.Allow(ctx, sampleRule()); return e }, false},
+		{"allow_once", func() error { _, e := l.AllowOnce(ctx, "id", time.Minute, sampleRule()); return e }, false},
+		{"wait", func() error { return l.Wait(ctx, sampleRule()) }, false},
+		{"wait_once", func() error { _, e := l.WaitOnce(ctx, "id", time.Minute, sampleRule()); return e }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := d.calls
+			if err := tc.call(); err != nil || d.calls != before+1 || d.request.SuccessOnly != tc.successOnly {
+				t.Fatal(err, d.calls, d.request)
+			}
+		})
+	}
+	a := Admission{Scope: Scope{"a", "b"}, Rules: []Rule{sampleRule()}, SuccessOnly: true}
+	if err := a.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatal("success-only admission without an ID must be rejected", err)
+	}
+	a.ID = "id"
+	if err := a.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatal("success-only admission requires valid retention", err)
+	}
+	a.Retention = time.Minute
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	fp := a.Fingerprint()
+	a.SuccessOnly = false
+	if fp != a.Fingerprint() {
+		t.Fatal("success-only flag must not change successful receipt identity")
+	}
+}

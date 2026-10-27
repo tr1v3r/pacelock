@@ -23,7 +23,7 @@ import (
 // bounded by the caller's context and server timeouts. No automatic retries occur.
 type Driver struct{ db *sql.DB }
 
-var _ pacelock.WaitOnceDriver = (*Driver)(nil)
+var _ pacelock.Driver = (*Driver)(nil)
 
 //go:embed schema.sql
 var schema string
@@ -105,30 +105,16 @@ func fail(op string, outcome pacelock.Outcome, err error) error {
 }
 
 // Admit validates, locks the domain, samples backend time once, and calculates the
-// shared GCRA transition. Every quota and optional receipt commits in one transaction.
+// shared GCRA transition. SuccessOnly rolls back denials without storing a
+// receipt; successful quota charges and their receipt commit in one transaction.
 // Before Commit is sent, failures are NotCharged; any Commit error is conservatively
 // Unknown. A prior ambiguous invocation remains ambiguous even after a later error.
 func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
-	return d.admit(ctx, a, false)
-}
-
-// AdmitWaitOnce makes an immediate success-only retained admission. Denials roll
-// back without quota or receipt writes; existing AllowOnce denials conflict.
-// A success and its receipt commit atomically with the ordinary v1 fingerprint.
-func (d *Driver) AdmitWaitOnce(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
-	if a.ID == "" {
-		return pacelock.Receipt{}, fail("wait_once", pacelock.NotCharged, pacelock.ErrInvalid)
-	}
-	return d.admit(ctx, a, true)
-}
-
-// admit keeps both retained modes within the same domain transaction boundary.
-func (d *Driver) admit(ctx context.Context, a pacelock.Admission, successOnly bool) (pacelock.Receipt, error) {
 	op := "allow"
 	if a.ID != "" {
 		op = "allow_once"
 	}
-	if successOnly {
+	if a.SuccessOnly {
 		op = "wait_once"
 	}
 	uncharged := func(err error) (pacelock.Receipt, error) {
@@ -170,7 +156,7 @@ func (d *Driver) admit(ctx context.Context, a pacelock.Admission, successOnly bo
 			if decodeErr != nil {
 				return pacelock.Receipt{}, fail(op, pacelock.Unknown, decodeErr)
 			}
-			if successOnly && !decision.Allowed {
+			if a.SuccessOnly && !decision.Allowed {
 				return uncharged(fmt.Errorf("%w: ID retains an AllowOnce denial", pacelock.ErrConflict))
 			}
 			// A retained replay performs no quota mutation; ending the transaction
@@ -190,7 +176,7 @@ func (d *Driver) admit(ctx context.Context, a pacelock.Admission, successOnly bo
 	if err != nil {
 		return uncharged(err)
 	}
-	if successOnly && !decision.Allowed {
+	if a.SuccessOnly && !decision.Allowed {
 		return pacelock.Receipt{Decision: decision}, nil
 	}
 	if decision.Allowed {

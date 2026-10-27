@@ -27,7 +27,7 @@ func TestWaitRetriesOnlyDenials(t *testing.T) {
 	const delay = 5 * time.Millisecond
 	d := &waitDriver{}
 	d.admit = func(_ context.Context, a Admission) (Receipt, error) {
-		if !reflect.DeepEqual(a.Rules, original) || a.ID != "" || a.Retention != 0 || a.Scope != (Scope{"a", "b"}) {
+		if a.SuccessOnly || !reflect.DeepEqual(a.Rules, original) || a.ID != "" || a.Retention != 0 || a.Scope != (Scope{"a", "b"}) {
 			t.Fatalf("changed admission: %+v", a)
 		}
 		if !lastAttempt.IsZero() && time.Since(lastAttempt) < delay {
