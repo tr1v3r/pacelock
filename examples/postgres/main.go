@@ -11,7 +11,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/tr1v3r/pacelock"
-	"github.com/tr1v3r/pacelock/drivers/postgres"
+	"github.com/tr1v3r/pacelock/driver/postgres"
 )
 
 func main() {

@@ -92,7 +92,7 @@ func (a Admission) Fingerprint() string {
 	args := []any{a.Retention.Milliseconds(), ""}
 	for _, r := range a.Rules {
 		step, _ := r.Interval()
-		args = append(args, step.Microseconds(), r.Burst, r.Cost, r.Name)
+		args = append(args, step.Microseconds(), r.Policy.Burst, r.Cost, r.Name)
 	}
 	data, _ := json.Marshal(args)
 	return fmt.Sprintf("%x", sha256.Sum256(data))

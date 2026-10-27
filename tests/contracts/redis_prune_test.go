@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/tr1v3r/pacelock"
-	redisdriver "github.com/tr1v3r/pacelock/drivers/redis"
+	redisdriver "github.com/tr1v3r/pacelock/driver/redis"
 )
 
 func TestRedisPublicPruneCycle(t *testing.T) {
@@ -30,7 +30,7 @@ func TestRedisPublicPruneCycle(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if r, err := limiter.AllowOnce(ctx, "id", 20*time.Millisecond, pacelock.Rule{Name: "q", Rate: 1, Period: 20 * time.Millisecond, Burst: 1, Cost: 1}); err != nil || !r.Allowed {
+	if r, err := limiter.AllowOnce(ctx, "id", 20*time.Millisecond, pacelock.Rule{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: 20 * time.Millisecond, Burst: 1}, Cost: 1}); err != nil || !r.Allowed {
 		t.Fatal(r, err)
 	}
 	time.Sleep(30 * time.Millisecond)

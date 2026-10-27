@@ -11,7 +11,7 @@ import (
 )
 
 func TestGCRATimeline(t *testing.T) {
-	r := Rule{Name: "q", Rate: 2, Period: time.Second, Burst: 5}
+	r := Rule{Name: "q", Policy: Policy{Rate: 2, Period: time.Second, Burst: 5}}
 	var state QuotaState
 	for _, tc := range []struct {
 		at      int64
@@ -43,7 +43,7 @@ func TestGCRATimeline(t *testing.T) {
 
 func TestGCRAEnvelopeAndJointDenial(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
-	r := Rule{Name: "q", Rate: 4, Period: time.Second, Burst: 20, Cost: 1}
+	r := Rule{Name: "q", Policy: Policy{Rate: 4, Period: time.Second, Burst: 20}, Cost: 1}
 	var state QuotaState
 	var now, accepted int64
 	for range 10000 {
@@ -61,7 +61,7 @@ func TestGCRAEnvelopeAndJointDenial(t *testing.T) {
 			t.Fatalf("envelope exceeded: %d at %d", accepted, now)
 		}
 	}
-	rules := []Rule{{Name: "free", Rate: 1, Period: time.Second, Burst: 1, Cost: 1}, {Name: "busy", Rate: 1, Period: time.Second, Burst: 1, Cost: 1}}
+	rules := []Rule{{Name: "free", Policy: Policy{Rate: 1, Period: time.Second, Burst: 1}, Cost: 1}, {Name: "busy", Policy: Policy{Rate: 1, Period: time.Second, Burst: 1}, Cost: 1}}
 	states := []QuotaState{{}, {TAT: 1000000, Interval: 1000000, Burst: 1, ExpiresAt: 1000000}}
 	before := append([]QuotaState(nil), states...)
 	d, next, err := Evaluate(0, rules, states)
@@ -73,7 +73,7 @@ func TestGCRAEnvelopeAndJointDenial(t *testing.T) {
 func TestGCRAPolicyAndExpiry(t *testing.T) {
 	r := sampleRule()
 	_, next, _ := Evaluate(1000000, []Rule{r}, []QuotaState{{}})
-	r.Burst++
+	r.Policy.Burst++
 	if _, _, err := Evaluate(1000001, []Rule{r}, next); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatal(err)
 	}
@@ -97,10 +97,10 @@ func TestGCRAAgainstTokenBucketModel(t *testing.T) {
 		credit := make([]float64, dimensions)
 		steps := make([]float64, dimensions)
 		for i := range rules {
-			rules[i] = Rule{Name: fmt.Sprint(i), Rate: int64(1 + rng.Intn(9)), Period: time.Duration(1+rng.Intn(50)) * time.Millisecond, Burst: int64(1 + rng.Intn(30)), Cost: 1}
+			rules[i] = Rule{Name: fmt.Sprint(i), Policy: Policy{Rate: int64(1 + rng.Intn(9)), Period: time.Duration(1+rng.Intn(50)) * time.Millisecond, Burst: int64(1 + rng.Intn(30))}, Cost: 1}
 			step, _ := rules[i].Interval()
 			steps[i] = float64(step.Microseconds())
-			credit[i] = float64(rules[i].Burst)
+			credit[i] = float64(rules[i].Policy.Burst)
 		}
 		now := int64(1_000_000_000_000)
 		for range 2000 {
@@ -110,8 +110,8 @@ func TestGCRAAgainstTokenBucketModel(t *testing.T) {
 			var limited []string
 			var wait float64
 			for i := range rules {
-				rules[i].Cost = int64(1 + rng.Intn(int(rules[i].Burst)))
-				credit[i] = math.Min(float64(rules[i].Burst), credit[i]+float64(delta)/steps[i])
+				rules[i].Cost = int64(1 + rng.Intn(int(rules[i].Policy.Burst)))
+				credit[i] = math.Min(float64(rules[i].Policy.Burst), credit[i]+float64(delta)/steps[i])
 				missing := float64(rules[i].Cost) - credit[i]
 				if missing > 1e-9 {
 					allowed = false

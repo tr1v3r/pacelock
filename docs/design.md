@@ -8,7 +8,7 @@
 Driver 以 `Admit` / `Lookup` 表达完整原子操作，Redis 和 PostgreSQL 是独立模块。
 Redis 保留原键名，v2 值采用逻辑过期和单次 MSET 提交；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
 当前不支持调用者业务事务接入，不提供跨后端债务迁移或故障自动切换。
-统一契约见 [drivers.md](drivers.md)，PG 部署边界见[指南](../drivers/postgres/README.zh-CN.md)。
+统一契约见 [driver.md](driver.md)，PG 部署边界见[指南](../driver/postgres/README.zh-CN.md)。
 下文 Redis 数据布局、Lua 提交和逻辑过期说明专属于 Redis Driver。
 
 ## 目标与边界

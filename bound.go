@@ -6,17 +6,6 @@ import (
 	"time"
 )
 
-// Policy defines replenishment and total burst capacity independently of a charge.
-// The same named quota must use the same effective policy throughout a domain.
-type Policy struct {
-	// Rate is the positive number of units replenished per Period.
-	Rate int64
-	// Period is positive and at most MaxHorizon; unit intervals round up to microseconds.
-	Period time.Duration
-	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
-	Burst int64
-}
-
 // Quota associates an independent quota name with its fixed policy.
 type Quota struct {
 	// Name identifies shared state within the domain and must contain 1..256 bytes.
@@ -41,7 +30,7 @@ func (q Quota) Charge(cost int64) Charge {
 }
 
 func (q Quota) rule(cost int64) Rule {
-	return Rule{Name: q.Name, Rate: q.Policy.Rate, Period: q.Policy.Period, Burst: q.Policy.Burst, Cost: cost}
+	return Rule{Name: q.Name, Policy: q.Policy, Cost: cost}
 }
 
 // BoundLimiter binds an immutable, ordered quota set to a Limiter. Every admission
@@ -167,7 +156,7 @@ func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Ru
 		}
 		// Bind validated the immutable template, including its placeholder cost.
 		boundInterval, _ := rules[i].Interval()
-		if interval != boundInterval || rule.Burst != rules[i].Burst {
+		if interval != boundInterval || rule.Policy.Burst != rules[i].Policy.Burst {
 			return nil, fmt.Errorf("%w: quota %q policy differs from binding", ErrInvalid, rule.Name)
 		}
 		seen[i] = true

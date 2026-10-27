@@ -9,8 +9,8 @@ import (
 
 func ExampleValidate() {
 	err := pacelock.Validate(
-		pacelock.Rule{Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-		pacelock.Rule{Name: "input-tokens", Rate: 60000, Period: time.Minute, Burst: 10000, Cost: 1500},
+		pacelock.Rule{Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
+		pacelock.Rule{Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 10000}, Cost: 1500},
 	)
 	fmt.Println(err)
 	// Output: <nil>

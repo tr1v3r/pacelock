@@ -8,7 +8,7 @@ if [ -n "$unformatted" ]; then
     printf '%s\n' "$unformatted"
     exit 1
 fi
-for module in . drivers/redis drivers/postgres tests/contracts examples/postgres; do
+for module in . driver/redis driver/postgres tests/contracts examples/postgres; do
     (
         cd "$root/$module"
         go mod verify

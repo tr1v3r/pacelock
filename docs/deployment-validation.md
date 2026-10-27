@@ -13,8 +13,8 @@ From the repository root:
 
 ```sh
 docker compose -p pacelock-validation up -d --wait
-(cd drivers/redis && go build -o /tmp/pacelock-load ./examples/load)
-(cd drivers/redis && go build -o /tmp/pacelock-probe ./examples/recovery-probe)
+(cd driver/redis && go build -o /tmp/pacelock-load ./examples/load)
+(cd driver/redis && go build -o /tmp/pacelock-probe ./examples/recovery-probe)
 python3 scripts/validation/load-matrix.py --binary /tmp/pacelock-load \
   --output /tmp/pacelock-load.jsonl --duration 10s --sustained 30m
 # Run sequentially, not concurrently with other measurements.

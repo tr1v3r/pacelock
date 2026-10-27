@@ -37,13 +37,13 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 本 README 描述尚未发布的 `dev` 开发线，请显式安装该分支：
 
 ```sh
-go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/drivers/redis@dev
+go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/driver/redis@dev
 ```
 
 默认 `@latest` 当前选中旧版 API，并不包含本页展示的全部 API。请在应用的 `go.mod` 中保留解析得到的伪版本以便复现构建；`@dev` 会随开发推进，不代表稳定发布。
 
 构造函数现在接受 `pacelock.Driver`，属于 pre-v1 破坏性变更。
-下例需导入 `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"`。
+下例需导入 `redisdriver "github.com/tr1v3r/pacelock/driver/redis"`。
 
 ```go
 client := redis.NewClient(&redis.Options{
@@ -106,7 +106,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ## 固定策略与单次消耗
 
-`Policy` 包含 `Rate`、`Period`、`Burst`；`Quota` 保留公开的 `Name` 和 `Policy` 字段。通过 `q.Charge(cost)` 构造每个 `Charge`：这个值接收者方法将完整额度和已知消耗复制到私有字段，不校验、不做 I/O，交由绑定准入时校验。不要通过字段字面量构造 Charge。
+`Policy` 包含 `Rate`、`Period`、`Burst`，同时也被底层 `Rule` 内嵌，策略字段只声明一次；`Quota` 保留公开的 `Name` 和 `Policy` 字段。通过 `q.Charge(cost)` 构造每个 `Charge`：这个值接收者方法将完整额度和已知消耗复制到私有字段，不校验、不做 I/O，交由绑定准入时校验。不要通过字段字面量构造 Charge。
 
 - `limiter.Bind(quotas...)` 在本地校验并复制 1～32 个名称唯一的额度，不访问后端，也不注册或更新服务端策略。定义无效时返回包装 `ErrInvalid` 的错误。
 - `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片、Quota 或策略值，既不影响绑定，也不影响先前构造的 Charge。每次调用独立组装规则，不修改传入参数。
@@ -119,16 +119,16 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ### 现有底层 API
 
-`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、固定策略和单次消耗合在一起。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
-[持久化示例](drivers/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+[持久化示例](driver/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
 
-使用 PostgreSQL 时改装 `github.com/tr1v3r/pacelock/drivers/postgres@dev`。
+使用 PostgreSQL 时改装 `github.com/tr1v3r/pacelock/driver/postgres@dev`。
 应用注册自己选择的 `database/sql` 传输驱动，并管理指向主库的 DB：
 
 ```go
-driver, err := postgres.New(db) // 导入 github.com/tr1v3r/pacelock/drivers/postgres
+driver, err := postgres.New(db) // 导入 github.com/tr1v3r/pacelock/driver/postgres
 if err != nil { return err }
 if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，不在每次请求中调用
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
@@ -141,8 +141,8 @@ PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，
 不宣称性能优于 Redis。`Prune` 提供由应用调度的有界物理清理；不清理也会逻辑过期。
 SDK 不启动后台任务。
 
-详见 [PostgreSQL 指南](drivers/postgres/README.zh-CN.md)、[Redis 指南](drivers/redis/README.zh-CN.md)
-和[自定义 Driver 契约](docs/drivers.md)。切换后端不会迁移额度债务或幂等历史，不能当作自动故障降级。
+详见 [PostgreSQL 指南](driver/postgres/README.zh-CN.md)、[Redis 指南](driver/redis/README.zh-CN.md)
+和[自定义 Driver 契约](docs/driver.md)。切换后端不会迁移额度债务或幂等历史，不能当作自动故障降级。
 
 ## 阻塞等待准入
 
@@ -150,8 +150,8 @@ SDK 不启动后台任务。
 
 ```go
 rules := []pacelock.Rule{
-    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+    {Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
+    {Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: 1500},
 }
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()
@@ -189,11 +189,11 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 - ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。绑定接口按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
-- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](drivers/redis/README.zh-CN.md)。
+- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](driver/redis/README.zh-CN.md)。
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
-完整应用接入见[持久化准入示例](drivers/redis/examples/durable/README.zh-CN.md)：可信规则装配、attempt ID 持久化、重启恢复，以及上游执行未知时的显式处理。
+完整应用接入见[持久化准入示例](driver/redis/examples/durable/README.zh-CN.md)：可信规则装配、attempt ID 持久化、重启恢复，以及上游执行未知时的显式处理。
 
 ## 错误与观测
 
@@ -208,7 +208,7 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`Wait`、`AllowOnce` 或 `Lookup` 调用触发一次。`Wait` 为整个调用产生一个 `wait` 事件，耗时包含等待时间；内部尝试不另发 `allow` 事件。事件包含操作、耗时、结果、传入的规则或消耗数量、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。绑定接口每次只触发一个事件，涵盖本地校验与消耗组装；`Bind` 不触发事件。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
+`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`Wait`、`AllowOnce` 或 `Lookup` 调用触发一次。`Wait` 为整个调用产生一个 `wait` 事件，耗时包含等待时间；内部尝试不另发 `allow` 事件。事件包含操作、耗时、结果、传入的规则或消耗数量、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。绑定接口每次只触发一个事件，涵盖本地校验与消耗组装；`Bind` 不触发事件。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](driver/redis/examples/idempotency/main.go)。
 
 ## 额度与运行契约
 
@@ -226,16 +226,16 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 
 ```sh
 docker compose up -d --wait
-(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
-(cd drivers/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
+(cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
+(cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
 (cd examples/postgres && go run .)
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
 PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
-(cd drivers/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
+(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
 docker compose down
 ```
 

@@ -3,8 +3,8 @@ updates:
   - package-ecosystem: gomod
     directories:
       - /
-      - /drivers/redis
-      - /drivers/postgres
+      - /driver/redis
+      - /driver/postgres
       - /tests/contracts
       - /examples/postgres
     schedule:

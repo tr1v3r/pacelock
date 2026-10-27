@@ -26,7 +26,9 @@ func (d *testDriver) Lookup(context.Context, LookupRequest) (Decision, bool, err
 	d.calls++
 	return d.result.Decision, d.found, d.err
 }
-func sampleRule() Rule { return Rule{Name: "q", Rate: 1, Period: time.Second, Burst: 5, Cost: 1} }
+func sampleRule() Rule {
+	return Rule{Name: "q", Policy: Policy{Rate: 1, Period: time.Second, Burst: 5}, Cost: 1}
+}
 
 func TestFacadeValidationAndErrors(t *testing.T) {
 	var typedNil *testDriver
@@ -125,14 +127,14 @@ func TestFacadeObservation(t *testing.T) {
 }
 
 func TestFingerprintAndRounding(t *testing.T) {
-	a := Admission{Scope: Scope{"a", "b"}, ID: "id", Retention: time.Minute, Rules: []Rule{sampleRule(), {Name: "tokens", Rate: 3, Period: time.Second, Burst: 4, Cost: 2}}}
+	a := Admission{Scope: Scope{"a", "b"}, ID: "id", Retention: time.Minute, Rules: []Rule{sampleRule(), {Name: "tokens", Policy: Policy{Rate: 3, Period: time.Second, Burst: 4}, Cost: 2}}}
 	step, err := a.Rules[1].Interval()
 	if err != nil || step != 333334*time.Microsecond {
 		t.Fatal(step, err)
 	}
 	fp := a.Fingerprint()
-	a.Rules[0].Rate = 60
-	a.Rules[0].Period = time.Minute
+	a.Rules[0].Policy.Rate = 60
+	a.Rules[0].Policy.Period = time.Minute
 	if fp != a.Fingerprint() {
 		t.Fatal("equivalent policy changed fingerprint")
 	}
@@ -154,7 +156,7 @@ func (d *waitDriver) Admit(ctx context.Context, a Admission) (Receipt, error) {
 }
 
 func TestWaitRetriesOnlyDenials(t *testing.T) {
-	rules := []Rule{sampleRule(), {Name: "tokens", Rate: 10, Period: time.Second, Burst: 20, Cost: 7}}
+	rules := []Rule{sampleRule(), {Name: "tokens", Policy: Policy{Rate: 10, Period: time.Second, Burst: 20}, Cost: 7}}
 	original := append([]Rule(nil), rules...)
 	var lastAttempt time.Time
 	const delay = 5 * time.Millisecond
@@ -194,7 +196,7 @@ func TestWaitValidation(t *testing.T) {
 		"nil context":     func() error { return l.Wait(nil, sampleRule()) },
 		"no rules":        func() error { return l.Wait(context.Background()) },
 		"duplicate rules": func() error { return l.Wait(context.Background(), sampleRule(), sampleRule()) },
-		"invalid cost":    func() error { r := sampleRule(); r.Cost = r.Burst + 1; return l.Wait(context.Background(), r) },
+		"invalid cost":    func() error { r := sampleRule(); r.Cost = r.Policy.Burst + 1; return l.Wait(context.Background(), r) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := call()

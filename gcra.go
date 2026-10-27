@@ -49,7 +49,7 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 			if s.Interval < 1 || s.Interval > horizon || s.Burst < 1 || s.Burst > horizon/s.Interval || s.TAT < 0 || s.TAT > now+horizon || s.ExpiresAt < s.TAT || s.ExpiresAt-s.TAT > 999 {
 				return Decision{}, nil, fmt.Errorf("%w: invalid quota state", ErrState)
 			}
-			if s.Interval != step || s.Burst != r.Burst {
+			if s.Interval != step || s.Burst != r.Policy.Burst {
 				return Decision{}, nil, fmt.Errorf("%w: quota %q", ErrPolicyMismatch, r.Name)
 			}
 			tat = max(tat, s.TAT)
@@ -57,13 +57,13 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 			return Decision{}, nil, fmt.Errorf("%w: missing state expiry", ErrState)
 		}
 		candidate := tat + r.Cost*step
-		wait := max(int64(0), candidate-r.Burst*step-now)
+		wait := max(int64(0), candidate-r.Policy.Burst*step-now)
 		if wait > 0 {
 			decision.Allowed = false
 			decision.Limited = append(decision.Limited, r.Name)
 			decision.RetryAfter = max(decision.RetryAfter, time.Duration(wait)*time.Microsecond)
 		}
-		next[i] = QuotaState{TAT: candidate, Interval: step, Burst: r.Burst, ExpiresAt: now + ((candidate-now+999)/1000)*1000}
+		next[i] = QuotaState{TAT: candidate, Interval: step, Burst: r.Policy.Burst, ExpiresAt: now + ((candidate-now+999)/1000)*1000}
 	}
 	if !decision.Allowed {
 		next = nil
