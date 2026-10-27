@@ -43,17 +43,20 @@ retention. A changed fingerprint returns `ErrConflict`. A retained denial stays
 denied; its RetryAfter is historical. A genuinely new business attempt needs a new
 ID. Expired/lost IDs must not be reused to depend on deduplication.
 
-Redis retains a pending marker before quota writes because Lua runtime errors do
-not roll back. PostgreSQL commits quota and receipt writes in one transaction,
+Redis validates and encodes before one final MSET of quotas and the complete
+receipt. It uses logical expiry and application-scheduled bounded physical cleanup.
+It never creates new Pending, but preserves legacy Pending uncertainty.
+PostgreSQL commits quota and receipt writes in one transaction,
 so pre-commit failure rolls them all back. A PostgreSQL Commit error is still
 `Unknown`: the database may have committed before the reply was lost. Missing
 lookup results do not prove no debit or upstream exactly-once execution.
 
 ## Backend modules and migration
 
-- `drivers/redis`: go-redis transport, unchanged v1 Lua/keys/records and guarded
-  command replay, including bounded Cluster redirects. Existing Redis state can
-  continue with the same namespace/domain/policies; the Go constructor changes.
+- `drivers/redis`: go-redis transport, single-command MSET commit, v2 logical
+  expiry, bounded cursor cleanup and guarded command replay/Cluster redirects.
+  Keys stay unchanged; v1 values remain readable. Quiesce old writers before
+  upgrading; mixed writers/unconverted rollback are unsupported. See its guide.
 - `drivers/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
   maintenance; no worker starts automatically. See its deployment guide.

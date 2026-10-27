@@ -20,7 +20,8 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 ## 能力
 
 - 加权 GCRA，一次调用 1～32 个具名额度的原子准入。
-- 后端服务端时间、共享状态，Redis TTL 或 PostgreSQL 逻辑过期。
+- 后端服务端时间、共享状态、逻辑过期及显式物理清理。
+- Redis Lua 最后一次 MSET 提交，由应用调度有界的 `Driver.Prune`。
 - 核心仅依赖标准库，Redis/PostgreSQL Driver 为独立模块。
 - 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
 - 有保留期限的幂等准入、参数冲突检测和结果查询。
@@ -135,7 +136,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
-- 扣减额度前先写入“处理中”标记。运行时错误可能留下部分扣减和该标记；后续重试返回 `ErrOutcomeUnknown`，不会再次扣减。不要删除标记或自动退款。
+- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](drivers/redis/README.zh-CN.md)。
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
@@ -149,7 +150,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 |---|---|---|
 | `Allowed=false`、无错误 | 额度不足；没有扣减额度 | 拒绝或调度新尝试 |
 | `NotCharged` 错误 | 确定本次调用未扣减 | 修正参数/策略或处理取消 |
-| `Unknown` 错误 | 可能已经扣减，也可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
+| `Unknown` 错误 | 可能已经扣减；旧协议可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
 | `Lookup` 未找到 | 没有找到仍保留的完整结果 | 保留对先前执行结果的不确定性 |
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
@@ -164,7 +165,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
 - SDK 脚本命令通过 `NoRetry` 禁止不确定重放，无需禁用客户端重试；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
-- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Lua 执行隔离不等于运行时错误回滚或崩溃持久性；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
+- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。新 Redis 协议使用单命令提交，崩溃和故障切换持久性仍取决于部署；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
 
 参见[运维与故障恢复](docs/operations.md)、[设计及扩展提案](docs/design.md)和[兼容性说明](docs/compatibility.md)。
 

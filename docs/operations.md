@@ -25,7 +25,11 @@ Core Driver contracts are documented [separately](drivers.md).
 6. For `AllowOnce`, persist IDs before dispatch, select retention covering the
    recovery horizon and budget memory for retained IDs, including denials. A rough
    count is admission attempts per second × retention seconds; measure actual
-   bytes per record including names and Redis overhead. Keep pending records.
+   bytes per record including names and Redis overhead. Preserve legacy Pending.
+   Redis v2 state requires caller-scheduled physical cleanup, including idle scopes.
+   Bound each maintenance tick, retain the cursor across ticks, repeat full cycles,
+   and monitor memory/cleanup lag. Logical expiry works if cleanup is delayed;
+   physical memory will not drain by itself. See the Redis driver guide.
 7. Exercise the exact Redis version, ACL, TLS, failover topology and customer load.
    The included fixture validates three-master routing, not high availability.
 
@@ -94,7 +98,7 @@ ambiguous post-dispatch/reply failures. `ErrBackend` preserves the original erro
 | Timeout/lost reply to `Allow` | Debit unknown | Do not blindly repeat or refund; apply failure policy |
 | Timeout/lost reply to `AllowOnce` | Admission may exist | Query the same ID with a fresh deadline within retention |
 | Complete retained allow/deny | Original decision recovered | Coordinate execution with the business attempt record |
-| Pending record | Script may have partially charged | Alert; preserve marker and uncertainty; do not automatically refund/reuse ID |
+| Legacy Pending record | Old script may have partially charged | Alert; preserve marker and uncertainty; do not automatically refund/reuse ID |
 | Missing record | Not observed, possibly expired/lost/in-flight | Do not infer zero debit or exactly-once execution |
 | Policy conflict | This invocation did not mutate quota | Coordinate configuration across callers |
 | Redis failover/eviction/deletion | Quota and dedupe history may be lost | Assess overshoot; restore service under an explicit degraded-mode policy |
@@ -106,11 +110,12 @@ alone must never issue a second upstream model call.
 
 ## Durability and clock behavior
 
-Redis script isolation prevents interleaving but does not roll back runtime
-errors. The SDK prevalidates quota state and writes a pending marker before debit
-for `AllowOnce`. If later writes fail, the marker prevents replay while retained;
-it cannot determine how much was already written or restore a lost replica log.
-Do not delete it to unblock a request.
+Redis script isolation prevents interleaving. The current driver validates and
+encodes before one final MSET that commits all quota updates and the complete
+receipt. An affirmative commit rejection is NotCharged; ambiguous transport/server
+failures remain Unknown. New Pending is not created. Legacy Pending still blocks
+replay and cannot identify how much an old script wrote; never delete it to unblock
+a request. Single-command commit does not restore lost persistence/replica logs.
 
 Redis TIME is shared wall time, not a monotonic clock. Forward jumps can replenish
 capacity early; backward jumps can delay recovery or reject state. Alert on host

@@ -28,7 +28,8 @@ Start with the [Admission API](pacelock.go), [driver and recovery contract](driv
 ## Capabilities
 
 - Weighted GCRA and atomic admission across 1–32 named quotas.
-- Backend server time and shared state; Redis TTL or PostgreSQL logical expiry.
+- Backend server time, shared state and logical expiry with explicit physical cleanup.
+- Redis Lua with one MSET commit; bounded, application-scheduled `Driver.Prune`.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
@@ -170,9 +171,11 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 - Both allow and deny decisions are retained. A denied ID stays denied while
   retained; a later, genuinely new attempt needs a new ID. Replayed `RetryAfter`
   is the original delay, not a countdown or fresh capacity estimate.
-- A pending marker is written before quota mutations. A runtime error may leave
-  partial debits and a pending record; retries then return `ErrOutcomeUnknown`
-  without debiting again. Do not delete the marker or refund automatically.
+- Redis writes quotas and the complete decision in one final MSET, after all
+  checks/encoding. New operations do not create Pending. Legacy pending records
+  still return `ErrOutcomeUnknown`; do not delete or refund them automatically.
+  Redis expiry is logical; schedule bounded physical cleanup for every scope.
+  See the [Redis protocol and cleanup guide](drivers/redis/README.md).
 - `found=false` does **not** prove no debit. The command may still be in flight,
   or the record may have expired or been lost. Expiry, eviction, deletion and
   failover loss end deduplication. Never reuse an old ID after that boundary.
@@ -191,7 +194,7 @@ errors expose `*pacelock.Error` with `Op` and `Outcome`:
 |---|---|---|
 | `Allowed=false`, no error | Quota denied; no quota debit | Reject or schedule a new attempt |
 | `NotCharged` error | This invocation is known not to debit | Fix input/policy, or handle cancellation |
-| `Unknown` error | May have charged, including partial writes | Query retained ID; use explicit recovery policy |
+| `Unknown` error | May have charged; legacy writes can be partial | Query retained ID; use explicit recovery policy |
 | `Lookup`: missing | No retained complete result was found | Preserve uncertainty about previous execution |
 
 A `NotCharged` result never clears uncertainty from an earlier call. On **any**
@@ -227,7 +230,8 @@ panics propagate. Do not label metrics with error text or user identifiers. See
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot
   undo Redis writes. The SDK creates no goroutines and imposes no hidden timeout.
 - Use dedicated keys, primary routing, TLS/authentication and Redis `noeviction`.
-  Lua execution isolation is not runtime-error rollback or crash durability.
+  The new Redis protocol uses a single commit command; crash/failover durability
+  still depends on deployment.
   Clock jumps, eviction and failover data loss can weaken limits and deduplication.
 
 See [operations and incident recovery](docs/operations.md),

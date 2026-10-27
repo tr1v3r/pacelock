@@ -18,7 +18,7 @@ synthetic identifiers, expected impact and any suggested mitigation privately.
 
 Use authentication, TLS and private networking. Restrict keys to a dedicated
 application prefix. For standalone Redis, the admission/lookup command grants are
-`+evalsha +eval +get +set +time`, plus the go-redis connection-handshake commands
+`+evalsha +eval +get +mset +time`, plus the go-redis connection-handshake commands
 that your configuration uses (for example `HELLO`, `AUTH`, `CLIENT`, `PING` and
 `SELECT` when applicable).
 
@@ -29,12 +29,16 @@ sufficient for Cluster. Do not grant all of `+cluster` just to allow slot discov
 `COMMAND` is not required for Pacelock's current EVALSHA/EVAL routing path; only add
 permissions for other commands if your integration actually requires them.
 
-The normal runtime does not need `ACL`, `CONFIG`, `FLUSHALL`, `KEYS` or `SCAN`.
-Those administrative privileges belong only to isolated test/operations tooling.
+Admission/lookup do not need `ACL`, `CONFIG`, `FLUSHALL`, `KEYS`, `SCAN` or `DEL`.
+Explicit cleanup additionally needs `+scan +del` and can use a separate identity.
+SCAN has node-wide key-name visibility; use dedicated trusted maintenance access.
+The SDK filters candidates by scope and rechecks expiry atomically. Other
+administrative privileges belong only to isolated test/operations tooling.
 
 Test the exact ACL in staging: script key permissions and commands invoked inside
-scripts are both checked. Redis failure after some writes can leave partial
-charges. Keep noeviction and monitor memory. Quota names in retained result records
+scripts are both checked. One final MSET commits all new quota/receipt changes;
+legacy Pending remains uncertain and must be preserved. Keep noeviction, schedule
+bounded cleanup, and monitor memory and maintenance lag. Quota names in retained result records
 are plaintext; do not put secrets or unnecessary personal data in them. Redis key
 hashing is namespace isolation, not encryption, access control or anonymization.
 

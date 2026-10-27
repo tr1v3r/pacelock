@@ -42,7 +42,8 @@ expected backends via `PACELOCK_REQUIRED_REDIS_BACKENDS`. See
 Integration tests create and delete only their own namespaced keys. The cold-cache
 contention test runs `SCRIPT FLUSH` on every test master (affecting the server-wide
 script cache); use dedicated disposable fixtures, never a shared Redis service. ACL fault
-tests also create/delete a temporary Redis user. Use disposable test services,
+tests also create/delete a temporary Redis user. The MSET OOM test temporarily
+lowers maxmemory and restores it afterward; use only disposable fixtures. Use disposable test services,
 never production. The Cluster fixture has three masters and no replicas; it
 validates routing/atomicity, not failover availability or durability.
 
