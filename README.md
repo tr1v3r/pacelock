@@ -263,3 +263,7 @@ See [contribution/release checks](CONTRIBUTING.md) and [security policy](SECURIT
 Deployment load, memory and failover tools with raw local observations are documented in [deployment validation](docs/deployment-validation.md). These are bounded fixture measurements, not production SLOs.
 
 MIT licensed.
+
+The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
+example and integration-test modules require Go 1.25+ to use patched pgx/text
+dependencies. Production applications should use a maintained Go release.

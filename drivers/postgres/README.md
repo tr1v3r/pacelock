@@ -67,3 +67,7 @@ run `(cd examples/postgres && go run .)` against the Compose PostgreSQL fixture.
 
 Retention starts at the sampled backend decision time; SQL/commit latency consumes
 part of that window. Choose retention to cover dispatch and recovery latency.
+
+The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
+example and integration-test modules require Go 1.25+ to use patched pgx/text
+dependencies. Production applications should use a maintained Go release.

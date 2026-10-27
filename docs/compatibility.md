@@ -108,3 +108,7 @@ Use separate IDs for admission transport recovery and for distinct business
 attempts. Implement business execution coordination outside this limiter. This
 SDK does not provide exactly-once execution, crash-proof quota accounting, refund,
 output reservation or billing. Those are not implied by a successful release.
+
+The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
+example and integration-test modules require Go 1.25+ to use patched pgx/text
+dependencies. Production applications should use a maintained Go release.
