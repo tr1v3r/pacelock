@@ -1,3 +1,3 @@
 module github.com/tr1v3r/pacelock
 
-go 1.24.0
+go 1.26.0
