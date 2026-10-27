@@ -10,6 +10,6 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 )
 
-require github.com/tr1v3r/pacelock v0.0.0-20261027041359-ff7d850a7bd5
+require github.com/tr1v3r/pacelock v0.0.0-20261027161106-9ff3e7a851af
 
 replace github.com/tr1v3r/pacelock => ../..

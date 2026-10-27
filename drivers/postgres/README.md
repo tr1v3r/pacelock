@@ -13,9 +13,15 @@ if err != nil { return err }
 if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-decision, err := limiter.Allow(ctx, pacelock.Rule{
-    Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1,
-})
+rpm := pacelock.Quota{
+    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+}
+tokens := pacelock.Quota{
+    Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000},
+}
+bound, err := limiter.Bind(rpm, tokens)
+if err != nil { return err }
+decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
@@ -26,6 +32,21 @@ not connect, migrate or close db. Run Migrate explicitly during setup with a
 migration-capable role. It creates the fixed logged tables from schema.sql; it does
 not upgrade incompatible existing tables. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
+
+The common `Bind` API validates and copies fixed quotas locally. Construct charges
+with `q.Charge(cost)`, a value-receiver method that captures the complete quota and
+cost in private fields without validation or I/O; do not use charge field literals.
+`Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
+charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
+still take `...Charge`, one positive cost per bound quota exactly once on every call.
+Bind all applicable quotas; charge order is normalized to binding order. Each
+captured policy must be fully valid, and its name, effective interval (rounded upward
+to microseconds) and burst must match the binding. Equivalent valid policy
+expressions are accepted. Invalid, incomplete or mismatched charges return local
+`ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
+Existing Rule APIs, Driver and storage are unchanged; blocking admission still
+uses `limiter.Wait` with rules, not a bound wait method.
+See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 ## Transactions and failure contract
 
@@ -68,6 +89,6 @@ run `(cd examples/postgres && go run .)` against the Compose PostgreSQL fixture.
 Retention starts at the sampled backend decision time; SQL/commit latency consumes
 part of that window. Choose retention to cover dispatch and recovery latency.
 
-The core and both runtime drivers retain Go 1.24 compatibility. The optional pgx
-example and integration-test modules require Go 1.25+ to use patched pgx/text
-dependencies. Production applications should use a maintained Go release.
+The core, both runtime drivers, the optional pgx example and integration-test
+modules require Go 1.26+. Production applications should use a maintained Go
+release with its latest patches.

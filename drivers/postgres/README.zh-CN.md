@@ -13,9 +13,15 @@ if err != nil { return err }
 if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-decision, err := limiter.Allow(ctx, pacelock.Rule{
-    Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1,
-})
+rpm := pacelock.Quota{
+    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+}
+tokens := pacelock.Quota{
+    Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000},
+}
+bound, err := limiter.Bind(rpm, tokens)
+if err != nil { return err }
+decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 // 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
 ```
 
@@ -25,6 +31,16 @@ decision, err := limiter.Allow(ctx, pacelock.Rule{
 在初始化阶段显式使用具备建表权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
 不升级已有的不兼容表。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
+
+公共 `Bind` 接口在本地校验并复制固定额度。通过值接收者方法 `q.Charge(cost)` 将完整额度和消耗
+捕获到私有字段，不校验、不做 I/O；不要使用 Charge 字段字面量。`Quota.Name` / `Policy` 仍公开，
+之后修改 Quota 不影响已有 Charge 或绑定，变更策略需新建 binding。`Allow` / `AllowOnce` 仍接收
+`...Charge`，每次必须为全部已绑定额度各提供一次正数消耗。绑定时应包含全部适用额度；Charge
+会按绑定顺序整理。捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
+绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前本地返回
+`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储不变，等待
+仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
+详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 事务与故障契约
 
@@ -61,5 +77,5 @@ PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行
 保留期从采样的后端决策时间起算，SQL 执行和提交延迟会消耗一部分窗口；
 配置时需覆盖派发与恢复所需时间。
 
-核心及两个运行时 Driver 保持 Go 1.24 兼容性。可选的 pgx 示例和集成测试模块要求
-Go 1.25+，以使用已修复的 pgx/text 依赖。生产应用应使用仍在维护的 Go 版本。
+核心、两个运行时 Driver、可选的 pgx 示例和集成测试模块统一要求 Go 1.26+。
+生产应用应使用仍在维护的 Go 分支及其最新修补版。

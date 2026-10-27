@@ -21,15 +21,28 @@ Redis 保留原键名，v2 值采用逻辑过期和单次 MSET 提交；PG 用 d
 
 ```go
 New(driver Driver, namespace, domain string) (*Limiter, error)
+(*Limiter).Bind(quotas ...Quota) (*BoundLimiter, error)
+(Quota).Charge(cost int64) Charge
 (*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
 (*Limiter).Wait(ctx context.Context, rules ...Rule) error
+(*BoundLimiter).Allow(ctx context.Context, charges ...Charge) (Decision, error)
+(*BoundLimiter).AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (Receipt, error)
+(*BoundLimiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 Validate(rules ...Rule) error
 NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error)
 ```
 
-一次请求传入 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost。
+推荐先定义 `rpm`、`tokens` 等 `Quota` 值，再用 `limiter.Bind(rpm, tokens)` 绑定 1～32 个固定额度。`Quota` 保留公开的 `Name` / `Policy` 字段；值接收者 `q.Charge(cost)` 将完整的 Quota 值快照与 cost 存入 `Charge` 的私有 `quota Quota` / `cost int64` 字段，构造不校验、不做 I/O。每次通过 `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))` 或相同的 `...Charge` 形式调用 `AllowOnce`，不得使用 Charge 字段字面量。
+
+`Bind` 在本地校验并复制固定额度集合，不访问后端。每次准入必须为全部已绑定额度各提供一次消耗，且 `0 < cost <= Burst`；遗漏、重复、未知额度、零值 Charge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 Charge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 Charge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
+
+Charge 顺序不影响结果，阻塞额度和幂等参数以绑定顺序为准。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 Charge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
+
+现有底层接口仍接受 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost，与绑定接口共享相同额度状态和协议。底层接口无法检测漏传的适用额度，幂等规则顺序由调用方负责。此次调整不改变旧 Rule API、Driver 契约或存储，不新增 `AllowCharges` 或 `BoundLimiter.Wait`；等待继续使用 `limiter.Wait(ctx, rules...)`。
+
+本次真实后端、模糊测试与准入热路径基准结果见[本地验证记录](validation/quota-charge-local.md)。
 
 - Rate、Period、Burst、Cost 必须为正；Cost 不得超过 Burst，否则这个请求永远不能通过该策略，直接返回 ErrInvalid。
 - 同次调用不得出现重复 Name；不会偷偷合并重复额度。

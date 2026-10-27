@@ -2,6 +2,7 @@
 // immediate decisions and context-aware blocking waits.
 // Drivers own backend time, atomic persistence and retained admission records.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
+// Bind separates fixed quota policies from per-attempt costs for every driver.
 package pacelock
 
 import (
@@ -36,6 +37,7 @@ var (
 
 // Rule charges Cost units to Name. Rate units replenish per Period.
 // Burst is total instantaneous capacity, including the first unit.
+// This low-level API combines policy and cost; use Limiter.Bind to separate them.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
@@ -91,7 +93,8 @@ type Decision struct {
 	Allowed bool
 	// RetryAfter is advisory, not a reservation. Retained results preserve the original wait.
 	RetryAfter time.Duration
-	// Limited lists every blocking quota in input order; it is empty on allowance.
+	// Limited lists every blocking quota in rule order, or binding order for
+	// BoundLimiter. It is empty on allowance.
 	Limited []string
 }
 
