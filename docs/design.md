@@ -21,14 +21,18 @@ Redis 协议保持 v1；PG 用 domain 行锁、服务端时间和短事务，复
 
 ```go
 New(driver Driver, namespace, domain string) (*Limiter, error)
-(*Limiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
+(*Limiter).Bind(quotas ...Quota) (*BoundLimiter, error)
+(*BoundLimiter).Allow(ctx context.Context, rules ...Rule) (Decision, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
 Validate(rules ...Rule) error
 NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error)
 ```
 
-一次请求传入 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost。
+推荐先用 `Bind` 绑定 1～32 个 `Quota{Name, Policy{Rate, Period, Burst}}`，每次只传完整的 `Charge{Name, Cost}` 集合。绑定在本地复制策略，不访问 后端；遗漏、重复、未知额度或无效 Cost 在派发前返回 `ErrInvalid`。Charge 顺序不影响结果，阻塞额度和幂等参数以绑定顺序为准。绑定不可变且可并发复用；修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
+
+现有底层接口仍接受 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost，与绑定接口共享相同额度状态和协议。底层接口无法检测漏传的适用额度，幂等规则顺序由调用方负责。
+
 
 - Rate、Period、Burst、Cost 必须为正；Cost 不得超过 Burst，否则这个请求永远不能通过该策略，直接返回 ErrInvalid。
 - 同次调用不得出现重复 Name；不会偷偷合并重复额度。

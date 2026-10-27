@@ -13,9 +13,11 @@ if err != nil { return err }
 if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-decision, err := limiter.Allow(ctx, pacelock.Rule{
-    Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1,
+bound, err := limiter.Bind(pacelock.Quota{
+    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
 })
+if err != nil { return err }
+decision, err := bound.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
@@ -26,6 +28,10 @@ not connect, migrate or close db. Run Migrate explicitly during setup with a
 migration-capable role. It creates the fixed logged tables from schema.sql; it does
 not upgrade incompatible existing tables. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
+
+The common `Bind` API copies fixed policies locally and requires one positive
+charge per bound quota on every call. Bind all applicable quotas; charge order is
+normalized to binding order. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 ## Transactions and failure contract
 

@@ -16,6 +16,11 @@ Import `redisdriver "github.com/tr1v3r/pacelock/drivers/redis"` and
 One domain is one Cluster slot. All instances need matching scope, names and
 effective policies. Each call must include every applicable quota.
 
+Use `limiter.Bind(quotas...)` to copy fixed policies locally, then call
+`bound.Allow(ctx, charges...)` or `bound.AllowOnce(ctx, id, retention, charges...)`.
+Every call must charge all bound quotas exactly once; order is normalized to binding
+order. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+
 The v1 Lua script, key hashes and retained record protocol remain unchanged.
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects; Ring is unsupported. Custom Scripters/hooks/factories/proxies must

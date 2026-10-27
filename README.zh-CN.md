@@ -15,11 +15,12 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 注释覆盖包、类型、接口、函数、方法、字段、常量和变量，说明参数约束、并发与生命周期规则，以及错误处理方式。
 集成时，请结合示例阅读所固定版本的源码注释。
 
-可从[准入 API](pacelock.go)、[Driver 与恢复契约](driver.go)和[错误结果](errors.go)开始。
+可从[策略绑定 API](bound.go)、[底层准入 API](pacelock.go)、[Driver 与恢复契约](driver.go)和[错误结果](errors.go)开始。
 
 ## 能力
 
 - 加权 GCRA，一次调用 1～32 个具名额度的原子准入。
+- 绑定固定的 `Policy` / `Quota`，每次仅提交 `Charge` 消耗。
 - 后端服务端时间、共享状态，Redis TTL 或 PostgreSQL 逻辑过期。
 - 核心仅依赖标准库，Redis/PostgreSQL Driver 为独立模块。
 - 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
@@ -57,11 +58,24 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
-rules := []pacelock.Rule{
-    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+// 绑定一次固定策略；bound 可供多个请求并发复用。
+bound, err := limiter.Bind(
+    pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
+        Rate: 60, Period: time.Minute, Burst: 10,
+    }},
+    pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
+        Rate: 60000, Period: time.Minute, Burst: 12000,
+    }},
+)
+if err != nil {
+    return err
 }
-decision, err := limiter.Allow(ctx, rules...)
+// 每次只传本次消耗；Charge 顺序不影响结果。
+charges := []pacelock.Charge{
+    {Name: "account:rpm", Cost: 1},
+    {Name: "model-a:input-tpm", Cost: 1500},
+}
+decision, err := bound.Allow(ctx, charges...)
 if err != nil {
     // 忽略 decision。OutcomeOf(err) 为 NotCharged 或 Unknown。
     // 业务明确选择故障策略，不盲目重试。
@@ -90,7 +104,24 @@ defer client.Close()
 
 Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻止不确定网络错误重放，同时保留有界 MOVED/ASK 恢复，不依赖 `MaxRetries` 配置。共享客户端上的其他命令继续使用其配置的重试策略。Cluster 可使用默认或正数 MaxRedirects；`MaxRedirects: -1` 仍可禁用重定向。自定义 Scripter、hooks、节点工厂及代理必须遵守相同契约，详见[运维说明](docs/operations.md)。
 
-所有实例必须使用相同的 namespace、domain、额度名称和有效策略。每次调用都要包含适用的账号、模型和租户规则；库无法推断漏传的规则。不同 namespace/domain 相互独立。
+所有实例必须使用相同的 namespace、domain、额度名称和有效策略。绑定时应包含适用的全部账号、模型和租户额度；库无法推断绑定时漏掉的额度。不同 namespace/domain 相互独立。
+
+## 固定策略与单次消耗
+
+`Policy` 包含 `Rate`、`Period`、`Burst`；`Quota` 将 `Name` 与策略关联；`Charge` 只包含 `Name` 和本次已知的 `Cost`。
+
+- `limiter.Bind(quotas...)` 在本地校验并复制 1～32 个名称唯一的额度，不访问后端，也不注册或更新服务端策略。定义无效时返回包装 `ErrInvalid` 的错误。
+- `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片或策略值不会影响绑定。每次调用独立组装消耗，不修改传入参数。
+- 每次 `Allow` / `AllowOnce` 必须为全部已绑定额度各提供一次消耗，且 `0 < Cost <= Burst`。遗漏、重复、未知额度或无效消耗均在派发前返回 `ErrInvalid`，结果为 `NotCharged`。不默认填充 Cost，也不通过零消耗隐式跳过额度。
+- `Charge` 可以任意排序。`Decision.Limited` 和幂等使用的有序规则均以绑定顺序为准。调整 Charge 顺序仍可重放；调整绑定顺序会改变已保留尝试的参数。
+- 由应用根据可信身份构造额度名称并选择策略。动态租户或模型可以按适用的额度集合创建绑定；绑定是本地操作，不需要预先注册或强制使用缓存。
+- 修改策略需创建新绑定。绑定不会迁移已有债务，也不会绕过活跃后端状态的 `ErrPolicyMismatch` 检查。已保留尝试的恢复应继续使用原绑定、消耗和保留期限。
+- `bound.Lookup` 委托父 Limiter 按 namespace/domain 查询，可以返回其他绑定或底层 API 创建的记录，不按当前绑定的额度集合过滤。
+
+### 现有底层 API
+
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，签名与后端协议均不变。`Rule` 将额度名称、固定策略和单次消耗合在一起。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+[持久化示例](drivers/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
 
@@ -104,7 +135,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，�
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-两种 Driver 共用 `Allow`、`AllowOnce`、`Lookup`、错误结果和观测接口。
+两种 Driver 共用 `Bind`、`Allow`、`AllowOnce`、`Lookup`、错误结果和观测接口。
 PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，用短事务
 一起提交全部额度与准入记录。提交前失败会回滚；提交错误保守标记为 `Unknown`。
 当前不会加入调用者的业务事务。domain 竞争、WAL、连接池和 vacuum 需要目标环境验证，
@@ -118,7 +149,7 @@ SDK 不启动后台任务。
 
 ```go
 // 派发前，将准入 ID 与一次业务尝试一起持久保存。
-receipt, err := limiter.AllowOnce(ctx, admissionID, 10*time.Minute, rules...)
+receipt, err := bound.AllowOnce(ctx, admissionID, 10*time.Minute, charges...)
 if err != nil {
     return err
 }
@@ -129,10 +160,10 @@ if err != nil {
 响应不确定时，使用新的 context 查询：
 
 ```go
-decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
+decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 ```
 
-- ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
+- ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。绑定接口按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
 - 扣减额度前先写入“处理中”标记。运行时错误可能留下部分扣减和该标记；后续重试返回 `ErrOutcomeUnknown`，不会再次扣减。不要删除标记或自动退款。
@@ -154,7 +185,7 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`AllowOnce` 或 `Lookup` 调用触发一次。事件包含操作、耗时、结果、规则数、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
+`Validate(rules...)` 可离线检查规则边界。`NewWithOptions` 接受可选的 `Observer`，每次 `Allow`、`AllowOnce` 或 `Lookup` 调用触发一次。事件包含操作、耗时、结果、传入的规则或消耗数量、重放状态、延迟和错误，不以字段暴露原始 ID 或额度名称。回调必须快速且并发安全；panic 会向外传播。绑定接口每次只触发一个事件，涵盖本地校验与消耗组装；`Bind` 不触发事件。不要把错误全文或用户标识用作指标标签。参见[可运行的观测与恢复示例](drivers/redis/examples/idempotency/main.go)。
 
 ## 额度与运行契约
 

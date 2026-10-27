@@ -33,22 +33,28 @@ func main() {
 		log.Fatal(err)
 	}
 	id := hex.EncodeToString(bytes[:]) // Persist alongside the business attempt before use.
-	rules := []pacelock.Rule{{Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1}}
+	bound, err := limiter.Bind(pacelock.Quota{
+		Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	charges := []pacelock.Charge{{Name: "requests", Cost: 1}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	receipt, err := limiter.AllowOnce(ctx, id, 10*time.Minute, rules...)
+	receipt, err := bound.AllowOnce(ctx, id, 10*time.Minute, charges...)
 	if err != nil {
 		log.Printf("admission error: outcome=%s error=%v", pacelock.OutcomeOf(err), err)
 		// A fresh deadline allows a read after the first context has expired.
 		query, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		decision, found, lookupErr := limiter.Lookup(query, id)
+		decision, found, lookupErr := bound.Lookup(query, id)
 		log.Printf("recovery: found=%t decision=%+v error=%v", found, decision, lookupErr)
 		// Missing/pending records do not establish that no debit happened.
 		return
 	}
 	log.Printf("original decision: %+v", receipt)
-	replay, err := limiter.AllowOnce(ctx, id, 10*time.Minute, rules...)
+	replay, err := bound.AllowOnce(ctx, id, 10*time.Minute, charges...)
 	if err != nil {
 		log.Fatal(err)
 	}

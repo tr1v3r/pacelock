@@ -13,9 +13,11 @@ if err != nil { return err }
 if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-decision, err := limiter.Allow(ctx, pacelock.Rule{
-    Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1,
+bound, err := limiter.Bind(pacelock.Quota{
+    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
 })
+if err != nil { return err }
+decision, err := bound.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
 // 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
 ```
 
@@ -25,6 +27,9 @@ decision, err := limiter.Allow(ctx, pacelock.Rule{
 在初始化阶段显式使用具备建表权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
 不升级已有的不兼容表。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
+
+公共 `Bind` 接口在本地复制固定策略，每次调用必须为全部已绑定额度各提供一个正数消耗。
+绑定时应包含全部适用额度；Charge 会按绑定顺序整理。详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 事务与故障契约
 

@@ -24,11 +24,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	bound, err := limiter.Bind(
+		pacelock.Quota{Name: "model-a:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
+		pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	d, err := limiter.Allow(ctx,
-		pacelock.Rule{Name: "model-a:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-		pacelock.Rule{Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+	d, err := bound.Allow(ctx,
+		pacelock.Charge{Name: "model-a:rpm", Cost: 1},
+		pacelock.Charge{Name: "model-a:input-tpm", Cost: 1500},
 	)
 	if err != nil {
 		log.Fatal(err)

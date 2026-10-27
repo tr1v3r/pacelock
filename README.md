@@ -23,11 +23,12 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [Admission API](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
+Start with the [bound policy API](bound.go), [low-level admission API](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
 
 ## Capabilities
 
 - Weighted GCRA and atomic admission across 1–32 named quotas.
+- Bind fixed `Policy`/`Quota` definitions and submit per-attempt `Charge` costs.
 - Backend server time and shared state; Redis TTL or PostgreSQL logical expiry.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
@@ -70,11 +71,24 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil {
     return err
 }
-rules := []pacelock.Rule{
-    {Name: "account:rpm", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-    {Name: "model-a:input-tpm", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+// Bind fixed policies once; reuse bound for concurrent requests.
+bound, err := limiter.Bind(
+    pacelock.Quota{Name: "account:rpm", Policy: pacelock.Policy{
+        Rate: 60, Period: time.Minute, Burst: 10,
+    }},
+    pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
+        Rate: 60000, Period: time.Minute, Burst: 12000,
+    }},
+)
+if err != nil {
+    return err
 }
-decision, err := limiter.Allow(ctx, rules...)
+// Supply only this attempt's costs. Charge order does not matter.
+charges := []pacelock.Charge{
+    {Name: "account:rpm", Cost: 1},
+    {Name: "model-a:input-tpm", Cost: 1500},
+}
+decision, err := bound.Allow(ctx, charges...)
 if err != nil {
     // Ignore decision. OutcomeOf(err) is NotCharged or Unknown.
     // Choose an explicit application failure policy; do not blindly retry.
@@ -117,8 +131,47 @@ is supported;
 node factories and proxies must preserve this contract. See [operations](docs/operations.md).
 
 Every instance must use the same namespace, domain, quota names and effective
-policies. Include all applicable account/model/tenant quotas in every call; omitted
-rules cannot be inferred. Different namespaces/domains are independent.
+policies. Bind all applicable account/model/tenant quotas; omitted quotas cannot
+be inferred. Different namespaces/domains are independent.
+
+## Fixed policies and per-attempt costs
+
+`Policy` contains `Rate`, `Period` and `Burst`; `Quota` associates a `Name` with a
+policy; `Charge` contains only `Name` and the known per-attempt `Cost`.
+
+- `limiter.Bind(quotas...)` validates and copies 1–32 uniquely named quotas locally.
+  It performs no backend I/O and does not register or update server-side policies.
+  Invalid definitions return an error wrapping `ErrInvalid`.
+- A `BoundLimiter` is immutable and safe to share across concurrent calls under the
+  parent's driver contract. Changing the original quota slice or policy values
+  afterward has no effect. Each call assembles its own costs without mutating inputs.
+- Every `Allow` / `AllowOnce` call must supply every bound quota exactly once,
+  with `0 < Cost <= Burst`. Missing, duplicate, unknown or invalid charges return
+  `ErrInvalid` with `NotCharged` before dispatch. There are no default costs or
+  implicit zero-cost exemptions.
+- Charge order is arbitrary. The binding order determines `Decision.Limited` and
+  the ordered rules used for idempotency. Reordering charges preserves a replay;
+  changing the binding order changes the retained attempt's parameters.
+- Build quota names from trusted application identity and select policies in
+  application code. For dynamic tenants/models, create a binding for the applicable
+  set; binding is local and needs no prior registration or mandatory cache.
+- To change a policy, create a new binding. Binding does not migrate existing debt
+  or bypass `ErrPolicyMismatch` against active backend state. Keep the original
+  binding, costs and retention available for retained-attempt recovery.
+- `bound.Lookup` delegates to the parent's namespace/domain lookup. It can return
+  a receipt created by another binding or the low-level API; it does not filter
+  results by the bound quota set.
+
+### Existing low-level API
+
+`Rule`, `Validate`, `limiter.Allow(ctx, rules...)` and
+`limiter.AllowOnce(ctx, id, retention, rules...)` remain supported without a
+signature or backend protocol change. A `Rule` combines a quota's name, policy and
+per-attempt cost. This path checks only the supplied rules and cannot detect
+omitted applicable quotas. Bound admissions use the same execution path and quota
+state; they add complete-set validation and normalize charges to binding order.
+The versioned trusted builder in the [durable example](drivers/redis/examples/durable/README.md)
+continues to demonstrate the low-level API.
 
 ## PostgreSQL and the Driver boundary
 
@@ -132,7 +185,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers share `Allow`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
+Both drivers share `Bind`, `Allow`, `AllowOnce`, `Lookup`, outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota and retained result in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
@@ -148,7 +201,7 @@ backends does not transfer quota debt or retained IDs and is not automatic failo
 
 ```go
 // Persist an admission ID alongside one business attempt before dispatch.
-receipt, err := limiter.AllowOnce(ctx, admissionID, 10*time.Minute, rules...)
+receipt, err := bound.AllowOnce(ctx, admissionID, 10*time.Minute, charges...)
 if err != nil {
     return err
 }
@@ -159,12 +212,13 @@ if err != nil {
 After an ambiguous response, use a fresh context to query:
 
 ```go
-decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
+decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 ```
 
 - An ID is scoped to namespace/domain and binds the **ordered** quota names,
   effective intervals, bursts, costs and retention. Changed parameters return
-  `ErrConflict`. Names must be valid UTF-8 for `AllowOnce`; IDs contain 1–256 bytes.
+  `ErrConflict`. Bound calls normalize charges to binding order; low-level calls
+  retain supplied rule order. Names must be valid UTF-8 for `AllowOnce`; IDs contain 1–256 bytes.
 - Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
   a value covering your recovery window. Replays and queries never extend it.
 - Both allow and deny decisions are retained. A denied ID stays denied while
@@ -201,9 +255,10 @@ unrecognized errors.
 
 `Validate(rules...)` checks bounds offline. `NewWithOptions` accepts an optional
 `Observer` that runs once per `Allow`, `AllowOnce` or `Lookup` call. Events expose
-operation, duration, result, rule count, replay status, delay and error without
+operation, duration, result, supplied rule/charge count, replay status, delay and error without
 raw IDs or quota names as fields. Callbacks must be fast and concurrency-safe;
-panics propagate. Do not label metrics with error text or user identifiers. See
+panics propagate. Bound calls emit one event including local charge validation
+and assembly; `Bind` emits no event. Do not label metrics with error text or user identifiers. See
 [runnable observation/recovery example](drivers/redis/examples/idempotency/main.go).
 
 ## Quota and operational contracts

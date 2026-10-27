@@ -11,6 +11,11 @@
 
 ### Added
 
+- `Policy`, `Quota`, `Charge` and `Limiter.Bind` separate fixed policies from
+  complete per-attempt charge sets across all drivers. `BoundLimiter` provides
+  `Allow`, `AllowOnce` and scope-wide `Lookup`; charge order is normalized to
+  binding order. Existing rule-based APIs and driver protocols remain compatible.
+
 - Public `Driver`, `Admission`, `LookupRequest`, `Scope`, `Rule.Interval`, and a
   pure `Evaluate` transition for custom atomic persistence boundaries.
 - PostgreSQL driver with explicit schema setup, domain row locking, backend time,

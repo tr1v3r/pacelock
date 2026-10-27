@@ -40,10 +40,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	d, err := limiter.Allow(ctx,
-		pacelock.Rule{Name: "requests", Rate: 60, Period: time.Minute, Burst: 10, Cost: 1},
-		pacelock.Rule{Name: "input-tokens", Rate: 60000, Period: time.Minute, Burst: 12000, Cost: 1500},
+	bound, err := limiter.Bind(
+		pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
+		pacelock.Quota{Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
 	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	d, err := bound.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1}, pacelock.Charge{Name: "input-tokens", Cost: 1500})
 	if err != nil {
 		log.Printf("admission failed: outcome=%s error=%v", pacelock.OutcomeOf(err), err)
 		return
