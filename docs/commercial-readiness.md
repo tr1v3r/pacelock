@@ -5,8 +5,9 @@ For PostgreSQL deployment limits, see [its guide](../driver/postgres/README.md).
 
 Scope: the existing immediate, known-cost, weighted multidimensional limiter.
 This work does not turn the limiter into a scheduler, concurrency owner, billing
-ledger, or output-token reservation system. Existing `New`, `Allow`, `Rule`,
-`Decision`, and quota key encoding remain compatible.
+ledger, or output-token reservation system. Dynamic-default admission is a breaking
+pre-v1 API migration; see [compatibility](compatibility.md). Quota wire encoding and
+accounting semantics are preserved.
 
 ## Contracts fixed before implementation
 
@@ -17,12 +18,13 @@ ledger, or output-token reservation system. Existing `New`, `Allow`, `Rule`,
   There is no implicit refund, queue, background worker, or automatic retry.
 - Invalid inputs and pre-dispatch cancellation do not charge. Errors expose
   whether the admission outcome is unknown; callers can still use errors.Is/As.
-- `AllowOnce(ctx, id, retention, rules...)` caches both successful and denied
+- `AllowOnce(ctx, id, retention, charges...)` caches both successful and denied
   decisions in the same slot as quotas. An ID identifies one admission, not an
   entire business request across multiple upstream attempts. Retention is an
   explicit whole-millisecond duration between 1 ms and 24 h. It is not extended
-  by reads or replays. Rule order is significant, and effective policy, costs,
-  names and retention are bound to the ID. A mismatch never charges.
+  by reads or replays. Order is significant: dynamic IDs bind names/costs and retention, not policy
+  versions; static IDs also bind effective policies with their preserved encoding.
+  Dynamic/static modes have distinct fingerprints. A mismatch never charges.
 - New Redis operations commit complete results without Pending. Legacy Pending
   remains unknown and cannot be replayed into another debit while retained.
   Logical expiry is independent of bounded application-scheduled cleanup.

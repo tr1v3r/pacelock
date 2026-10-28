@@ -25,7 +25,7 @@ type Driver struct{ db *sql.DB }
 
 var _ pacelock.Driver = (*Driver)(nil)
 var _ pacelock.PolicyDriver = (*Driver)(nil)
-var _ pacelock.ManagedDriver = (*Driver)(nil)
+var _ pacelock.StaticDriver = (*Driver)(nil)
 
 //go:embed schema.sql
 var schema string
@@ -107,24 +107,24 @@ func fail(op string, outcome pacelock.Outcome, err error) error {
 	return &pacelock.Error{Op: op, Outcome: outcome, Err: err}
 }
 
-// Admit validates, locks the domain, samples backend time once, and calculates the
+// AdmitStatic validates, locks the domain, samples backend time once, and calculates the
 // shared GCRA transition. Every quota and optional receipt commits in one transaction.
 // Before Commit is sent, failures are NotCharged; any Commit error is conservatively
 // Unknown. A prior ambiguous invocation remains ambiguous even after a later error.
-func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+func (d *Driver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Receipt, error) {
 	return d.admit(ctx, a, nil)
 }
 
-// AdmitManaged resolves authoritative policies after locking and receipt replay.
+// Admit resolves authoritative policies after locking and receipt replay.
 // Callers provide only quota names and costs, never cached policy snapshots.
-func (d *Driver) AdmitManaged(ctx context.Context, a pacelock.ManagedAdmission) (pacelock.Receipt, error) {
-	return d.admit(ctx, pacelock.Admission{Scope: a.Scope, ID: a.ID, Retention: a.Retention}, &a)
+func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+	return d.admit(ctx, pacelock.StaticAdmission{Scope: a.Scope, ID: a.ID, Retention: a.Retention}, &a)
 }
 
-func (d *Driver) admit(ctx context.Context, a pacelock.Admission, managed *pacelock.ManagedAdmission) (pacelock.Receipt, error) {
-	op := "allow"
+func (d *Driver) admit(ctx context.Context, a pacelock.StaticAdmission, managed *pacelock.Admission) (pacelock.Receipt, error) {
+	op := "allow_static"
 	if managed != nil {
-		op = "allow_managed"
+		op = "allow"
 	}
 	if a.ID != "" {
 		op += "_once"

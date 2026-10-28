@@ -16,15 +16,15 @@ func BenchmarkBoundAdmission(b *testing.B) {
 				driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 				l, _ := New(driver, "benchmark", "bound")
 				quotas := make([]Quota, n)
-				charges := make([]Charge, n)
+				charges := make([]StaticCharge, n)
 				rules := make([]Rule, n)
 				for i := range quotas {
 					name := fmt.Sprint(i)
 					quotas[i] = Quota{Name: name, Policy: Policy{Rate: 1000, Period: time.Second, Burst: 1000}}
-					charges[n-1-i] = quotas[i].Charge(1)
+					charges[n-1-i] = quotas[i].StaticCharge(1)
 					rules[i] = Rule{Name: name, Policy: Policy{Rate: 1000, Period: time.Second, Burst: 1000}, Cost: 1}
 				}
-				bound, err := l.Bind(quotas...)
+				bound, err := l.BindStatic(quotas...)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -35,7 +35,7 @@ func BenchmarkBoundAdmission(b *testing.B) {
 					var d Decision
 					var err error
 					if mode == "rules" {
-						d, err = l.Allow(ctx, rules...)
+						d, err = l.AllowStatic(ctx, rules...)
 					} else {
 						d, err = bound.Allow(ctx, charges...)
 					}

@@ -140,12 +140,12 @@ func quota(rev, rate, burst int64) pacelock.Quota {
 func update(q ...pacelock.Quota) pacelock.PolicyUpdate {
 	return pacelock.PolicyUpdate{Scope: testScope, Quotas: q}
 }
-func managed(cost int64) pacelock.ManagedAdmission {
-	return pacelock.ManagedAdmission{Scope: testScope, Charges: []pacelock.NamedCharge{{Name: "requests", Cost: cost}}}
+func managed(cost int64) pacelock.Admission {
+	return pacelock.Admission{Scope: testScope, Charges: []pacelock.Charge{{Name: "requests", Cost: cost}}}
 }
-func static() pacelock.Admission {
+func static() pacelock.StaticAdmission {
 	q := quota(0, 1, 3)
-	return pacelock.Admission{Scope: testScope, Rules: []pacelock.Rule{{Name: q.Name, Policy: q.Policy, Cost: 1}}}
+	return pacelock.StaticAdmission{Scope: testScope, Rules: []pacelock.Rule{{Name: q.Name, Policy: q.Policy, Cost: 1}}}
 }
 func policyWrite(t *testing.T, want pacelock.QuotaState) sqlStep {
 	return sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies", check: func(a []driver.NamedValue) {
@@ -235,7 +235,7 @@ func TestCancelledBeforeDispatch(t *testing.T) {
 	if err := d.UpdatePolicies(ctx, update(quota(1, 1, 1))); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if _, err := d.AdmitManaged(ctx, managed(1)); !errors.Is(err, context.Canceled) {
+	if _, err := d.Admit(ctx, managed(1)); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 }
@@ -258,7 +258,7 @@ func TestManagedAdmissionUsesCurrentPolicyAndOriginalDebt(t *testing.T) {
 				steps = append(steps, debtWrite(t, want))
 			}
 			steps = append(steps, sqlStep{kind: "commit"})
-			r, err := scripted(t, steps).AdmitManaged(context.Background(), managed(1))
+			r, err := scripted(t, steps).Admit(context.Background(), managed(1))
 			if err != nil || r.Decision.Allowed != tc.allowed {
 				t.Fatalf("got %+v %v", r, err)
 			}
@@ -283,21 +283,52 @@ func TestManagedAdmissionFailuresDoNotWrite(t *testing.T) {
 			a.ID = "new"
 			a.Retention = time.Hour
 			steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions"}, policyRead(tc.p), debtRead(tc.debt), sqlStep{kind: "rollback"})
-			_, err := scripted(t, steps).AdmitManaged(context.Background(), a)
+			_, err := scripted(t, steps).Admit(context.Background(), a)
 			if !errors.Is(err, tc.want) || pacelock.OutcomeOf(err) != pacelock.NotCharged || errors.Is(err, pacelock.ErrBackend) {
 				t.Fatalf("got %v", err)
 			}
 		})
 	}
 }
+func TestAdmissionOperationNames(t *testing.T) {
+	for _, once := range []bool{false, true} {
+		for _, dynamic := range []bool{false, true} {
+			op := "allow_static"
+			if dynamic {
+				op = "allow"
+			}
+			a := pacelock.StaticAdmission{Scope: testScope}
+			m := pacelock.Admission{Scope: testScope}
+			if once {
+				op += "_once"
+				a.ID, m.ID = "attempt", "attempt"
+				a.Retention, m.Retention = time.Hour, time.Hour
+			}
+			t.Run(op, func(t *testing.T) {
+				d := scripted(t, nil)
+				var err error
+				if dynamic {
+					_, err = d.Admit(context.Background(), m)
+				} else {
+					_, err = d.AdmitStatic(context.Background(), a)
+				}
+				var detail *pacelock.Error
+				if !errors.Is(err, pacelock.ErrInvalid) || !errors.As(err, &detail) || detail.Op != op || detail.Outcome != pacelock.NotCharged {
+					t.Fatalf("got %v, want %s / NotCharged", err, op)
+				}
+			})
+		}
+	}
+}
+
 func TestStaticCannotBypassPolicy(t *testing.T) {
 	a := static()
 	steps := append(lockedSteps(), policyRead(pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}), sqlStep{kind: "rollback"})
-	if _, err := scripted(t, steps).Admit(context.Background(), a); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+	if _, err := scripted(t, steps).AdmitStatic(context.Background(), a); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 		t.Fatal(err)
 	}
 	a.Rules[0].Policy.Revision = 1
-	if _, err := scripted(t, nil).Admit(context.Background(), a); !errors.Is(err, pacelock.ErrInvalid) {
+	if _, err := scripted(t, nil).AdmitStatic(context.Background(), a); !errors.Is(err, pacelock.ErrInvalid) {
 		t.Fatal(err)
 	}
 }
@@ -328,9 +359,9 @@ func TestReceiptReplayBeforeConfiguration(t *testing.T) {
 				var r pacelock.Receipt
 				var err error
 				if isManaged {
-					r, err = d.AdmitManaged(context.Background(), m)
+					r, err = d.Admit(context.Background(), m)
 				} else {
-					r, err = d.Admit(context.Background(), a)
+					r, err = d.AdmitStatic(context.Background(), a)
 				}
 				if conflict {
 					if !errors.Is(err, pacelock.ErrConflict) {
@@ -361,7 +392,7 @@ func TestManagedReceiptCommitsWithDebt(t *testing.T) {
 				commitErr = errors.New("lost commit response")
 			}
 			steps = append(steps, sqlStep{kind: "commit", err: commitErr})
-			r, err := scripted(t, steps).AdmitManaged(context.Background(), a)
+			r, err := scripted(t, steps).Admit(context.Background(), a)
 			if commitFails {
 				if !errors.Is(err, commitErr) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 					t.Fatalf("got %v", err)

@@ -1,5 +1,7 @@
 # Durable application admission example
 
+This example explicitly opts into static caller-policy admission (`AllowStaticOnce` with `Rule`) for version-pinned policies and durable recovery. It is not the default dynamic quick start: publish `UpdatePolicies`, then submit name/cost `Charge` values for that path.
+
 This example adds application-owned recovery around Pacelock. It uses only the
 existing module dependencies. It is a single-host, single-attempt journal demo,
 not an SDK execution API or a distributed transaction.

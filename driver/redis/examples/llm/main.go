@@ -24,16 +24,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	rpm := pacelock.Quota{Name: "model-a:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}}
-	tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}}
-	// Bind copies the fixed quota set; each charge captures its quota by value.
-	bound, err := limiter.Bind(rpm, tokens)
-	if err != nil {
-		log.Fatal(err)
-	}
+	rpm := pacelock.Quota{Name: "model-a:rpm", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10}}
+	tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	d, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
+	// In production a control-plane publisher supplies durable policy revisions.
+	if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil {
+		log.Fatal(err)
+	}
+	d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 	if err != nil {
 		log.Fatal(err)
 	}

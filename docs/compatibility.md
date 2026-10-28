@@ -1,5 +1,28 @@
 # Compatibility and migration
 
+## Dynamic-default API migration (breaking pre-v1)
+
+- Default `Allow(ctx, ...Charge{Name, Cost})` and `AllowOnce(ctx, id, retention, ...Charge)`
+  resolve backend policies. First publish `Quota{Name, Policy{Revision: 1, ...}}` through
+  `UpdatePolicies`; request nodes do not refresh policies or carry revisions.
+- Former dynamic `AllowManaged` / `AllowManagedOnce` become `Allow` / `AllowOnce`;
+  `NamedCharge` becomes public name/cost `Charge`. The old names are removed.
+- Former static `Allow` / `AllowOnce` become `AllowStatic` / `AllowStaticOnce`;
+  `Wait` becomes `WaitStatic`. `Rule` remains the low-level caller-policy value.
+- `Bind` becomes `BindStatic` and returns `StaticLimiter` (formerly `BoundLimiter`).
+  Its methods remain `Allow` / `AllowOnce` / `Lookup`; `q.Charge(cost)` becomes
+  `q.StaticCharge(cost)` returning encapsulated `StaticCharge`. Static revisions are 0.
+- Dynamic `Driver.Admit(Admission)` is mandatory (`ManagedAdmission` → `Admission`).
+  Static support moves to optional `StaticDriver.AdmitStatic(StaticAdmission)`;
+  `PolicyDriver` is unchanged and `Lookup` is shared. Update custom drivers too.
+- There is no default/dynamic Wait or automatic policy watcher. Pure `Evaluate` and
+  `EvaluateManaged` remain available; existing wire formats and debt are unchanged.
+
+For PostgreSQL: **Migrate → upgrade all binaries → activate configuration**. Run
+`Migrate` before upgraded binaries serve even static traffic. For either backend,
+upgrade every writer/maintenance process before publishing dynamic policies; old
+writers can bypass configuration. Mixed activation and unconverted rollback are unsupported.
+
 ## Driver constructor migration
 
 This pre-v1 change replaces `pacelock.New(client, ns, domain)` with
@@ -32,8 +55,8 @@ Redis execution, routing and error semantics. Client ownership remains with the
 caller. No background goroutines, queues, implicit retry loop or package-global
 quota configuration are introduced.
 
-The public API remains pre-v1. Admission method signatures, `Rule`/`Decision`
-layouts and errors.Is behavior remain. Redis key names are unchanged; internal
+The public API remains pre-v1. Admission signatures and the Driver boundary change as described above;
+`Rule`/`Decision` layouts and errors.Is matching remain. Redis key names are unchanged; internal
 values now use logical expiry and a single MSET commit. `NewWithOptions` is separate to avoid changing the
 function type of `New`. Typed-nil clients and nil contexts now return `ErrInvalid`.
 Check errors with `errors.Is/As`, not string matching; wrapper text has changed.
@@ -72,15 +95,18 @@ pacelock:v1:{domain_digest}:attempt:sha256(admission_id)
 New values are versioned independently of the historical key prefix:
 
 ```text
-Q2|TAT_microseconds:effective_interval_microseconds:Burst
+Q2|TAT_microseconds:effective_interval_microseconds:Burst (static debt)
+D3|TAT_microseconds (dynamic debt)
+P3|effective_interval_microseconds:Burst:Revision (permanent dynamic configuration)
 E2|expires_at_microseconds|C1|fingerprint|{"names":[...],"values":[allowed,retry_us,blocked_flags...]}
 ```
 
 Quota expiry equals TAT; complete-result expiry equals admission Redis time plus
 retention. MSET clears native TTLs, so values remain physically present until
 explicit bounded cleanup. Replays and lookups do not change either deadline.
-Fingerprints still bind ordered effective rules and retention using the v1
-fingerprint encoding; only persistence envelopes change.
+Static fingerprints still bind ordered effective rules and retention using the v1
+encoding. Dynamic fingerprints bind ordered names/costs and retention, not revisions,
+and preserve the dynamic/static discriminator. Existing receipt encoding is unchanged.
 
 The new reader also accepts legacy `TAT:interval:Burst`, `C1|...` and `P1|...`.
 Legacy quotas retain their debt and active-policy check until expiry/replacement;
@@ -104,7 +130,16 @@ for cleanup cursor semantics, ACLs and operational limits.
 
 ## Policy changes
 
-An active policy mismatch rejects before quota mutation. Coordinate policy changes
+Default dynamic policy changes use `UpdatePolicies` with monotonically increasing
+positive revisions (maximum 9007199254740991). Equivalent same-revision publications
+are read-only successes; stale/conflicting publications return `ErrPolicyMismatch`.
+Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening.
+`Rate=0` pauses; resume or roll back parameters at a higher revision. Retained
+receipts replay before current configuration checks. Missing policy fails closed,
+and static admission cannot bypass configured policies.
+
+For the explicit Revision-0 static alternative, active policy mismatch rejects
+before quota mutation. Coordinate static policy changes
 across callers. Either wait for the old quota to replenish and expire while
 coordinating traffic, or design an explicit debt-preserving migration outside this
 SDK. Renaming a quota/domain creates fresh capacity; deleting keys silently resets

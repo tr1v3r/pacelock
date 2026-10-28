@@ -24,7 +24,7 @@ func TestManagedTransitions(t *testing.T) {
 	const now int64 = 10000000
 	old := QuotaState{TAT: now + 800000, Interval: 100000, Burst: 10, ExpiresAt: now + 800000}
 	debt := []QuotaState{old}
-	charges := []NamedCharge{{Name: "requests", Cost: 1}}
+	charges := []Charge{{Name: "requests", Cost: 1}}
 	policies := configs(t, managedQuota(1, 20, 2))
 	d, next, err := EvaluateManaged(now, charges, policies, debt)
 	if err != nil || d.Allowed || next != nil || d.RetryAfter != 750*time.Millisecond {
@@ -93,17 +93,17 @@ func TestManagedValidation(t *testing.T) {
 	if _, err := ApplyPolicies(100, []Quota{q}, []QuotaState{{Revision: 1, Interval: 0, Burst: 10, TAT: 100, ExpiresAt: 100}}); !errors.Is(err, ErrState) {
 		t.Fatal("debt accepted as config", err)
 	}
-	a := ManagedAdmission{Scope: Scope{Namespace: "ns", Domain: "d"}, Charges: []NamedCharge{{Name: "q", Cost: 1}}}
+	a := Admission{Scope: Scope{Namespace: "ns", Domain: "d"}, Charges: []Charge{{Name: "q", Cost: 1}}}
 	if err := a.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range [][]NamedCharge{nil, {{Name: "", Cost: 1}}, {{Name: "q", Cost: 0}}, {{Name: "q", Cost: MaxHorizon.Microseconds() + 1}}, {{Name: "q", Cost: 1}, {Name: "q", Cost: 2}}} {
+	for _, bad := range [][]Charge{nil, {{Name: "", Cost: 1}}, {{Name: "q", Cost: 0}}, {{Name: "q", Cost: MaxHorizon.Microseconds() + 1}}, {{Name: "q", Cost: 1}, {Name: "q", Cost: 2}}} {
 		a.Charges = bad
 		if err := a.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Fatal(bad, err)
 		}
 	}
-	a.Charges = []NamedCharge{{Name: "q", Cost: 1}}
+	a.Charges = []Charge{{Name: "q", Cost: 1}}
 	a.Retention = time.Second
 	if err := a.Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestManagedValidation(t *testing.T) {
 }
 
 func TestManagedEvaluationErrors(t *testing.T) {
-	charges := []NamedCharge{{Name: "requests", Cost: 2}}
+	charges := []Charge{{Name: "requests", Cost: 2}}
 	good := configs(t, managedQuota(1, 10, 1))
 	if _, next, err := EvaluateManaged(10000000, charges, good, []QuotaState{{}}); !errors.Is(err, ErrInvalid) || next != nil {
 		t.Fatal(next, err)
@@ -150,7 +150,7 @@ type managedTestDriver struct {
 	policies       map[string]QuotaState
 	debts          map[string]QuotaState
 	managedCalls   int
-	managedRequest ManagedAdmission
+	managedRequest Admission
 	override       *Receipt
 }
 
@@ -171,7 +171,7 @@ func (d *managedTestDriver) UpdatePolicies(ctx context.Context, u PolicyUpdate) 
 	}
 	return nil
 }
-func (d *managedTestDriver) AdmitManaged(_ context.Context, a ManagedAdmission) (Receipt, error) {
+func (d *managedTestDriver) Admit(_ context.Context, a Admission) (Receipt, error) {
 	d.managedCalls++
 	d.managedRequest = a
 	if d.override != nil {
@@ -185,7 +185,7 @@ func (d *managedTestDriver) AdmitManaged(_ context.Context, a ManagedAdmission) 
 	}
 	decision, next, err := EvaluateManaged(time.Now().UnixMicro(), a.Charges, configs, debts)
 	if err != nil {
-		return Receipt{}, failure("allow_managed", NotCharged, err)
+		return Receipt{}, failure("allow", NotCharged, err)
 	}
 	if decision.Allowed {
 		for i, c := range a.Charges {
@@ -200,14 +200,14 @@ func TestManagedFacade(t *testing.T) {
 	d := &managedTestDriver{policies: map[string]QuotaState{}, debts: map[string]QuotaState{}}
 	l, _ := New(d, "ns", "d")
 	q := managedQuota(1, 0, 10)
-	c := NamedCharge{Name: q.Name, Cost: 1}
-	if _, err := l.AllowManaged(ctx, c); !errors.Is(err, ErrPolicyMissing) {
+	c := Charge{Name: q.Name, Cost: 1}
+	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrPolicyMissing) {
 		t.Fatal(err)
 	}
 	if err := l.UpdatePolicies(ctx, q); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.AllowManaged(ctx, c); !errors.Is(err, ErrPaused) || OutcomeOf(err) != NotCharged {
+	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrPaused) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	q.Policy.Revision++
@@ -215,40 +215,40 @@ func TestManagedFacade(t *testing.T) {
 	if err := l.UpdatePolicies(ctx, q); err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := l.AllowManaged(ctx, c); err != nil || !decision.Allowed {
+	if decision, err := l.Allow(ctx, c); err != nil || !decision.Allowed {
 		t.Fatal(decision, err)
 	}
-	if _, err := l.Allow(ctx, q.rule(1)); !errors.Is(err, ErrInvalid) || d.calls != 0 {
+	if _, err := l.AllowStatic(ctx, q.rule(1)); !errors.Is(err, ErrInvalid) || d.calls != 0 {
 		t.Fatal(err)
 	}
-	if _, err := l.Bind(q); !errors.Is(err, ErrInvalid) {
+	if _, err := l.BindStatic(q); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := l.AllowManagedOnce(ctx, "", time.Minute, c); !errors.Is(err, ErrInvalid) {
+	if _, err := l.AllowOnce(ctx, "", time.Minute, c); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	count := d.managedCalls
-	if _, err := l.AllowManaged(canceled, c); !errors.Is(err, context.Canceled) || d.managedCalls != count {
+	if _, err := l.Allow(canceled, c); !errors.Is(err, context.Canceled) || d.managedCalls != count {
 		t.Fatal(err)
 	}
 	if err := l.UpdatePolicies(canceled, q); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	d.override = &Receipt{Decision: Decision{Allowed: true}, Replayed: true}
-	if _, err := l.AllowManaged(ctx, c); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 		t.Fatal(err)
 	}
-	if r, err := l.AllowManagedOnce(ctx, "id", time.Minute, c); err != nil || !r.Replayed || d.managedRequest.ID != "id" {
+	if r, err := l.AllowOnce(ctx, "id", time.Minute, c); err != nil || !r.Replayed || d.managedRequest.ID != "id" {
 		t.Fatal(r, err)
 	}
 	d.override = &Receipt{Decision: Decision{Allowed: false}}
-	if _, err := l.AllowManaged(ctx, c); !errors.Is(err, ErrState) {
+	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 	unsupported, _ := New(&testDriver{}, "ns", "d")
-	if _, err := unsupported.AllowManaged(ctx, c); !errors.Is(err, ErrUnsupported) {
+	if _, err := unsupported.Allow(ctx, c); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
 	}
 	if err := unsupported.UpdatePolicies(ctx, q); !errors.Is(err, ErrUnsupported) {
@@ -263,24 +263,24 @@ func TestManagedObserverReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := NamedCharge{Name: "q", Cost: 1}
-	if _, err = l.AllowManagedOnce(context.Background(), "id", time.Minute, c); err != nil {
+	c := Charge{Name: "q", Cost: 1}
+	if _, err = l.AllowOnce(context.Background(), "id", time.Minute, c); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Operation != "allow_managed_once" || !events[0].Replayed || events[0].Result != "allowed" {
+	if len(events) != 1 || events[0].Operation != "allow_once" || !events[0].Replayed || events[0].Result != "allowed" {
 		t.Fatal(events)
 	}
 	d.override.Replayed = false
-	if _, err = l.AllowManaged(context.Background(), c); err != nil {
+	if _, err = l.Allow(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[1].Operation != "allow_managed" || events[1].Replayed || events[1].RuleCount != 1 {
+	if len(events) != 2 || events[1].Operation != "allow" || events[1].Replayed || events[1].RuleCount != 1 {
 		t.Fatal(events)
 	}
 }
 
 func TestManagedFingerprint(t *testing.T) {
-	a := ManagedAdmission{Charges: []NamedCharge{{Name: "q", Cost: 1}}, Retention: time.Minute}
+	a := Admission{Charges: []Charge{{Name: "q", Cost: 1}}, Retention: time.Minute}
 	before := a.Fingerprint()
 	a.Charges[0].Cost++
 	if a.Fingerprint() == before {
@@ -292,7 +292,7 @@ func TestManagedFingerprint(t *testing.T) {
 	if a.Fingerprint() != before {
 		t.Fatal("identity should select record, not fingerprint")
 	}
-	static := Admission{Rules: []Rule{{Name: "q", Cost: 1, Policy: Policy{Rate: 1, Period: time.Second, Burst: 1}}}, Retention: time.Minute}
+	static := StaticAdmission{Rules: []Rule{{Name: "q", Cost: 1, Policy: Policy{Rate: 1, Period: time.Second, Burst: 1}}}, Retention: time.Minute}
 	if static.Fingerprint() == before {
 		t.Fatal("missing API discriminator")
 	}

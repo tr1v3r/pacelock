@@ -5,6 +5,18 @@ Core Driver contracts are documented [separately](driver.md).
 
 ## Before production traffic
 
+Default admission is dynamic: publish trusted `Quota` policies with positive
+revisions before sending `Charge{Name, Cost}` requests. Upgrade every writer and
+maintenance process before activation; run PostgreSQL `Migrate` before upgraded
+binaries handle even static traffic. Static opt-in uses `AllowStatic` /
+`AllowStaticOnce` / `WaitStatic` or `BindStatic`. There is no dynamic Wait or SDK
+configuration watcher. Publication/polling belongs to the application.
+
+Keep configuration/revision fences permanent: `Prune` never deletes them. Updates
+preserve absolute TAT, even above a reduced burst; never rename/delete state to
+reset debt. Pause with `Rate=0`, resume at a higher revision. On uncertain
+publication explicitly retry the same revision/policy; do not blindly retry Allow.
+
 1. Define the quota contract: units, replenishment rate, instantaneous burst,
    provider window semantics and account/model/tenant rule coverage. GCRA does not
    exactly reproduce arbitrary fixed/sliding windows or provider token accounting.

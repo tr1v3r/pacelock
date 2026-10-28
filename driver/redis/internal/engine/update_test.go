@@ -15,8 +15,8 @@ import (
 )
 
 func quotaOf(r Rule) pacelock.Quota { return pacelock.Quota{Name: r.Name, Policy: r.Policy} }
-func managedRequest(name string, cost int64) pacelock.ManagedAdmission {
-	return pacelock.ManagedAdmission{Scope: pacelock.Scope{Namespace: "test", Domain: "test"}, Charges: []pacelock.NamedCharge{{Name: name, Cost: cost}}}
+func managedRequest(name string, cost int64) pacelock.Admission {
+	return pacelock.Admission{Scope: pacelock.Scope{Namespace: "test", Domain: "test"}, Charges: []pacelock.Charge{{Name: name, Cost: cost}}}
 }
 
 func TestRedisManagedPolicies(t *testing.T) {

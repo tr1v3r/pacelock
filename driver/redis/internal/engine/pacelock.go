@@ -124,27 +124,27 @@ func interval(r Rule) (int64, error) {
 // A timeout or cancellation after dispatch can leave the debit outcome unknown.
 // On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow", len(rules))
+	finish := l.observe(ctx, "allow_static", len(rules))
 	defer func() { finish(decision, false, err) }()
 	if err := l.ready(ctx); err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
+		return Decision{}, failure("allow_static", NotCharged, err)
 	}
 	keys, args, err := l.prepare(rules)
 	if err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
+		return Decision{}, failure("allow_static", NotCharged, err)
 	}
 	keys = l.withPolicyKeys(keys, rules)
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
-		return Decision{}, scriptFailure("allow", err)
+		return Decision{}, scriptFailure("allow_static", err)
 	}
 	values, err := cmd.Int64Slice()
 	if err != nil {
-		return Decision{}, failure("allow", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
+		return Decision{}, failure("allow_static", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
 	}
 	d, err := decodeDecision(values, namesOf(rules))
 	if err != nil {
-		return Decision{}, failure("allow", Unknown, err)
+		return Decision{}, failure("allow_static", Unknown, err)
 	}
 	return d, nil
 }

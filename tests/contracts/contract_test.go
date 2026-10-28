@@ -96,7 +96,7 @@ func rule(name string, burst, cost int64) pacelock.Rule {
 }
 func mustAllow(t *testing.T, l *pacelock.Limiter, rules ...pacelock.Rule) {
 	t.Helper()
-	d, err := l.Allow(context.Background(), rules...)
+	d, err := l.AllowStatic(context.Background(), rules...)
 	if err != nil || !d.Allowed {
 		t.Fatalf("allow: %+v %v", d, err)
 	}
@@ -108,7 +108,7 @@ func TestDriverContract(t *testing.T) {
 			t.Run("joint denial is uncharged", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("blocked", 1, 1))
-				d, err := l.Allow(context.Background(), rule("fresh", 5, 2), rule("blocked", 1, 1))
+				d, err := l.AllowStatic(context.Background(), rule("fresh", 5, 2), rule("blocked", 1, 1))
 				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"blocked"}) || d.RetryAfter <= 0 {
 					t.Fatal(d, err)
 				}
@@ -121,7 +121,7 @@ func TestDriverContract(t *testing.T) {
 				fast.Name = "fast"
 				fast.Policy.Period = 10 * time.Second
 				mustAllow(t, l, slow, fast)
-				d, err := l.Allow(context.Background(), fast, slow)
+				d, err := l.AllowStatic(context.Background(), fast, slow)
 				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"fast", "slow"}) || d.RetryAfter < 50*time.Second || d.RetryAfter > time.Minute {
 					t.Fatal(d, err)
 				}
@@ -138,7 +138,7 @@ func TestDriverContract(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("q", 5, 1))
 				changed := rule("q", 6, 1)
-				if _, err := l.Allow(context.Background(), rule("fresh", 1, 1), changed); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if _, err := l.AllowStatic(context.Background(), rule("fresh", 1, 1), changed); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				mustAllow(t, l, rule("fresh", 1, 1))
@@ -156,7 +156,7 @@ func TestDriverContract(t *testing.T) {
 						<-start
 						ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 						defer cancel()
-						d, err := limiters[i%2].Allow(ctx, rule("q", 31, 3))
+						d, err := limiters[i%2].AllowStatic(ctx, rule("q", 31, 3))
 						if err != nil {
 							t.Error(err)
 						} else if d.Allowed {
@@ -180,7 +180,7 @@ func TestDriverContract(t *testing.T) {
 					wg.Add(1)
 					go func(i int) {
 						defer wg.Done()
-						r, err := ls[i%2].AllowOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
+						r, err := ls[i%2].AllowStaticOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
 						if err != nil || !r.Allowed {
 							t.Errorf("%+v %v", r, err)
 						} else if !r.Replayed {
@@ -196,10 +196,10 @@ func TestDriverContract(t *testing.T) {
 				if err != nil || !found || !d.Allowed {
 					t.Fatal(d, found, err)
 				}
-				if _, err := ls[1].AllowOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
+				if _, err := ls[1].AllowStaticOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
 					t.Fatal(err)
 				}
-				d, err = ls[0].Allow(context.Background(), rule("q", 1, 1))
+				d, err = ls[0].AllowStatic(context.Background(), rule("q", 1, 1))
 				if err != nil || d.Allowed {
 					t.Fatal(d, err)
 				}
@@ -207,11 +207,11 @@ func TestDriverContract(t *testing.T) {
 			t.Run("denial replay preserves original wait", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("q", 1, 1))
-				first, err := l.AllowOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				first, err := l.AllowStaticOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
 				if err != nil || first.Allowed {
 					t.Fatal(first, err)
 				}
-				again, err := l.AllowOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				again, err := l.AllowStaticOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
 				if err != nil || !again.Replayed || !reflect.DeepEqual(first.Decision, again.Decision) {
 					t.Fatal(first, again, err)
 				}
@@ -223,16 +223,16 @@ func TestDriverContract(t *testing.T) {
 			t.Run("ordered and equivalent policy fingerprints", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				rules := []pacelock.Rule{rule("a", 3, 1), rule("b", 3, 1)}
-				if _, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil {
+				if _, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); err != nil {
 					t.Fatal(err)
 				}
 				rules[0].Policy.Rate = 60
 				rules[0].Policy.Period = time.Hour
-				if r, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
+				if r, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
 					t.Fatal(r, err)
 				}
 				rules[0], rules[1] = rules[1], rules[0]
-				if _, err := l.AllowOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
+				if _, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
 					t.Fatal(err)
 				}
 			})
@@ -240,11 +240,11 @@ func TestDriverContract(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				r := rule("q", 1, 1)
 				r.Policy.Period = 20 * time.Millisecond
-				if _, err := l.AllowOnce(context.Background(), "short", time.Second, r); err != nil {
+				if _, err := l.AllowStaticOnce(context.Background(), "short", time.Second, r); err != nil {
 					t.Fatal(err)
 				}
 				time.Sleep(600 * time.Millisecond)
-				replay, err := l.AllowOnce(context.Background(), "short", time.Second, r)
+				replay, err := l.AllowStaticOnce(context.Background(), "short", time.Second, r)
 				if err != nil || !replay.Replayed {
 					t.Fatal(replay, err)
 				}
@@ -263,7 +263,7 @@ func TestDriverContract(t *testing.T) {
 				}
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()
-				if _, err := l.Allow(ctx, rules...); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if _, err := l.AllowStatic(ctx, rules...); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				mustAllow(t, l, rules...)
@@ -279,8 +279,8 @@ type cancelOnDenialDriver struct {
 	cancel context.CancelFunc
 }
 
-func (d cancelOnDenialDriver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
-	r, err := d.Driver.Admit(ctx, a)
+func (d cancelOnDenialDriver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Receipt, error) {
+	r, err := d.Driver.(pacelock.StaticDriver).AdmitStatic(ctx, a)
 	if err == nil && !r.Allowed {
 		d.cancel()
 	}
@@ -299,13 +299,13 @@ func TestWaitDriverContract(t *testing.T) {
 				fresh := rule("fresh", 5, 3)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if err := l.Wait(ctx, fresh, slow); err != nil {
+				if err := l.WaitStatic(ctx, fresh, slow); err != nil {
 					t.Fatal(err)
 				}
 				fresh.Cost = 2
 				mustAllow(t, l, fresh)
 				fresh.Cost = 1
-				decision, err := l.Allow(ctx, fresh)
+				decision, err := l.AllowStatic(ctx, fresh)
 				if err != nil || decision.Allowed {
 					t.Fatal("wait must charge fresh quota exactly once", decision, err)
 				}
@@ -322,7 +322,7 @@ func TestWaitDriverContract(t *testing.T) {
 				blocked := rule("blocked", 1, 1)
 				mustAllow(t, first, blocked)
 				fresh := rule("fresh", 5, 3)
-				if err := second.Wait(ctx, fresh, blocked); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if err := second.WaitStatic(ctx, fresh, blocked); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				fresh.Cost = fresh.Policy.Burst
@@ -344,7 +344,7 @@ func TestWaitDriverContract(t *testing.T) {
 					go func(i int) {
 						defer wg.Done()
 						<-start
-						errs <- ls[i%len(ls)].Wait(ctx, r)
+						errs <- ls[i%len(ls)].WaitStatic(ctx, r)
 					}(i)
 				}
 				close(start)

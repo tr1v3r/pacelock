@@ -9,12 +9,18 @@ Applications own the initialized go-redis Client/ClusterClient and close it.
 driver, err := redisdriver.New(client)
 if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
+if err != nil { return err }
+if err := limiter.UpdatePolicies(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
+    Revision: 1, Rate: 60, Period: time.Minute, Burst: 10,
+}}); err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
+// On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
 Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` and
 `"github.com/tr1v3r/pacelock"`. Construction performs no I/O or option mutation.
-One domain is one Cluster slot. Every caller must use matching scope, names and
-effective policies, and include every applicable quota in an admission.
+One domain is one Cluster slot. Every caller must use matching scope and names, and include every applicable
+quota in an admission. Backend configuration owns the current dynamic policies.
 
 ## Single-command commit and recovery
 
@@ -31,20 +37,7 @@ responses, remain `Unknown`. A lost post-commit response can be recovered using
 the complete retained result. This does not promise crash/failover durability or
 upstream execution deduplication. Never blindly retry ordinary `Allow` or refund.
 
-Define named `Quota` values such as `rpm` and `tokens`, then call
-`limiter.Bind(rpm, tokens)` to validate and copy the fixed quota set locally.
-Submit `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))`, or pass the same
-`...Charge` values to `bound.AllowOnce(ctx, id, retention, charges...)`.
-`q.Charge(cost)` captures a quota value snapshot and cost in private fields without
-validation or I/O. `Quota.Name` / `Policy` remain public; later mutation affects
-neither earlier charges nor bindings. Change policies by creating a new binding.
-Every call must charge all bound quotas exactly once; order is normalized to binding
-order. Each captured policy must be fully valid, with matching name, effective
-microsecond-rounded interval and burst; equivalent valid static policy expressions
-are accepted. Rule/Bind admission requires revision zero. Invalid, incomplete or mismatched charges fail locally with `ErrInvalid` /
-`NotCharged` before admission, not backend `ErrPolicyMismatch`. Existing Rule APIs,
-and the base Driver interface remain compatible; blocking admission still uses `limiter.Wait` with
-rules, not a bound wait method. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
 
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects. Ring is unsupported. Custom Scripters/hooks/factories/proxies must
@@ -53,9 +46,9 @@ and policy keys (plus optional receipt). During Cluster resharding, mixed/missin
 keys can yield `TRYAGAIN`; this remains a conservative `Unknown` transport error,
 never an implicit replay. Retry/recovery decisions belong to the caller.
 
-## Explicit managed policies
+## Default dynamic policies
 
-`Policy.Revision == 0` keeps static behavior. Opt in with positive, monotonically
+Dynamic admission is the default. Publish positive, monotonically
 increasing revisions and `limiter.UpdatePolicies(ctx, quotas...)` (or the driver's
 `UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`). Each batch
 is atomic with admission, using one final MSET and the same NoRetry transport.
@@ -66,17 +59,17 @@ a higher revision. `NotCharged` describes quota debit, not an assertion that an
 ambiguous update failed: transport/lost-reply failures remain `Unknown` and need
 an explicit same-revision retry if desired.
 
-The data plane passes names and costs only: `limiter.AllowManaged(ctx,
-pacelock.NamedCharge{Name: "rpm", Cost: 1})`, or `AllowManagedOnce(ctx, id,
-retention, charges...)`. The driver's optional `AdmitManaged` extension resolves
+The data plane passes names and costs only: `limiter.Allow(ctx,
+pacelock.Charge{Name: "rpm", Cost: 1})`, or `AllowOnce(ctx, id,
+retention, charges...)`. The driver's mandatory `Admit(Admission)` operation resolves
 current backend policies in the admission Lua call; callers do not refresh bindings
 or send revisions. Missing configuration returns `ErrPolicyMissing` / `NotCharged`.
-Static Rule/Bind calls reject positive revisions locally; static admission against a
+Static Rule/BindStatic calls reject positive revisions locally; static admission against a
 configured quota returns `ErrPolicyMismatch`, preventing bypass even after idle/prune.
 
 Managed `Rate=0` returns `ErrPaused` / `NotCharged` without debit or receipt write,
 even when cost exceeds the paused burst. Otherwise over-burst cost returns `ErrInvalid`.
-Resume with a higher revision; debt recovers naturally. There is no `WaitManaged`.
+Resume with a higher revision; debt recovers naturally. There is no dynamic Wait; only `WaitStatic` is provided.
 Receipts replay before current policy checks, including across updates and pauses.
 Their historical allowed result is **not permission to execute upstream again**.
 Managed fingerprints bind ordered names/costs and retention, not policy revisions;

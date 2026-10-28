@@ -43,7 +43,7 @@ func run() error {
 		return err
 	}
 	// This application node needs neither q.Policy nor its revision to admit work.
-	decision, err := limiter.AllowManaged(ctx, pacelock.NamedCharge{Name: "requests", Cost: 1})
+	decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
 	if err != nil {
 		return err
 	}

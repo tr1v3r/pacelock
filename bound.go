@@ -14,31 +14,31 @@ type Quota struct {
 	Policy Policy
 }
 
-// Charge captures a quota's name and policy together with its per-attempt cost.
-// Construct it with Quota.Charge. A zero Charge is invalid.
-type Charge struct {
+// StaticCharge captures a quota's name and policy together with its per-attempt cost.
+// Construct it with Quota.StaticCharge. A zero StaticCharge is invalid.
+type StaticCharge struct {
 	quota Quota
 	cost  int64
 }
 
-// Charge captures a value copy of q with the known consumption for one attempt.
-// It does not validate inputs or contact the backend. BoundLimiter.Allow and
+// StaticCharge captures a value copy of q with the known consumption for one attempt.
+// It does not validate inputs or contact the backend. StaticLimiter.Allow and
 // AllowOnce require a valid policy matching the binding's effective interval and
 // Burst, and a cost from 1 through Burst. Later changes to q do not affect the charge.
-func (q Quota) Charge(cost int64) Charge {
-	return Charge{quota: q, cost: cost}
+func (q Quota) StaticCharge(cost int64) StaticCharge {
+	return StaticCharge{quota: q, cost: cost}
 }
 
 func (q Quota) rule(cost int64) Rule {
 	return Rule{Name: q.Name, Policy: q.Policy, Cost: cost}
 }
 
-// BoundLimiter binds an immutable, ordered quota set to a Limiter. Every admission
+// StaticLimiter binds an immutable, ordered quota set to a Limiter. Every admission
 // must charge all bound quotas exactly once. Charges may arrive in any order;
 // decisions and idempotency fingerprints use binding order, not charge order.
 // It is safe for concurrent use under the parent Limiter's driver contract.
-// Construct it with Limiter.Bind; nil and zero receivers return ErrInvalid.
-type BoundLimiter struct {
+// Construct it with Limiter.BindStatic; nil and zero receivers return ErrInvalid.
+type StaticLimiter struct {
 	// limiter provides the driver, scope and observer used by every bound operation.
 	limiter *Limiter
 	// rules is a private copy of policies in binding order; per-call costs are copied.
@@ -47,12 +47,12 @@ type BoundLimiter struct {
 	index map[string]int
 }
 
-// Bind validates and copies 1..MaxRules uniquely named quotas without contacting
+// BindStatic validates and copies 1..MaxRules uniquely named quotas without contacting
 // the backend or registering policies there. Changing the input afterward has no effect.
 // Errors wrap ErrInvalid. Active backend policy conflicts are detected at admission.
 // Bind all applicable account/model/tenant quotas; omitted quotas cannot be inferred.
 // Create a new binding to change policies or select another tenant/model quota set.
-func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
+func (l *Limiter) BindStatic(quotas ...Quota) (*StaticLimiter, error) {
 	if err := l.ready(context.Background()); err != nil {
 		return nil, err
 	}
@@ -70,11 +70,11 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 	for i, r := range rules {
 		index[r.Name] = i
 	}
-	return &BoundLimiter{limiter: l, rules: rules, index: index}, nil
+	return &StaticLimiter{limiter: l, rules: rules, index: index}, nil
 }
 
 // Allow immediately checks and charges the entire bound quota set or denies
-// without charging any. Use Quota.Charge to supply each bound quota exactly once,
+// without charging any. Use Quota.StaticCharge to supply each bound quota exactly once,
 // in any order, with 0 < cost <= Burst. Each charge must carry a valid policy with
 // the same effective interval and Burst as its bound quota. Missing, duplicate,
 // unknown, mismatched or invalid charges return ErrInvalid with NotCharged before
@@ -82,48 +82,48 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 // It never waits for quota recovery or queues work; backend synchronization may
 // wait until ctx expires. After dispatch an error may have an Unknown debit
 // outcome. Ignore Decision on error and inspect OutcomeOf.
-func (b *BoundLimiter) Allow(ctx context.Context, charges ...Charge) (decision Decision, err error) {
+func (b *StaticLimiter) Allow(ctx context.Context, charges ...StaticCharge) (decision Decision, err error) {
 	l := b.parent()
-	finish := l.observe(ctx, "allow", len(charges))
+	finish := l.observe(ctx, "allow_static", len(charges))
 	defer func() { finish(decision, false, err) }()
 	rules, err := b.chargedRules(ctx, charges)
 	if err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
+		return Decision{}, failure("allow_static", NotCharged, err)
 	}
-	receipt, err := l.admit(ctx, "", 0, rules)
+	receipt, err := l.admitStatic(ctx, "", 0, rules)
 	return receipt.Decision, err
 }
 
 // AllowOnce adds the same bounded deduplication and recovery contract as
-// Limiter.AllowOnce. ID and retention have the same bounds. Charges are validated
-// as in BoundLimiter.Allow, and quota names must be valid UTF-8. Reordering charges
+// Limiter.AllowStaticOnce. ID and retention have the same bounds. Charges are validated
+// as in StaticLimiter.Allow, and quota names must be valid UTF-8. Reordering charges
 // does not change a retained attempt; binding order, effective policies, costs and
 // retention must still match. Retain the original binding for attempt recovery.
 // Both allows and denials are retained. Ignore Receipt on error and inspect OutcomeOf.
-func (b *BoundLimiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (receipt Receipt, err error) {
+func (b *StaticLimiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...StaticCharge) (receipt Receipt, err error) {
 	l := b.parent()
-	finish := l.observe(ctx, "allow_once", len(charges))
+	finish := l.observe(ctx, "allow_static_once", len(charges))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
 	rules, err := b.chargedRules(ctx, charges)
 	if err != nil {
-		return Receipt{}, failure("allow_once", NotCharged, err)
+		return Receipt{}, failure("allow_static_once", NotCharged, err)
 	}
 	if id == "" {
-		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
+		return Receipt{}, failure("allow_static_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return l.admit(ctx, id, retention, rules)
+	return l.admitStatic(ctx, id, retention, rules)
 }
 
 // Lookup queries a retained result in the parent's namespace/domain, even if it
-// was created through a different binding or Limiter.AllowOnce. It does not filter
+// was created through a different binding or Limiter.AllowStaticOnce. It does not filter
 // by this quota set, debit quotas or extend retention. A missing result does not
 // prove no debit. Use Decision only when err is nil and found is true.
-func (b *BoundLimiter) Lookup(ctx context.Context, id string) (Decision, bool, error) {
+func (b *StaticLimiter) Lookup(ctx context.Context, id string) (Decision, bool, error) {
 	return b.parent().Lookup(ctx, id)
 }
 
 // parent permits nil bound receivers to use the standard error and observer paths.
-func (b *BoundLimiter) parent() *Limiter {
+func (b *StaticLimiter) parent() *Limiter {
 	if b == nil {
 		return nil
 	}
@@ -132,7 +132,7 @@ func (b *BoundLimiter) parent() *Limiter {
 
 // chargedRules validates a complete charge set and assembles a per-call copy in
 // binding order. No caller-owned slice or shared binding is mutated.
-func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Rule, error) {
+func (b *StaticLimiter) chargedRules(ctx context.Context, charges []StaticCharge) ([]Rule, error) {
 	if err := b.parent().ready(ctx); err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Ru
 		if err != nil {
 			return nil, err
 		}
-		// Bind validated the immutable template, including its placeholder cost.
+		// BindStatic validated the immutable template, including its placeholder cost.
 		boundInterval, _ := rules[i].Interval()
 		if interval != boundInterval || rule.Policy.Burst != rules[i].Policy.Burst || rule.Policy.Revision != rules[i].Policy.Revision {
 			return nil, fmt.Errorf("%w: quota %q policy differs from binding", ErrInvalid, rule.Name)

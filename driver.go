@@ -9,7 +9,10 @@ import (
 	"unicode/utf8"
 )
 
-// Driver atomically admits all named charges or denies without debiting any.
+// Driver atomically admits all named charges using backend-owned dynamic policies
+// or denies without debiting any. It loads configuration and debt under the same
+// atomic boundary. Retained decisions replay before current configuration checks;
+// missing configuration fails closed with ErrPolicyMissing, never a static fallback.
 // Implementations must be concurrency-safe, use authoritative backend time, and
 // preserve effective policy checks, ordered rules, bounded ID deduplication and
 // original retry durations. Calls may synchronize on locks but must not wait for
@@ -24,6 +27,12 @@ type Driver interface {
 	Admit(context.Context, Admission) (Receipt, error)
 	// Lookup reads a retained result without extending its lifetime.
 	Lookup(context.Context, LookupRequest) (Decision, bool, error)
+}
+
+// StaticDriver optionally supports admission using caller-owned policies.
+// Implementations must reject static writes to backend-managed quotas.
+type StaticDriver interface {
+	AdmitStatic(context.Context, StaticAdmission) (Receipt, error)
 }
 
 // Scope identifies one application's atomic quota domain. Each field contains
@@ -43,22 +52,22 @@ func (s Scope) Validate() error {
 	return nil
 }
 
-// Admission requests a single atomic operation. An empty ID requires Retention=0
+// StaticAdmission requests a single atomic operation. An empty ID requires Retention=0
 // and means ordinary, non-idempotent admission. A nonempty ID retains either
 // decision. Drivers must not retain or mutate the caller's Rules slice.
-type Admission struct {
+type StaticAdmission struct {
 	// Scope identifies the atomic quota and ID domain.
 	Scope
 	// Rules contains ordered, uniquely named charges.
 	Rules []Rule
-	// ID is empty for Allow or contains 1..256 bytes for retained admission.
+	// ID is empty for AllowStatic or contains 1..256 bytes for retained admission.
 	ID string
-	// Retention is zero for Allow or whole milliseconds in [1ms,24h].
+	// Retention is zero for AllowStatic or whole milliseconds in [1ms,24h].
 	Retention time.Duration
 }
 
 // Validate checks the complete driver request without backend access.
-func (a Admission) Validate() error {
+func (a StaticAdmission) Validate() error {
 	if err := a.Scope.Validate(); err != nil {
 		return err
 	}
@@ -88,7 +97,7 @@ func (a Admission) Validate() error {
 // Fingerprint binds ordered names, effective intervals, bursts, costs and
 // retention to the Redis v1-compatible argument encoding. Call Validate first.
 // Scope and ID identify the record and are not part of this fingerprint.
-func (a Admission) Fingerprint() string {
+func (a StaticAdmission) Fingerprint() string {
 	args := []any{a.Retention.Milliseconds(), ""}
 	for _, r := range a.Rules {
 		step, _ := r.Interval()

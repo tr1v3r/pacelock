@@ -22,8 +22,13 @@ func (l *Limiter) withPolicyKeys(keys []string, rules []Rule) []string {
 }
 
 // AdmitManaged resolves current backend policy in the same atomic admission.
-func (l *Limiter) AdmitManaged(ctx context.Context, request pacelock.ManagedAdmission) (Receipt, error) {
-	const op = "allow_managed"
+func (l *Limiter) AdmitManaged(ctx context.Context, request pacelock.Admission) (receipt Receipt, err error) {
+	op := "allow"
+	if request.ID != "" {
+		op = "allow_once"
+	}
+	finish := l.observe(ctx, op, len(request.Charges))
+	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}

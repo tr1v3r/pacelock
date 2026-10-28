@@ -20,19 +20,23 @@ type Driver struct{ client redis.Scripter }
 
 var _ pacelock.Driver = (*Driver)(nil)
 var _ pacelock.PolicyDriver = (*Driver)(nil)
-var _ pacelock.ManagedDriver = (*Driver)(nil)
+var _ pacelock.StaticDriver = (*Driver)(nil)
 
-// AdmitManaged reads authoritative policies and atomically admits named costs.
-func (d *Driver) AdmitManaged(ctx context.Context, request pacelock.ManagedAdmission) (pacelock.Receipt, error) {
+// Admit reads authoritative policies and atomically admits named costs.
+func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
+	op := "allow"
+	if request.ID != "" {
+		op = "allow_once"
+	}
 	if err := request.Validate(); err != nil {
-		return pacelock.Receipt{}, inputError("allow_managed", err)
+		return pacelock.Receipt{}, inputError(op, err)
 	}
 	if d == nil {
-		return pacelock.Receipt{}, inputError("allow_managed", pacelock.ErrInvalid)
+		return pacelock.Receipt{}, inputError(op, pacelock.ErrInvalid)
 	}
 	l, err := engine.New(d.client, request.Namespace, request.Domain)
 	if err != nil {
-		return pacelock.Receipt{}, inputError("allow_managed", err)
+		return pacelock.Receipt{}, inputError(op, err)
 	}
 	return l.AdmitManaged(ctx, request)
 }
@@ -64,13 +68,13 @@ func New(client redis.Scripter) (*Driver, error) {
 	return &Driver{client: client}, nil
 }
 
-// Admit executes all dimensions and optional retained deduplication in one Lua
+// AdmitStatic executes all dimensions and optional retained deduplication in one Lua
 // operation with one final MSET. Command rejection does not debit; lost responses
 // and other ambiguous failures retain Unknown. Legacy Pending remains protected.
-func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
-	op := "allow"
+func (d *Driver) AdmitStatic(ctx context.Context, request pacelock.StaticAdmission) (pacelock.Receipt, error) {
+	op := "allow_static"
 	if request.ID != "" {
-		op = "allow_once"
+		op = "allow_static_once"
 	}
 	if err := request.Validate(); err != nil {
 		return pacelock.Receipt{}, inputError(op, err)

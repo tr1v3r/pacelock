@@ -1,5 +1,7 @@
 # Redis MSET local verification — 2026-10-28
 
+> Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
+
 These are short local correctness/performance observations, not production SLOs.
 Measured on macOS/arm64, Apple M3 Pro, Go 1.27.3, Redis 7.4.2 on host loopback,
 without persistence or replicas. Baseline source: `0f70f5f`. Candidate: the MSET

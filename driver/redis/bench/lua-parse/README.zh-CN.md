@@ -1,5 +1,7 @@
 # Redis Lua 单数字与 Q2 对照实验
 
+> 历史快照：本文图示、测量和 API 名称对应文中固定源码版本，早于 dynamic-default 改名；原静态 Allow/AllowOnce/Wait/Bind 现对应 AllowStatic/AllowStaticOnce/WaitStatic/BindStatic，原 Quota.Charge 现为 Quota.StaticCharge。不是当前默认动态 API 用法。
+
 这是隔离实验，不是生产协议迁移提案。单数字原型去掉跨客户端策略冲突检测及旧格式兼容，
 **不与 Pacelock 当前 Q2 协议契约等价**。
 

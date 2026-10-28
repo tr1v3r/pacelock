@@ -1,5 +1,7 @@
 # Deployment validation
 
+This fixture explicitly opts into static caller-policy admission (`AllowStatic` / `AllowStaticOnce` with `Rule`) for pinned policies and reproducible recovery/load measurements. It is not the default dynamic quick start: publish `UpdatePolicies`, then submit name/cost `Charge` values for that path.
+
 These tools measure a **dedicated disposable deployment**. They do not certify
 production throughput, durability or availability. Do not run against production
 or shared development Redis: tests change ACLs, flush script caches, migrate slots,

@@ -55,7 +55,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 			if err := c.Set(ctx, keys[1], fmt.Sprintf("P3|%d:%d:%d", tc.step, tc.burst, pacelock.MaxRevision), 0).Err(); err != nil {
 				t.Fatal(err)
 			}
-			want, next, werr := pacelock.EvaluateManaged(now, []pacelock.NamedCharge{{Name: name, Cost: tc.cost}}, []pacelock.QuotaState{p}, []pacelock.QuotaState{debt})
+			want, next, werr := pacelock.EvaluateManaged(now, []pacelock.Charge{{Name: name, Cost: tc.cost}}, []pacelock.QuotaState{p}, []pacelock.QuotaState{debt})
 			cmd := script.Run(ctx, c, keys, int64(0), "", int64(0), int64(0), tc.cost, name)
 			if werr != nil {
 				kind := pacelock.ErrInvalid
@@ -98,7 +98,7 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := managedRequest("first", 1)
-	a.Charges = append(a.Charges, pacelock.NamedCharge{Name: "last", Cost: 1})
+	a.Charges = append(a.Charges, pacelock.Charge{Name: "last", Cost: 1})
 	a.ID = "atomic"
 	a.Retention = time.Minute
 	if _, err := l.AdmitManaged(ctx, a); !errors.Is(err, pacelock.ErrState) {
@@ -123,7 +123,7 @@ func TestRedisManagedModel(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261028))
 	for iteration := 0; iteration < 150; iteration++ {
 		n := 1 + rng.Intn(4)
-		charges := make([]pacelock.NamedCharge, n)
+		charges := make([]pacelock.Charge, n)
 		policies := make([]pacelock.QuotaState, n)
 		debts := make([]pacelock.QuotaState, n)
 		keys := make([]string, 2*n)
@@ -141,7 +141,7 @@ func TestRedisManagedModel(t *testing.T) {
 			}
 			tat := now + int64(rng.Intn(20))*step
 			debts[i] = pacelock.QuotaState{TAT: tat, ExpiresAt: tat, Interval: 1, Burst: 86400000000}
-			charges[i] = pacelock.NamedCharge{Name: name, Cost: cost}
+			charges[i] = pacelock.Charge{Name: name, Cost: cost}
 			names[i] = name
 			keys[i] = l.key(name)
 			keys[n+i] = l.policyKey(name)

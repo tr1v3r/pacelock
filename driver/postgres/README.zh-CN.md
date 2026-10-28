@@ -14,14 +14,13 @@ if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
 rpm := pacelock.Quota{
-    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+    Name: "requests", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 }
 tokens := pacelock.Quota{
-    Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000},
+    Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000},
 }
-bound, err := limiter.Bind(rpm, tokens)
-if err != nil { return err }
-decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
+if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 // 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
 ```
 
@@ -33,20 +32,11 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-公共 `Bind` 接口在本地校验并复制固定额度。通过值接收者方法 `q.Charge(cost)` 将完整额度和消耗
-捕获到私有字段，不校验、不做 I/O；不要使用 Charge 字段字面量。`Quota.Name` / `Policy` 仍公开，
-之后修改 Quota 不影响已有 Charge 或绑定，变更策略需新建 binding。`Allow` / `AllowOnce` 仍接收
-`...Charge`，每次必须为全部已绑定额度各提供一次正数消耗。绑定时应包含全部适用额度；Charge
-会按绑定顺序整理。捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
-绑定一致；合法且有效策略相同的不同写法可接受。Bind 与 Rule 准入仅支持静态策略（Revision 0），
-后端权威配置须使用托管准入。无效、不完整或不匹配的 Charge 在准入前本地返回
-`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule 准入 API 与基础 Driver 接口保持兼容，等待
-仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
-详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+默认先用 `UpdatePolicies` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
 
-## 托管策略
+## 默认动态策略
 
-Driver 实现可选的 `pacelock.PolicyDriver` 与 `pacelock.ManagedDriver` 接口。
+Driver 实现必需的动态 `pacelock.Driver`，以及可选 `pacelock.PolicyDriver` 与 `pacelock.StaticDriver` 接口。
 控制面发布配置，数据面**只传名称与消耗**，获得 scope 锁后使用后端最新配置。
 准入节点无需刷新本地策略或重新绑定，SDK 不启动后台 worker；配置源轮询与发布由调用者负责。
 
@@ -58,10 +48,10 @@ err = limiter.UpdatePolicies(ctx, pacelock.Quota{
 })
 if err != nil { return err }
 // 数据面：相同调用会自动使用以后发布的新版本。
-decision, err := limiter.AllowManaged(ctx, pacelock.NamedCharge{Name: "requests", Cost: 1})
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
 // 或保留决策：ID 指纹包含名称与消耗，不包含策略版本。
-receipt, err := limiter.AllowManagedOnce(ctx, "operation-id", time.Minute,
-    pacelock.NamedCharge{Name: "requests", Cost: 1})
+receipt, err := limiter.AllowOnce(ctx, "operation-id", time.Minute,
+    pacelock.Charge{Name: "requests", Cost: 1})
 _ = decision
 _ = receipt
 ```
@@ -80,7 +70,7 @@ _ = receipt
 
 已有保留记录在当前策略检查**之前**重放，不因暂停或更新改变。托管请求的名称/消耗不变时，
 跨版本重试仍重放原决策。静态与托管请求复用同一 ID 会冲突。历史允许记录重放不代表可以再次执行上游。
-静态 Rule/Bind 请求在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
+静态 Rule/BindStatic 请求在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
 `ErrPolicyMismatch`，但旧静态记录仍先于该防绕过检查重放。
 
 更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。

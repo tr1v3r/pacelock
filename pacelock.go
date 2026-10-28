@@ -1,8 +1,9 @@
-// Package pacelock provides weighted, multidimensional GCRA admission with
-// immediate decisions and context-aware blocking waits.
+// Package pacelock provides weighted, multidimensional GCRA admission using
+// backend-owned dynamic policies by default. Explicit static admission and
+// context-aware static waits support caller-owned policies.
 // Drivers own backend time, atomic persistence and retained admission records.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
-// Bind separates fixed quota policies from per-attempt costs for every driver.
+// BindStatic separates fixed quota policies from per-attempt static costs.
 package pacelock
 
 import (
@@ -37,10 +38,10 @@ var (
 	ErrBackend = errors.New("pacelock: backend failure")
 	// ErrPaused rejects a fresh admission until the managed policy is resumed.
 	ErrPaused = errors.New("pacelock: quota is paused")
-	// ErrPolicyMissing rejects managed admission without backend configuration.
+	// ErrPolicyMissing rejects default dynamic admission without backend configuration.
 	ErrPolicyMissing = errors.New("pacelock: quota policy is not configured")
-	// ErrUnsupported reports a driver without explicit policy management.
-	ErrUnsupported = errors.New("pacelock: policy management is unsupported")
+	// ErrUnsupported reports a driver without the requested optional capability.
+	ErrUnsupported = errors.New("pacelock: operation is unsupported")
 )
 
 // Policy defines replenishment and total burst capacity independently of a
@@ -58,9 +59,10 @@ type Policy struct {
 	Burst int64
 }
 
-// Rule charges Cost units to the quota named by Name under Policy. Burst is
-// total instantaneous capacity, including the first unit. Rule is the driver
-// wire format combining policy and cost; use Limiter.Bind to separate them.
+// Rule charges Cost units to the quota named by Name under a caller-owned Policy.
+// Burst is total instantaneous capacity, including the first unit. Rule is the
+// low-level static admission and math format; use Limiter.BindStatic to separate
+// fixed policies from static costs, or Charge for default dynamic admission.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
@@ -116,8 +118,8 @@ type Decision struct {
 	Allowed bool
 	// RetryAfter is advisory, not a reservation. Retained results preserve the original wait.
 	RetryAfter time.Duration
-	// Limited lists every blocking quota in rule order, or binding order for
-	// BoundLimiter. It is empty on allowance.
+	// Limited lists every blocking quota in charge/rule order, or binding order for
+	// StaticLimiter. It is empty on allowance.
 	Limited []string
 }
 
@@ -175,17 +177,17 @@ func (l *Limiter) ready(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// Allow immediately attempts all charges; a normal denial debits none. It does
+// AllowStatic immediately attempts all charges; a normal denial debits none. It does
 // not wait for quota recovery. Backend synchronization may wait until ctx expires.
 // It never retries an uncertain operation. On any error ignore Decision.
-func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow", len(rules))
+func (l *Limiter) AllowStatic(ctx context.Context, rules ...Rule) (decision Decision, err error) {
+	finish := l.observe(ctx, "allow_static", len(rules))
 	defer func() { finish(decision, false, err) }()
-	r, err := l.admit(ctx, "", 0, rules)
+	r, err := l.admitStatic(ctx, "", 0, rules)
 	return r.Decision, err
 }
 
-// Wait blocks until all charges are atomically accepted or an error occurs.
+// WaitStatic blocks until all charges are atomically accepted or an error occurs.
 // A nil error means quota was consumed once, including if ctx was canceled after
 // a successful dispatch. Business failure does not refund that consumption.
 //
@@ -194,21 +196,21 @@ func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, 
 // not be blindly retried. Cancellation between attempts is NotCharged, while
 // cancellation during dispatch preserves the driver's accounting outcome.
 //
-// Wait uses a snapshot of rules, an empty admission ID and the calling goroutine.
+// WaitStatic uses a snapshot of rules, an empty admission ID and the calling goroutine.
 // It creates no queue, reservation or background goroutine and guarantees no
 // fairness between callers. Contention can delay admission indefinitely; use a
-// context deadline to bound waiting. Wait is not idempotent or recoverable with
-// Lookup. AllowOnce retains denials and cannot be polled with one ID to wait.
-func (l *Limiter) Wait(ctx context.Context, rules ...Rule) (err error) {
-	finish := l.observe(ctx, "wait", len(rules))
+// context deadline to bound waiting. WaitStatic is not idempotent or recoverable with
+// Lookup. AllowStaticOnce retains denials and cannot be polled with one ID to wait.
+func (l *Limiter) WaitStatic(ctx context.Context, rules ...Rule) (err error) {
+	finish := l.observe(ctx, "wait_static", len(rules))
 	var decision Decision
 	defer func() { finish(decision, false, err) }()
 
 	rules = append([]Rule(nil), rules...)
 	for {
-		receipt, attemptErr := l.admit(ctx, "", 0, rules)
+		receipt, attemptErr := l.admitStatic(ctx, "", 0, rules)
 		if attemptErr != nil {
-			return failure("wait", OutcomeOf(attemptErr), attemptErr)
+			return failure("wait_static", OutcomeOf(attemptErr), attemptErr)
 		}
 		decision = receipt.Decision
 		if decision.Allowed {
@@ -219,38 +221,42 @@ func (l *Limiter) Wait(ctx context.Context, rules ...Rule) (err error) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return failure("wait", NotCharged, ctx.Err())
+			return failure("wait_static", NotCharged, ctx.Err())
 		case <-timer.C:
 		}
 	}
 }
 
-// AllowOnce retains both allow and deny results for an ID. Retention is whole
+// AllowStaticOnce retains both allow and deny results for an ID. Retention is whole
 // milliseconds in [1ms,24h]; replay never extends it. Rules are ordered and their
 // names must be UTF-8. Persist the attempt ID before dispatch. Each genuinely new
 // business attempt needs a new ID. On errors ignore Receipt and inspect OutcomeOf.
-func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
-	finish := l.observe(ctx, "allow_once", len(rules))
+func (l *Limiter) AllowStaticOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
+	finish := l.observe(ctx, "allow_static_once", len(rules))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
 	if id == "" {
-		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
+		return Receipt{}, failure("allow_static_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return l.admit(ctx, id, retention, rules)
+	return l.admitStatic(ctx, id, retention, rules)
 }
 
-func (l *Limiter) admit(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
-	op := "allow"
+func (l *Limiter) admitStatic(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
+	op := "allow_static"
 	if id != "" {
-		op = "allow_once"
+		op = "allow_static_once"
 	}
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	request := Admission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
+	request := StaticAdmission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
 	if err := request.Validate(); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	result, err := l.driver.Admit(ctx, request)
+	driver, ok := l.driver.(StaticDriver)
+	if !ok {
+		return Receipt{}, failure(op, NotCharged, ErrUnsupported)
+	}
+	result, err := driver.AdmitStatic(ctx, request)
 	if err != nil {
 		return Receipt{}, driverFailure(op, err)
 	}

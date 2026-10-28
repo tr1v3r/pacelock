@@ -1,5 +1,7 @@
 # Admission workflows
 
+> Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
+
 [简体中文](README.zh-CN.md)
 
 Three source-backed, interactive diagrams trace one admission attempt. Diagram

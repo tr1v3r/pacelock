@@ -1,4 +1,5 @@
 // load is a bounded measurement tool for disposable Redis deployments.
+// It explicitly measures static admission to preserve historical benchmark comparability.
 package main
 
 import (
@@ -183,12 +184,12 @@ func run() error {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
 		prefixes[i] = fmt.Sprintf("pacelock:v1:{%x}:*", digest)
 		if *mode == "deny" || *mode == "once-deny" {
-			if _, err := l.Allow(ctx, rules...); err != nil {
+			if _, err := l.AllowStatic(ctx, rules...); err != nil {
 				return err
 			}
 		}
 		if *mode == "replay" || *mode == "lookup" {
-			if _, err := l.AllowOnce(ctx, "seed", 24*time.Hour, rules...); err != nil {
+			if _, err := l.AllowStaticOnce(ctx, "seed", 24*time.Hour, rules...); err != nil {
 				return err
 			}
 		}
@@ -267,13 +268,13 @@ func run() error {
 					var err error
 					switch *mode {
 					case "allow", "deny":
-						d, err = l.Allow(call, rules...)
+						d, err = l.AllowStatic(call, rules...)
 					case "once", "once-deny", "replay":
 						if *mode == "replay" {
 							id = "seed"
 						}
 						var receipt pacelock.Receipt
-						receipt, err = l.AllowOnce(call, id, func() time.Duration {
+						receipt, err = l.AllowStaticOnce(call, id, func() time.Duration {
 							if *mode == "replay" {
 								return 24 * time.Hour
 							}

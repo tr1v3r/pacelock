@@ -1,5 +1,6 @@
 // recovery-probe is destructive only within a synthetic namespace; use the
 // accompanying isolated deployment harness, never production credentials.
+// It explicitly uses static admission so existing failover measurements stay comparable.
 package main
 
 import (
@@ -48,7 +49,7 @@ func main() {
 	}
 	for i := 0; i < 10; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		d, err := l.AllowOnce(ctx, fmt.Sprintf("%s-%d", *action, i), time.Hour, r)
+		d, err := l.AllowStaticOnce(ctx, fmt.Sprintf("%s-%d", *action, i), time.Hour, r)
 		cancel()
 		if err != nil {
 			out["errors"]++

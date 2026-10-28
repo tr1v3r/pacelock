@@ -1,5 +1,7 @@
 # Redis Lua scalar vs Q2 experiment
 
+> Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
+
 This is an isolated experiment, not a proposed production protocol migration.
 The scalar prototype drops cross-client policy-conflict detection and legacy
 state compatibility; it is not contract-equivalent to Pacelock's Q2 protocol.

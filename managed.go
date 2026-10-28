@@ -9,32 +9,26 @@ import (
 	"unicode/utf8"
 )
 
-// NamedCharge requests known cost against a backend-managed quota. It contains
+// Charge requests known cost against a backend-managed quota. It contains
 // no local policy or revision; the backend resolves current configuration during
 // atomic admission. The application must include every applicable quota.
-type NamedCharge struct {
+type Charge struct {
 	Name string
 	Cost int64
 }
 
-// ManagedDriver is the optional backend-authoritative admission extension.
-// Load configuration and debt under the same atomic boundary. Retained decisions
-// replay before current configuration checks. Missing configuration fails closed.
-type ManagedDriver interface {
-	AdmitManaged(context.Context, ManagedAdmission) (Receipt, error)
-}
-
-// ManagedAdmission requests an atomic charge using backend-owned policies.
+// Admission requests an atomic charge using backend-owned policies.
 // ID empty means ordinary admission; nonempty retains the original decision.
-type ManagedAdmission struct {
+// Drivers must not retain or mutate the caller's Charges slice.
+type Admission struct {
 	Scope
-	Charges   []NamedCharge
+	Charges   []Charge
 	ID        string
 	Retention time.Duration
 }
 
 // Validate checks identities and costs, without assuming local policy knowledge.
-func (a ManagedAdmission) Validate() error {
+func (a Admission) Validate() error {
 	if err := a.Scope.Validate(); err != nil {
 		return err
 	}
@@ -67,7 +61,7 @@ func (a ManagedAdmission) Validate() error {
 // A retry of the same attempt replays the original decision across config changes.
 // The discriminator prevents reuse of a static admission ID as a managed one.
 // Call Validate first. Scope and ID identify the retained record separately.
-func (a ManagedAdmission) Fingerprint() string {
+func (a Admission) Fingerprint() string {
 	args := []any{"managed-admission-v1", a.Retention.Milliseconds()}
 	for _, c := range a.Charges {
 		args = append(args, c.Name, c.Cost)
@@ -76,47 +70,44 @@ func (a ManagedAdmission) Fingerprint() string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-// AllowManaged uses the current backend configuration for every named charge.
+// Allow uses the current backend configuration for every named charge.
+// This default admission never falls back to caller-owned static policies.
 // Missing configuration returns ErrPolicyMissing. Pause returns ErrPaused, with
 // no debit. Ordinary capacity denial returns Allowed=false and a RetryAfter.
 // A cost exceeding the current burst returns ErrInvalid, not a retryable denial.
-func (l *Limiter) AllowManaged(ctx context.Context, charges ...NamedCharge) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow_managed", len(charges))
+func (l *Limiter) Allow(ctx context.Context, charges ...Charge) (decision Decision, err error) {
+	finish := l.observe(ctx, "allow", len(charges))
 	defer func() { finish(decision, false, err) }()
 	receipt, err := l.admitManaged(ctx, "", 0, charges)
 	return receipt.Decision, err
 }
 
-// AllowManagedOnce retains an admission decision using backend-owned policies.
+// AllowOnce retains an admission decision using backend-owned policies.
 // Same-ID retries replay the original decision even after updates or pause; they
 // never authorize executing upstream work twice. Lookup reads either API's result.
 // Paused/missing-policy errors do not create a retained receipt.
-func (l *Limiter) AllowManagedOnce(ctx context.Context, id string, retention time.Duration, charges ...NamedCharge) (receipt Receipt, err error) {
-	finish := l.observe(ctx, "allow_managed_once", len(charges))
+func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (receipt Receipt, err error) {
+	finish := l.observe(ctx, "allow_once", len(charges))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
 	if id == "" {
-		return Receipt{}, failure("allow_managed_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
+		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
 	return l.admitManaged(ctx, id, retention, charges)
 }
 
-func (l *Limiter) admitManaged(ctx context.Context, id string, retention time.Duration, charges []NamedCharge) (Receipt, error) {
-	op := "allow_managed"
+func (l *Limiter) admitManaged(ctx context.Context, id string, retention time.Duration, charges []Charge) (Receipt, error) {
+	op := "allow"
 	if id != "" {
-		op = "allow_managed_once"
+		op = "allow_once"
 	}
 	if err := l.ready(ctx); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	a := ManagedAdmission{Scope: l.scope, Charges: append([]NamedCharge(nil), charges...), ID: id, Retention: retention}
+	a := Admission{Scope: l.scope, Charges: append([]Charge(nil), charges...), ID: id, Retention: retention}
 	if err := a.Validate(); err != nil {
 		return Receipt{}, failure(op, NotCharged, err)
 	}
-	driver, ok := l.driver.(ManagedDriver)
-	if !ok {
-		return Receipt{}, failure(op, NotCharged, ErrUnsupported)
-	}
-	receipt, err := driver.AdmitManaged(ctx, a)
+	receipt, err := l.driver.Admit(ctx, a)
 	if err != nil {
 		return Receipt{}, driverFailure(op, err)
 	}
@@ -145,8 +136,8 @@ func validatePolicyState(s QuotaState) error {
 // missing configuration. debts contains persisted state from prior admissions.
 // Drivers must serialize reads with updates and atomically persist every next
 // debt plus any retained receipt only when Allowed. Configurations are unchanged.
-func EvaluateManaged(now int64, charges []NamedCharge, policies, debts []QuotaState) (Decision, []QuotaState, error) {
-	a := ManagedAdmission{Scope: Scope{Namespace: "validate", Domain: "validate"}, Charges: charges}
+func EvaluateManaged(now int64, charges []Charge, policies, debts []QuotaState) (Decision, []QuotaState, error) {
+	a := Admission{Scope: Scope{Namespace: "validate", Domain: "validate"}, Charges: charges}
 	if err := a.Validate(); err != nil {
 		return Decision{}, nil, err
 	}
@@ -192,7 +183,7 @@ func ValidateStatic(rules ...Rule) error {
 	}
 	for _, r := range rules {
 		if r.Policy.Revision != 0 {
-			return fmt.Errorf("%w: use AllowManaged for backend-owned policy", ErrInvalid)
+			return fmt.Errorf("%w: use Allow for backend-owned policy", ErrInvalid)
 		}
 	}
 	return nil

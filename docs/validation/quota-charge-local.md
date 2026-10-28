@@ -1,5 +1,7 @@
 # Quota.Charge local verification — 2026-10-28
 
+> Historical snapshot: measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. This is not a current default dynamic API example.
+
 Scope: local, uncommitted changes on `codex/bound-policy-costs`, based on
 `705c86b5422a9f8c5671197db2edcd29007d8c55` (PR #20). These results are not CI
 results, a release certification or production throughput measurements.

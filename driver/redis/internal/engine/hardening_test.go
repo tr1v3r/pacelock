@@ -124,7 +124,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 				t.Fatalf("%v: %s", err, OutcomeOf(err))
 			}
 			var sdk *Error
-			if !errors.As(err, &sdk) || sdk.Op != "allow" {
+			if !errors.As(err, &sdk) || sdk.Op != "allow_static" {
 				t.Fatal(err)
 			}
 			if s.calls != 1 || s.evalCalls != 0 {
@@ -161,6 +161,43 @@ func TestObserver(t *testing.T) {
 	for _, e := range events {
 		if e.Duration < 0 {
 			t.Fatal(e)
+		}
+	}
+}
+
+func TestAdmissionObservers(t *testing.T) {
+	for _, once := range []bool{false, true} {
+		var events []Event
+		s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
+		l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
+		request := managedRequest("q", 1)
+		dynamicOp, staticOp := "allow", "allow_static"
+		if once {
+			request.ID, request.Retention = "id", time.Minute
+			dynamicOp, staticOp = "allow_once", "allow_static_once"
+			s.reply = []interface{}{int64(1), "C1|" + request.Fingerprint() + `|{"names":["q"],"values":[1,0,0]}`}
+		}
+		if _, err := l.AdmitManaged(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		if once {
+			rules := []Rule{rule("q", 1, 1)}
+			_, args, _ := l.prepare(rules)
+			args[0] = request.Retention.Milliseconds()
+			s.reply = []interface{}{int64(1), "C1|" + fingerprint(args) + `|{"names":["q"],"values":[1,0,0]}`}
+			if _, err := l.AllowOnce(context.Background(), "id", request.Retention, rules...); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := l.Allow(context.Background(), rule("q", 1, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 2 || events[0].Operation != dynamicOp || events[1].Operation != staticOp {
+			t.Fatalf("operations: %+v", events)
+		}
+		for _, event := range events {
+			if event.Result != "allowed" || event.RuleCount != 1 || event.Replayed != once {
+				t.Fatalf("event: %+v", event)
+			}
 		}
 	}
 }

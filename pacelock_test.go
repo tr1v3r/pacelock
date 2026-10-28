@@ -11,13 +11,17 @@ import (
 
 type testDriver struct {
 	calls   int
-	request Admission
+	request StaticAdmission
 	result  Receipt
 	err     error
 	found   bool
 }
 
-func (d *testDriver) Admit(_ context.Context, a Admission) (Receipt, error) {
+func (d *testDriver) Admit(context.Context, Admission) (Receipt, error) {
+	return Receipt{}, failure("allow", NotCharged, ErrUnsupported)
+}
+
+func (d *testDriver) AdmitStatic(_ context.Context, a StaticAdmission) (Receipt, error) {
 	d.calls++
 	d.request = a
 	return d.result, d.err
@@ -44,11 +48,11 @@ func TestFacadeValidationAndErrors(t *testing.T) {
 	l, _ := New(driver, "app", "domain")
 	ctx := context.Background()
 	for _, call := range []func() error{
-		func() error { _, err := l.Allow(ctx); return err },
-		func() error { _, err := l.Allow(ctx, sampleRule(), sampleRule()); return err },
-		func() error { _, err := l.Allow(nil, sampleRule()); return err },
-		func() error { _, err := l.AllowOnce(ctx, "", time.Second, sampleRule()); return err },
-		func() error { _, err := l.AllowOnce(ctx, "id", time.Nanosecond, sampleRule()); return err },
+		func() error { _, err := l.AllowStatic(ctx); return err },
+		func() error { _, err := l.AllowStatic(ctx, sampleRule(), sampleRule()); return err },
+		func() error { _, err := l.AllowStatic(nil, sampleRule()); return err },
+		func() error { _, err := l.AllowStaticOnce(ctx, "", time.Second, sampleRule()); return err },
+		func() error { _, err := l.AllowStaticOnce(ctx, "id", time.Nanosecond, sampleRule()); return err },
 		func() error { _, _, err := l.Lookup(ctx, ""); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
@@ -57,13 +61,13 @@ func TestFacadeValidationAndErrors(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := l.Allow(canceled, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
+	if _, err := l.AllowStatic(canceled, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if driver.calls != 0 {
 		t.Fatal("invalid request reached driver")
 	}
-	if _, err := l.AllowOnce(ctx, "id", time.Minute, sampleRule()); err != nil {
+	if _, err := l.AllowStaticOnce(ctx, "id", time.Minute, sampleRule()); err != nil {
 		t.Fatal(err)
 	}
 	if driver.request.Namespace != "app" || driver.request.Domain != "domain" || driver.request.ID != "id" {
@@ -78,9 +82,9 @@ func TestFacadeValidationAndErrors(t *testing.T) {
 		{&Error{Op: "backend", Outcome: Unknown, Err: context.DeadlineExceeded}, Unknown},
 	} {
 		driver.err = tc.err
-		decision, err := l.Allow(ctx, sampleRule())
+		decision, err := l.AllowStatic(ctx, sampleRule())
 		var typed *Error
-		if !errors.Is(err, tc.err) || !errors.As(err, &typed) || typed.Op != "allow" || OutcomeOf(err) != tc.want || decision.Allowed {
+		if !errors.Is(err, tc.err) || !errors.As(err, &typed) || typed.Op != "allow_static" || OutcomeOf(err) != tc.want || decision.Allowed {
 			t.Fatalf("%+v %v", decision, err)
 		}
 	}
@@ -94,13 +98,13 @@ func TestFacadeRejectsMalformedDriverResults(t *testing.T) {
 	} {
 		driver := &testDriver{result: Receipt{Decision: decision}}
 		l, _ := New(driver, "a", "b")
-		if _, err := l.Allow(context.Background(), sampleRule()); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+		if _, err := l.AllowStatic(context.Background(), sampleRule()); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 			t.Fatalf("%+v %v", decision, err)
 		}
 	}
 	driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}, Replayed: true}}
 	l, _ := New(driver, "a", "b")
-	if _, err := l.Allow(context.Background(), sampleRule()); !errors.Is(err, ErrState) {
+	if _, err := l.AllowStatic(context.Background(), sampleRule()); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 }
@@ -109,10 +113,10 @@ func TestFacadeObservation(t *testing.T) {
 	var events []Event
 	driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 	l, _ := NewWithOptions(driver, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	l.Allow(context.Background(), sampleRule())
-	l.Allow(context.Background())
+	l.AllowStatic(context.Background(), sampleRule())
+	l.AllowStatic(context.Background())
 	driver.result.Replayed = true
-	l.AllowOnce(context.Background(), "id", time.Minute, sampleRule())
+	l.AllowStaticOnce(context.Background(), "id", time.Minute, sampleRule())
 	driver.found = true
 	l.Lookup(context.Background(), "id")
 	driver.found = false
@@ -127,7 +131,7 @@ func TestFacadeObservation(t *testing.T) {
 }
 
 func TestFingerprintAndRounding(t *testing.T) {
-	a := Admission{Scope: Scope{"a", "b"}, ID: "id", Retention: time.Minute, Rules: []Rule{sampleRule(), {Name: "tokens", Policy: Policy{Rate: 3, Period: time.Second, Burst: 4}, Cost: 2}}}
+	a := StaticAdmission{Scope: Scope{"a", "b"}, ID: "id", Retention: time.Minute, Rules: []Rule{sampleRule(), {Name: "tokens", Policy: Policy{Rate: 3, Period: time.Second, Burst: 4}, Cost: 2}}}
 	step, err := a.Rules[1].Interval()
 	if err != nil || step != 333334*time.Microsecond {
 		t.Fatal(step, err)
@@ -147,10 +151,10 @@ func TestFingerprintAndRounding(t *testing.T) {
 // waitDriver scripts attempts while retaining the ordinary test driver's lookup.
 type waitDriver struct {
 	testDriver
-	admit func(context.Context, Admission) (Receipt, error)
+	admit func(context.Context, StaticAdmission) (Receipt, error)
 }
 
-func (d *waitDriver) Admit(ctx context.Context, a Admission) (Receipt, error) {
+func (d *waitDriver) AdmitStatic(ctx context.Context, a StaticAdmission) (Receipt, error) {
 	d.calls++
 	return d.admit(ctx, a)
 }
@@ -161,7 +165,7 @@ func TestWaitRetriesOnlyDenials(t *testing.T) {
 	var lastAttempt time.Time
 	const delay = 5 * time.Millisecond
 	d := &waitDriver{}
-	d.admit = func(_ context.Context, a Admission) (Receipt, error) {
+	d.admit = func(_ context.Context, a StaticAdmission) (Receipt, error) {
 		if !reflect.DeepEqual(a.Rules, original) || a.ID != "" || a.Retention != 0 || a.Scope != (Scope{"a", "b"}) {
 			t.Fatalf("changed admission: %+v", a)
 		}
@@ -178,10 +182,10 @@ func TestWaitRetriesOnlyDenials(t *testing.T) {
 	}
 	var events []Event
 	l, _ := NewWithOptions(d, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	if err := l.Wait(context.Background(), rules...); err != nil {
+	if err := l.WaitStatic(context.Background(), rules...); err != nil {
 		t.Fatal(err)
 	}
-	if d.calls != 3 || len(events) != 1 || events[0].Operation != "wait" || events[0].Result != "allowed" || events[0].Replayed || events[0].RuleCount != 2 || events[0].RetryAfter != 0 || events[0].Duration < 2*delay {
+	if d.calls != 3 || len(events) != 1 || events[0].Operation != "wait_static" || events[0].Result != "allowed" || events[0].Replayed || events[0].RuleCount != 2 || events[0].RetryAfter != 0 || events[0].Duration < 2*delay {
 		t.Fatal(d.calls, events)
 	}
 }
@@ -191,24 +195,28 @@ func TestWaitValidation(t *testing.T) {
 	l, _ := New(d, "a", "b")
 	var nilLimiter *Limiter
 	for name, call := range map[string]func() error{
-		"nil receiver":    func() error { return nilLimiter.Wait(context.Background(), sampleRule()) },
-		"zero receiver":   func() error { return (&Limiter{}).Wait(context.Background(), sampleRule()) },
-		"nil context":     func() error { return l.Wait(nil, sampleRule()) },
-		"no rules":        func() error { return l.Wait(context.Background()) },
-		"duplicate rules": func() error { return l.Wait(context.Background(), sampleRule(), sampleRule()) },
-		"invalid cost":    func() error { r := sampleRule(); r.Cost = r.Policy.Burst + 1; return l.Wait(context.Background(), r) },
+		"nil receiver":    func() error { return nilLimiter.WaitStatic(context.Background(), sampleRule()) },
+		"zero receiver":   func() error { return (&Limiter{}).WaitStatic(context.Background(), sampleRule()) },
+		"nil context":     func() error { return l.WaitStatic(nil, sampleRule()) },
+		"no rules":        func() error { return l.WaitStatic(context.Background()) },
+		"duplicate rules": func() error { return l.WaitStatic(context.Background(), sampleRule(), sampleRule()) },
+		"invalid cost": func() error {
+			r := sampleRule()
+			r.Cost = r.Policy.Burst + 1
+			return l.WaitStatic(context.Background(), r)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := call()
 			var typed *Error
-			if !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged || !errors.As(err, &typed) || typed.Op != "wait" {
+			if !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged || !errors.As(err, &typed) || typed.Op != "wait_static" {
 				t.Fatal(err)
 			}
 		})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := l.Wait(ctx, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
+	if err := l.WaitStatic(ctx, sampleRule()); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if d.calls != 0 {
@@ -226,16 +234,16 @@ func TestWaitStopsOnEveryError(t *testing.T) {
 	} {
 		t.Run(backendErr.Error(), func(t *testing.T) {
 			d := &waitDriver{}
-			d.admit = func(context.Context, Admission) (Receipt, error) {
+			d.admit = func(context.Context, StaticAdmission) (Receipt, error) {
 				if d.calls == 1 {
 					return Receipt{Decision: Decision{RetryAfter: time.Microsecond, Limited: []string{"q"}}}, nil
 				}
 				return Receipt{}, backendErr
 			}
 			l, _ := New(d, "a", "b")
-			err := l.Wait(context.Background(), sampleRule())
+			err := l.WaitStatic(context.Background(), sampleRule())
 			var typed *Error
-			if !errors.Is(err, backendErr) || OutcomeOf(err) != OutcomeOf(backendErr) || !errors.As(err, &typed) || typed.Op != "wait" || d.calls != 2 {
+			if !errors.Is(err, backendErr) || OutcomeOf(err) != OutcomeOf(backendErr) || !errors.As(err, &typed) || typed.Op != "wait_static" || d.calls != 2 {
 				t.Fatal(d.calls, err)
 			}
 		})
@@ -248,7 +256,7 @@ func TestWaitStopsOnEveryError(t *testing.T) {
 	} {
 		d := &testDriver{result: result}
 		l, _ := New(d, "a", "b")
-		if err := l.Wait(context.Background(), sampleRule()); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown || d.calls != 1 {
+		if err := l.WaitStatic(context.Background(), sampleRule()); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown || d.calls != 1 {
 			t.Fatal(result, err, d.calls)
 		}
 	}
@@ -257,14 +265,14 @@ func TestWaitStopsOnEveryError(t *testing.T) {
 func TestWaitCancellationDuringDelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d := &waitDriver{admit: func(context.Context, Admission) (Receipt, error) {
+	d := &waitDriver{admit: func(context.Context, StaticAdmission) (Receipt, error) {
 		cancel()
 		return Receipt{Decision: Decision{RetryAfter: time.Hour, Limited: []string{"q"}}}, nil
 	}}
 	var event Event
 	l, _ := NewWithOptions(d, "a", "b", Options{Observer: func(_ context.Context, e Event) { event = e }})
-	err := l.Wait(ctx, sampleRule())
-	if !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged || d.calls != 1 || event.Operation != "wait" || event.Result != "error" || event.Err != err {
+	err := l.WaitStatic(ctx, sampleRule())
+	if !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged || d.calls != 1 || event.Operation != "wait_static" || event.Result != "error" || event.Err != err {
 		t.Fatal(d.calls, err, event)
 	}
 }
@@ -274,7 +282,7 @@ func TestWaitDeadlineDuringDelay(t *testing.T) {
 	defer cancel()
 	d := &testDriver{result: Receipt{Decision: Decision{RetryAfter: time.Hour, Limited: []string{"q"}}}}
 	l, _ := New(d, "a", "b")
-	if err := l.Wait(ctx, sampleRule()); !errors.Is(err, context.DeadlineExceeded) || OutcomeOf(err) != NotCharged || d.calls > 1 {
+	if err := l.WaitStatic(ctx, sampleRule()); !errors.Is(err, context.DeadlineExceeded) || OutcomeOf(err) != NotCharged || d.calls > 1 {
 		t.Fatal(d.calls, err)
 	}
 }
@@ -282,12 +290,12 @@ func TestWaitDeadlineDuringDelay(t *testing.T) {
 func TestWaitPreservesSuccessDespiteCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d := &waitDriver{admit: func(context.Context, Admission) (Receipt, error) {
+	d := &waitDriver{admit: func(context.Context, StaticAdmission) (Receipt, error) {
 		cancel() // A confirmed debit must not be replaced with NotCharged.
 		return Receipt{Decision: Decision{Allowed: true}}, nil
 	}}
 	l, _ := New(d, "a", "b")
-	if err := l.Wait(ctx, sampleRule()); err != nil || d.calls != 1 {
+	if err := l.WaitStatic(ctx, sampleRule()); err != nil || d.calls != 1 {
 		t.Fatal(d.calls, err)
 	}
 }

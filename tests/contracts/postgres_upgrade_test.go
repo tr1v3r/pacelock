@@ -69,7 +69,7 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	}
 	scope := pacelock.Scope{Namespace: "upgrade-tests", Domain: freshDomain()}
 	rule := pacelock.Rule{Name: "requests", Policy: pacelock.Policy{Rate: 1, Period: time.Hour, Burst: 10}, Cost: 1}
-	a := pacelock.Admission{Scope: scope, Rules: []pacelock.Rule{rule}, ID: "legacy-allow", Retention: time.Hour}
+	a := pacelock.StaticAdmission{Scope: scope, Rules: []pacelock.Rule{rule}, ID: "legacy-allow", Retention: time.Hour}
 	var now int64
 	if err = db.QueryRowContext(ctx, `SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint`).Scan(&now); err != nil {
 		t.Fatal(err)
@@ -131,13 +131,13 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	}
 	replay := func() {
 		t.Helper()
-		r, err := l.AllowOnce(ctx, a.ID, a.Retention, rule)
+		r, err := l.AllowStaticOnce(ctx, a.ID, a.Retention, rule)
 		if err != nil || !r.Allowed || !r.Replayed {
 			t.Fatalf("legacy replay: %+v %v", r, err)
 		}
 	}
 	replay()
-	if decision, err := l.Allow(ctx, rule); err != nil || !decision.Allowed {
+	if decision, err := l.AllowStatic(ctx, rule); err != nil || !decision.Allowed {
 		t.Fatalf("static admission after migration: %+v %v", decision, err)
 	}
 	beforeUpdate := readDebt()
@@ -148,10 +148,10 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	if got := readDebt(); got != beforeUpdate {
 		t.Fatalf("activation changed debt: %+v, want %+v", got, beforeUpdate)
 	}
-	if _, err = l.Allow(ctx, rule); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+	if _, err = l.AllowStatic(ctx, rule); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 		t.Fatalf("static bypass after activation: %v", err)
 	}
-	if decision, err := l.AllowManaged(ctx, pacelock.NamedCharge{Name: q.Name, Cost: 1}); err != nil || !decision.Allowed {
+	if decision, err := l.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1}); err != nil || !decision.Allowed {
 		t.Fatalf("managed admission after activation: %+v %v", decision, err)
 	}
 	replay()

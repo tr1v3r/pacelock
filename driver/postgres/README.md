@@ -14,14 +14,13 @@ if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
 rpm := pacelock.Quota{
-    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+    Name: "requests", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 }
 tokens := pacelock.Quota{
-    Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000},
+    Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000},
 }
-bound, err := limiter.Bind(rpm, tokens)
-if err != nil { return err }
-decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
+if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
@@ -35,26 +34,12 @@ and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
 schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-The common `Bind` API validates and copies fixed quotas locally. Construct charges
-with `q.Charge(cost)`, a value-receiver method that captures the complete quota and
-cost in private fields without validation or I/O; do not use charge field literals.
-`Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
-charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
-still take `...Charge`, one positive cost per bound quota exactly once on every call.
-Bind all applicable quotas; charge order is normalized to binding order. Each
-captured policy must be fully valid, and its name, effective interval (rounded upward
-to microseconds) and burst must match the binding. Bind and Rule admission are
-static-only (Revision 0); use managed admission for backend-authoritative policies. Equivalent valid policy
-expressions are accepted. Invalid, incomplete or mismatched charges return local
-`ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
-Existing Rule admission APIs and the base Driver interface remain compatible; blocking admission still
-uses `limiter.Wait` with rules, not a bound wait method.
-See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
 
-## Managed policies
+## Default dynamic policies
 
-The driver implements optional `pacelock.PolicyDriver` and `pacelock.ManagedDriver`
-interfaces. The control plane publishes configuration; the data plane sends **only
+The driver implements mandatory dynamic `pacelock.Driver`, optional
+`pacelock.PolicyDriver` and `pacelock.StaticDriver` interfaces. The control plane publishes configuration; the data plane sends **only
 names and costs** and uses the latest persisted configuration under the scope lock.
 No local policy refresh, new binding or SDK worker is needed on admission nodes.
 The caller owns polling its configuration source and publishing updates.
@@ -67,10 +52,10 @@ err = limiter.UpdatePolicies(ctx, pacelock.Quota{
 })
 if err != nil { return err }
 // Data plane: the same call automatically uses future published versions.
-decision, err := limiter.AllowManaged(ctx, pacelock.NamedCharge{Name: "requests", Cost: 1})
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
 // Or retain a decision; the ID fingerprint includes names/costs, not policy versions.
-receipt, err := limiter.AllowManagedOnce(ctx, "operation-id", time.Minute,
-    pacelock.NamedCharge{Name: "requests", Cost: 1})
+receipt, err := limiter.AllowOnce(ctx, "operation-id", time.Minute,
+    pacelock.Charge{Name: "requests", Cost: 1})
 _ = decision
 _ = receipt
 ```
@@ -94,7 +79,7 @@ no managed Wait API; caller retry/config polling remains outside the SDK.
 Existing retained receipts replay **before** current policy checks, unchanged by
 pauses or updates. Managed retries with the same names/costs replay across revisions.
 Static and managed requests sharing an ID conflict. A replayed historical allow is
-not permission to execute upstream again. Static Rule/Bind requests reject managed
+not permission to execute upstream again. Static Rule/BindStatic requests reject managed
 revision fields locally, and new static admissions to configured quotas return
 `ErrPolicyMismatch`; old static receipts still replay before this bypass guard.
 
