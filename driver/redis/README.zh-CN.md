@@ -20,9 +20,12 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 调用 `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))`，或将相同的 `...Charge`
 传给 `bound.AllowOnce(ctx, id, retention, charges...)`。`q.Charge(cost)` 将额度值快照和消耗
 捕获到私有字段，不校验、不做 I/O。`Quota.Name` / `Policy` 仍公开，之后修改既不影响先前的
-Charge，也不影响绑定；变更策略需新建 binding。每次必须为全部已绑定额度各提供一次消耗，
-Charge 会按绑定顺序整理。捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
-须与绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前
+Charge，也不影响绑定；变更策略需新建 binding。每次接受已绑定额度的任意非空子集，
+每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。
+选中 Charge 按绑定顺序整理，幂等指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；
+同一仍保留的 ID 改变子集返回 `ErrConflict`，调整传入 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
+须与绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 Charge 在准入前
 本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 

@@ -16,6 +16,15 @@ denial debits none. `Driver.Lookup` recovers a retained result on the authoritat
 primary without refreshing retention. The interface does not expose separate
 Get/Set calls or a network-spanning read/modify/write callback.
 
+`BoundLimiter.Allow` / `AllowOnce` accept any nonempty subset of bound quotas.
+The core validates selected charges and sends only those rules, normalized to
+binding order; omitted quotas are neither checked nor charged. Empty calls,
+duplicate or unknown quotas, invalid costs and captured policy mismatches fail
+locally with `ErrInvalid` / `NotCharged`. Separate calls are not atomic together.
+Idempotency fingerprints include only selected names, normalized order, effective
+policies, costs and retention; changing the subset with the same retained ID
+returns `ErrConflict`. The Driver contract and fingerprint encoding are unchanged.
+
 Drivers must be concurrency-safe, must not retain/mutate request slices, and must
 not retry an ambiguous mutation. Validate direct requests too. Return `*Error` with
 `NotCharged` only for an invocation known not to debit. Core wraps untyped driver

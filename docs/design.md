@@ -36,9 +36,9 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 推荐先定义 `rpm`、`tokens` 等 `Quota` 值，再用 `limiter.Bind(rpm, tokens)` 绑定 1～32 个固定额度。`Quota` 保留公开的 `Name` / `Policy` 字段；值接收者 `q.Charge(cost)` 将完整的 Quota 值快照与 cost 存入 `Charge` 的私有 `quota Quota` / `cost int64` 字段，构造不校验、不做 I/O。每次通过 `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))` 或相同的 `...Charge` 形式调用 `AllowOnce`，不得使用 Charge 字段字面量。
 
-`Bind` 在本地校验并复制固定额度集合，不访问后端。每次准入必须为全部已绑定额度各提供一次消耗，且 `0 < cost <= Burst`；遗漏、重复、未知额度、零值 Charge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 Charge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 Charge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
+`Bind` 在本地校验并复制固定额度集合，不访问后端。`Allow` / `AllowOnce` 每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性。空调用、重复、未知额度、零值 Charge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 Charge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 Charge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
 
-Charge 顺序不影响结果，阻塞额度和幂等参数以绑定顺序为准。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 Charge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
+Charge 顺序不影响结果，选中额度按绑定顺序整理，用于阻塞额度和幂等参数。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集或选中额度的相对绑定顺序返回 `ErrConflict`，未选中额度不影响指纹。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 Charge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
 
 现有底层接口仍接受 1～32 条 Rule，每条包含 Name、Rate、Period、Burst、Cost，与绑定接口共享相同额度状态和协议。底层接口无法检测漏传的适用额度，幂等规则顺序由调用方负责。不提供 `BoundLimiter.Wait`；等待使用 `limiter.Wait(ctx, rules...)`。
 
@@ -146,7 +146,7 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 ## 已实现：有保留期限的幂等准入与查询
 
-`AllowOnce` 的 ID 在 namespace/domain 内生效，绑定有序的额度名称、有效发射间隔、Burst、Cost 和保留期限。相同有效策略的不同 Rate/Period 表达可重放，但规则重排或其他参数变化返回 ErrConflict。保留期限为 1ms～24h 的整毫秒，重放和查询不延长逻辑截止时间。
+`AllowOnce` 的 ID 在 namespace/domain 内生效，绑定有序的额度名称、有效发射间隔、Burst、Cost 和保留期限。指纹只包含本次选中额度；绑定接口先按绑定顺序整理选中 Charge，底层接口保留传入 Rule 顺序。相同有效策略的不同 Rate/Period 表达可重放，但选中子集、有序规则或其他参数变化返回 ErrConflict。保留期限为 1ms～24h 的整毫秒，重放和查询不延长逻辑截止时间。
 
 记录与额度同槽，使用独立 `attempt:sha256(id)` 后缀。脚本先读有效记录：完整记录直接重放，参数不符报冲突；损坏记录返回 `ErrState` / `Unknown`。记录缺失或合法过期时检查所有额度、完成编码，最后一次 MSET 提交允许的额度及完整结果。拒绝仍会保存，所以相同 ID 不会随容量恢复改变决策。
 

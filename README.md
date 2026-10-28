@@ -152,18 +152,24 @@ Do not construct charges with field literals.
   afterward affects neither the binding nor previously constructed charges. Each
   call assembles its own rules without mutating inputs.
 - `bound.Allow(ctx, charges...)` and `bound.AllowOnce(ctx, id, retention, charges...)`
-  still accept `...Charge`. Each call must supply every bound quota exactly once,
-  constructed with `q.Charge(cost)`, with `0 < cost <= Burst`. Missing, duplicate,
+  accept any nonempty subset of bound quotas as `...Charge`, each selected quota
+  exactly once, constructed with `q.Charge(cost)`, with `0 < cost <= Burst`.
+  Omitted quotas are neither checked nor charged. An empty call, duplicate,
   unknown, zero-value or otherwise invalid charges return `ErrInvalid` with
   `NotCharged` before dispatch. There are no default costs or zero-cost exemptions.
+  Each call is atomic only across its selected quotas; separate calls are not atomic
+  together. Submit every quota that must pass together in the same call.
 - Each charge's captured policy must be fully valid, and its name, effective
   `Interval` (rounded upward to microseconds) and `Burst` must match the binding.
   Different valid `Rate` / `Period` expressions with the same effective interval
   are accepted. An invalid or nonmatching captured policy is a local `ErrInvalid` /
   `NotCharged`, not the backend's `ErrPolicyMismatch`.
-- Charge order is arbitrary. The binding order determines `Decision.Limited` and
-  the ordered rules used for idempotency. Reordering charges preserves a replay;
-  changing the binding order changes the retained attempt's parameters.
+- Charge order is arbitrary. Selected quotas are normalized to binding order for
+  `Decision.Limited` and idempotency. Fingerprints include only the selected quota
+  names, their normalized order, effective policies, costs and retention. Reordering
+  charges preserves a replay; changing the subset or the selected quotas' relative
+  binding order with the same retained ID returns `ErrConflict`. Unselected quotas
+  do not affect the fingerprint.
 - Build quota names from trusted application identity and select policies in
   application code. For dynamic tenants/models, create a binding for the applicable
   set; binding is local and needs no prior registration or mandatory cache.
@@ -181,7 +187,8 @@ Do not construct charges with field literals.
 combines a quota's name, per-attempt cost and the same shared `Policy` type used
 by `Quota`, so the two layers describe replenishment exactly once. This path checks only the
 supplied rules and cannot detect omitted applicable quotas. Bound admissions use the same execution path and quota
-state; they add complete-set validation and normalize charges to binding order.
+state; they validate selected charges against the binding and normalize them to
+binding order. Neither API can detect an applicable quota omitted by the caller.
 The versioned trusted builder in the [durable example](driver/redis/examples/durable/README.md)
 continues to demonstrate the low-level API.
 
@@ -267,7 +274,8 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 
 - An ID is scoped to namespace/domain and binds the **ordered** quota names,
   effective intervals, bursts, costs and retention. Changed parameters return
-  `ErrConflict`. Bound calls normalize charges to binding order; low-level calls
+  `ErrConflict`, including a changed subset with the same retained ID. Bound calls
+  include only selected quotas, normalized to binding order; low-level calls
   retain supplied rule order. Names must be valid UTF-8 for `AllowOnce`; IDs contain 1–256 bytes.
 - Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
   a value covering your recovery window. Replays and queries never extend it.
