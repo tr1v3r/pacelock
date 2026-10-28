@@ -1,8 +1,7 @@
 # Atomic admission drivers
 
 `pacelock.New(driver, namespace, domain)` is the backend-independent constructor.
-It replaces the pre-v1 Redis-client constructor. `Allow`, `AllowOnce`, `Lookup`,
-`Rule`, decisions, errors and observers retain their business semantics.
+Both Redis and PostgreSQL implement the same admission and recovery contract.
 
 ## Ownership and persistence boundary
 
@@ -54,7 +53,8 @@ validation. Keep periods and burst recovery within 24h and each request within 3
 ## Retained results
 
 ID scope is namespace/domain. `Admission.Fingerprint()` binds ordered names,
-effective intervals, bursts, costs and retention with the Redis v1 encoding.
+effective intervals, bursts, costs and retention as
+`[retention_ms,step,burst,cost,name,...]`, without an empty placeholder.
 Names must be UTF-8 for idempotent requests; all other identity strings may be
 opaque bytes. Both allow and deny are retained; replay/lookup does not extend
 retention. A changed fingerprint returns `ErrConflict`. A retained denial stays
@@ -63,18 +63,19 @@ ID. Expired/lost IDs must not be reused to depend on deduplication.
 
 Redis validates and encodes before one final MSET of quotas and the complete
 receipt. It uses logical expiry and application-scheduled bounded physical cleanup.
-It never creates new Pending, but preserves legacy Pending uncertainty.
+Malformed receipts return `ErrState` / `Unknown`, never missing or a new admission.
 PostgreSQL commits quota and receipt writes in one transaction,
 so pre-commit failure rolls them all back. A PostgreSQL Commit error is still
 `Unknown`: the database may have committed before the reply was lost. Missing
 lookup results do not prove no debit or upstream exactly-once execution.
 
-## Backend modules and migration
+## Backend modules
 
-- `driver/redis`: go-redis transport, single-command MSET commit, v2 logical
-  expiry, bounded cursor cleanup and guarded command replay/Cluster redirects.
-  Keys stay unchanged; v1 values remain readable. Quiesce old writers before
-  upgrading; mixed writers/unconverted rollback are unsupported. See its guide.
+- `driver/redis`: go-redis transport, single-command MSET commit, logical expiry,
+  bounded cursor cleanup and guarded command replay/Cluster redirects. Keys use
+  `pacelock:{scope_hash}:`; quotas use `tat:interval:burst`, with active-policy
+  checks and expiry at `tat <= now`. Receipts use
+  `expires_us|fingerprint|decision_json`. See its guide.
 - `driver/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
   maintenance; no worker starts automatically. See its deployment guide.

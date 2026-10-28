@@ -25,8 +25,8 @@ Core Driver contracts are documented [separately](driver.md).
 6. For `AllowOnce`, persist IDs before dispatch, select retention covering the
    recovery horizon and budget memory for retained IDs, including denials. A rough
    count is admission attempts per second × retention seconds; measure actual
-   bytes per record including names and Redis overhead. Preserve legacy Pending.
-   Redis v2 state requires caller-scheduled physical cleanup, including idle scopes.
+   bytes per record including names and Redis overhead.
+   Redis quota/receipt state requires caller-scheduled physical cleanup, including idle scopes.
    Bound each maintenance tick, retain the cursor across ticks, repeat full cycles,
    and monitor memory/cleanup lag. Logical expiry works if cleanup is delayed;
    physical memory will not drain by itself. See the Redis driver guide.
@@ -58,11 +58,10 @@ Ambiguous EOF, timeout and lost-response errors remain Unknown and are never
 converted into a second admission. ASKING and the script use the same pipeline
 connection. Routing recovery does not guarantee failover persistence.
 
-The dependency update adds go-redis's indirect atomic/sys dependencies; no new
-SDK service or background worker is introduced. Custom hooks must not strip the
-NoRetry marker or replay commands themselves. Old explicit no-redirect settings
-remain supported, but are no longer required for known Cluster clients.
-The upgraded client may discover COMMAND metadata on first use; provision its
+No SDK service or background worker is introduced. Custom hooks must not strip
+the NoRetry marker or replay commands themselves. Explicit no-redirect settings
+are supported but not required for concrete Cluster clients.
+The client may discover COMMAND metadata on first use; provision its
 read permission for efficient routing, and warm client metadata before strict
 latency measurements. Discovery may have a client-owned background deadline.
 
@@ -98,7 +97,7 @@ ambiguous post-dispatch/reply failures. `ErrBackend` preserves the original erro
 | Timeout/lost reply to `Allow` | Debit unknown | Do not blindly repeat or refund; apply failure policy |
 | Timeout/lost reply to `AllowOnce` | Admission may exist | Query the same ID with a fresh deadline within retention |
 | Complete retained allow/deny | Original decision recovered | Coordinate execution with the business attempt record |
-| Legacy Pending record | Old script may have partially charged | Alert; preserve marker and uncertainty; do not automatically refund/reuse ID |
+| Malformed receipt | `ErrState` / `Unknown`; not evidence of no debit | Alert; preserve state and uncertainty; do not automatically refund/reuse ID |
 | Missing record | Not observed, possibly expired/lost/in-flight | Do not infer zero debit or exactly-once execution |
 | Policy conflict | This invocation did not mutate quota | Coordinate configuration across callers |
 | Redis failover/eviction/deletion | Quota and dedupe history may be lost | Assess overshoot; restore service under an explicit degraded-mode policy |
@@ -113,9 +112,9 @@ alone must never issue a second upstream model call.
 Redis script isolation prevents interleaving. The current driver validates and
 encodes before one final MSET that commits all quota updates and the complete
 receipt. An affirmative commit rejection is NotCharged; ambiguous transport/server
-failures remain Unknown. New Pending is not created. Legacy Pending still blocks
-replay and cannot identify how much an old script wrote; never delete it to unblock
-a request. Single-command commit does not restore lost persistence/replica logs.
+failures remain Unknown. Malformed receipts also preserve Unknown and cannot
+authorize a new admission. Never delete them to unblock a request. Single-command
+commit does not restore lost persistence/replica logs.
 
 Redis TIME is shared wall time, not a monotonic clock. Forward jumps can replenish
 capacity early; backward jumps can delay recovery or reject state. Alert on host

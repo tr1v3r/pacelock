@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -58,14 +59,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "require -addr, rounds >= 1, iterations in [1,1000000], batch in [1,10000]")
 		os.Exit(2)
 	}
-	ctx := context.Background()
-	c := redis.NewClient(&redis.Options{Addr: *addr, MaxRetries: -1, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second})
-	defer c.Close()
-	must(c.Ping(ctx).Err())
 	protocol, err := os.ReadFile("internal/engine/protocol.lua")
 	must(err)
 	gcra, err := os.ReadFile("internal/engine/gcra.lua")
 	must(err)
+	ctx := context.Background()
+	c := redis.NewClient(&redis.Options{Addr: *addr, MaxRetries: -1, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second})
+	defer c.Close()
+	must(c.Ping(ctx).Err())
 	info, err := c.Info(ctx, "server").Result()
 	must(err)
 	start := strings.Index(string(protocol), "local function quota_state(")
@@ -78,22 +79,20 @@ func main() {
 
 	type microCase struct {
 		name, prelude, decode string
-		modern                bool
+		tuple                 bool
 		sha                   string
 	}
 	cases := []microCase{
 		{name: "loop_baseline", decode: `return 1700000001000000 + index`},
 		{name: "scalar_parse", decode: `return tonumber(raw)`},
-		{name: "q2_parse", modern: true, decode: `local modern = string.sub(raw, 1, 3) == 'Q2|'
-local body = modern and string.sub(raw, 4) or raw
-local tat, step, burst = string.match(body, '^(%d+):(%d+):(%d+)$')
+		{name: "tuple_parse", tuple: true, decode: `local tat, step, burst = string.match(raw, '^(%d+):(%d+):(%d+)$')
 tat, step, burst = tonumber(tat), tonumber(step), tonumber(burst)
 return tat`},
 		{name: "scalar_reader", prelude: scalarProtocol, decode: `local state=quota_state(raw,now)
 if not state then error('invalid scalar') end
 return math.max(state[1], now)`},
-		{name: "q2_reader_policy", prelude: string(protocol), modern: true, decode: `local state=quota_state(raw,now)
-if not state then error('invalid q2') end
+		{name: "tuple_reader_policy", prelude: string(protocol), tuple: true, decode: `local state=quota_state(raw,now)
+if not state then error('invalid tuple') end
 if not state[4] and (state[2] ~= 100000 or state[3] ~= 10) then error('policy') end
 return math.max(state[1], now)`},
 	}
@@ -101,8 +100,8 @@ return math.max(state[1], now)`},
 	for i := range cases {
 		cs := &cases[i]
 		rawExpr := `string.format('%.0f', 1700000001000000+i)`
-		if cs.modern {
-			rawExpr = `string.format('Q2|%.0f:100000:10', 1700000001000000+i)`
+		if cs.tuple {
+			rawExpr = `string.format('%.0f:100000:10', 1700000001000000+i)`
 		}
 		script := cs.prelude + "\nlocal function decode(raw, now, index)\n" + cs.decode + "\nend\n" + `
 local values={}
@@ -178,7 +177,7 @@ return sum
                 return redis.error_reply('PACE_POLICY quota policy changed while state is active')
             end
 `
-	oldEncoding := `string.format('Q2|%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])`
+	oldEncoding := `string.format('%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])`
 	if strings.Count(string(gcra), policyBlock) != 1 || strings.Count(string(gcra), oldEncoding) != 1 {
 		panic("unexpected production script")
 	}
@@ -188,19 +187,19 @@ return sum
 		name, sha string
 		keys      []string
 		args      []interface{}
-		modern    bool
+		tuple     bool
 		result    *Result
 	}
 	full := []fullCase{}
 	for _, n := range []int{1, 4, 32} {
-		for _, modern := range []bool{false, true} {
+		for _, tuple := range []bool{false, true} {
 			mode, script := "scalar", scalarProtocol+"\n"+scalarGCRA
-			if modern {
-				mode, script = "q2", string(protocol)+"\n"+string(gcra)
+			if tuple {
+				mode, script = "tuple", string(protocol)+"\n"+string(gcra)
 			}
 			sha, err := c.ScriptLoad(ctx, script).Result()
 			must(err)
-			f := fullCase{name: fmt.Sprintf("allow_%s_%d_quotas", mode, n), sha: sha, modern: modern, args: []interface{}{0, ""}}
+			f := fullCase{name: fmt.Sprintf("allow_%s_%d_quotas", mode, n), sha: sha, tuple: tuple, args: []interface{}{0, ""}}
 			for j := 0; j < n; j++ {
 				f.keys = append(f.keys, fmt.Sprintf("bench:{lua-parse}:%s:%d:%d", mode, n, j))
 				f.args = append(f.args, 1, 1000000000, 1, fmt.Sprint(j))
@@ -215,8 +214,8 @@ return sum
 			now, err := c.Time(ctx).Result()
 			must(err)
 			seed := fmt.Sprint(now.UnixMicro() + 60000000)
-			if f.modern {
-				seed = "Q2|" + seed + ":1:1000000000"
+			if f.tuple {
+				seed += ":1:1000000000"
 			}
 			pairs := []interface{}{}
 			for _, k := range f.keys {
@@ -256,9 +255,11 @@ return sum
 	}
 	out := struct {
 		Server                    string `json:"server"`
+		QuotaFormat               string `json:"quota_format"`
+		LuaSHA256                 string `json:"lua_sha256"`
 		Rounds, Iterations, Batch int
 		Results                   []*Result `json:"results"`
-	}{info, *rounds, *iterations, *batch, results}
+	}{info, "tat_us:interval_us:burst", fmt.Sprintf("%x", sha256.Sum256([]byte(string(protocol)+"\n"+string(gcra)))), *rounds, *iterations, *batch, results}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	must(enc.Encode(out))

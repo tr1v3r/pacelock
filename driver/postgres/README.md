@@ -48,8 +48,7 @@ Each captured policy must be fully valid, and its name, effective interval (roun
 to microseconds) and burst must match the binding. Equivalent valid policy
 expressions are accepted. Empty calls, duplicate, unknown, invalid or mismatched charges return local
 `ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
-Existing Rule APIs, Driver and storage are unchanged; blocking admission still
-uses `limiter.Wait` with rules, not a bound wait method.
+Rule APIs share the same Driver and storage; blocking admission uses `limiter.Wait` with rules, not a bound wait method.
 See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 ## Transactions and failure contract

@@ -41,8 +41,8 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 调整传入 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
 捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
 绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 Charge 在准入前本地返回
-`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储不变，等待
-仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
+`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待
+通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 事务与故障契约

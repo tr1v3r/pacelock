@@ -1,5 +1,9 @@
 # Quota.Charge local verification — 2026-10-28
 
+> Archived measurement of the tree identified below, not validation of the current
+> Redis key prefix, quota/receipt encoding or fingerprint. API measurements remain
+> factual observations of that tree, not current performance guarantees.
+
 Scope: local, uncommitted changes on `codex/bound-policy-costs`, based on
 `705c86b5422a9f8c5671197db2edcd29007d8c55` (PR #20). These results are not CI
 results, a release certification or production throughput measurements.

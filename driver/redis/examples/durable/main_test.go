@@ -83,7 +83,7 @@ func TestUnknownExecutionNeverRetries(t *testing.T) {
 	}
 }
 func TestUnresolvedAdmissionPreserved(t *testing.T) {
-	for _, kind := range []string{"missing", "pending", "expired"} {
+	for _, kind := range []string{"missing", "corrupt", "expired"} {
 		t.Run(kind, func(t *testing.T) {
 			j, f := fixture(t)
 			a, _ := j.load()
@@ -91,8 +91,8 @@ func TestUnresolvedAdmissionPreserved(t *testing.T) {
 			switch kind {
 			case "missing":
 				f.found = false
-			case "pending":
-				f.err = pacelock.ErrOutcomeUnknown
+			case "corrupt":
+				f.err = &pacelock.Error{Op: "lookup", Outcome: pacelock.Unknown, Err: pacelock.ErrState}
 			case "expired":
 				a.Created = time.Now().Add(-retention)
 			}

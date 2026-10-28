@@ -58,7 +58,7 @@ The default `@latest` currently selects an older API and does not include all AP
 shown here. Keep the resolved pseudo-version in your application's `go.mod` for
 reproducible builds; `@dev` moves as development continues and is not a stable release.
 
-The constructor now accepts `pacelock.Driver`, a breaking pre-v1 change.
+The constructor accepts `pacelock.Driver`.
 Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` for the example.
 
 ```go
@@ -180,11 +180,10 @@ Do not construct charges with field literals.
   a receipt created by another binding or the low-level API; it does not filter
   results by the bound quota set.
 
-### Existing low-level API
+### Low-level API
 
 `Rule`, `Validate`, `limiter.Allow(ctx, rules...)` and
-`limiter.AllowOnce(ctx, id, retention, rules...)` remain supported without a
-signature, Driver contract or storage/protocol change from the bound API. A `Rule`
+`limiter.AllowOnce(ctx, id, retention, rules...)` are supported alongside the bound API. A `Rule`
 combines a quota's name, per-attempt cost and the same shared `Policy` type used
 by `Quota`, so the two layers describe replenishment exactly once. This path checks only the
 supplied rules and cannot detect omitted applicable quotas. Bound admissions use the same execution path and quota
@@ -284,8 +283,8 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
   retained; a later, genuinely new attempt needs a new ID. Replayed `RetryAfter`
   is the original delay, not a countdown or fresh capacity estimate.
 - Redis writes quotas and the complete decision in one final MSET, after all
-  checks/encoding. New operations do not create Pending. Legacy pending records
-  still return `ErrOutcomeUnknown`; do not delete or refund them automatically.
+  checks/encoding. Malformed receipts return `ErrState` / `Unknown`, never a
+  missing result or permission for a new admission.
   Redis expiry is logical; schedule bounded physical cleanup for every scope.
   See the [Redis protocol and cleanup guide](driver/redis/README.md).
 - `found=false` does **not** prove no debit. The command may still be in flight,
@@ -299,14 +298,14 @@ For a complete application-owned flow, see the [durable admission example](drive
 ## Errors and observation
 
 Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`, `ErrConflict`,
-`ErrOutcomeUnknown`, `ErrBackend`, and wrapped context/transport errors. Admission
+`ErrBackend`, and wrapped context/transport errors. Admission
 errors expose `*pacelock.Error` with `Op` and `Outcome`:
 
 | Result | Meaning | Application action |
 |---|---|---|
 | `Allowed=false`, no error | Quota denied; no quota debit | Reject or schedule a new attempt |
 | `NotCharged` error | This invocation is known not to debit | Fix input/policy, or handle cancellation |
-| `Unknown` error | May have charged; legacy writes can be partial | Query retained ID; use explicit recovery policy |
+| `Unknown` error | May have charged; confirmation is unavailable | Query retained ID; use explicit recovery policy |
 | `Lookup`: missing | No retained complete result was found | Preserve uncertainty about previous execution |
 
 A `NotCharged` result never clears uncertainty from an earlier call. On **any**
@@ -345,7 +344,7 @@ and assembly; `Bind` emits no event. Do not label metrics with error text or use
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot
   undo Redis writes. The SDK creates no goroutines and imposes no hidden timeout.
 - Use dedicated keys, primary routing, TLS/authentication and Redis `noeviction`.
-  The new Redis protocol uses a single commit command; crash/failover durability
+  The Redis protocol uses a single commit command; crash/failover durability
   still depends on deployment.
   Clock jumps, eviction and failover data loss can weaken limits and deduplication.
 
@@ -384,6 +383,5 @@ Deployment load, memory and failover tools with raw local observations are docum
 MIT licensed.
 
 The core, both runtime drivers, the optional pgx example and the
-integration-test modules require Go 1.26+ (the pgx/text floor was 1.25; the
-go-redis v9.23 dependency raises it to 1.26). Production applications should
+integration-test modules require Go 1.26+. Production applications should
 use a maintained Go release.

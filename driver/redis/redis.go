@@ -1,6 +1,6 @@
 // Package redisdriver implements Pacelock atomic admission using Redis Lua.
 // It commits quotas and complete receipts in one MSET, with logical expiry and
-// caller-scheduled bounded cleanup. Legacy keys/state remain readable. One domain
+// caller-scheduled bounded cleanup. Quotas and receipts use unversioned formats. One domain
 // occupies one Redis Cluster hash slot; transport commands prevent ambiguous replay.
 package redisdriver
 
@@ -32,7 +32,7 @@ func New(client redis.Scripter) (*Driver, error) {
 
 // Admit executes all dimensions and optional retained deduplication in one Lua
 // operation with one final MSET. Command rejection does not debit; lost responses
-// and other ambiguous failures retain Unknown. Legacy Pending remains protected.
+// and other ambiguous failures retain Unknown. Malformed receipts are rejected.
 func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
 	op := "allow"
 	if request.ID != "" {
@@ -88,8 +88,8 @@ type PruneResult = engine.PruneResult
 // Prune checks at most limit candidate values and performs at most one SCAN page
 // on the scope's current primary. Limit must be 1..MaxPruneKeys. SCAN COUNT is a
 // hint, so discovery has no hard latency bound and overflow is buffered in Cursor.
-// Expired v2 values are deleted only after an atomic recheck. Legacy TTLs, pending
-// markers, active debt and live decisions are preserved. The application schedules
+// Logically expired values are deleted only after an atomic recheck. Malformed
+// candidates abort the batch; active debt and live decisions are preserved. The application schedules
 // repeated cycles; constructors and admissions never start cleanup goroutines.
 func (d *Driver) Prune(ctx context.Context, scope pacelock.Scope, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := scope.Validate(); err != nil {

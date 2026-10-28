@@ -54,7 +54,7 @@ func boundBackends(t *testing.T) []backend {
 func TestBoundDriverContract(t *testing.T) {
 	for _, backend := range boundBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
-			t.Run("atomic copied policies and compatibility", func(t *testing.T) { testBoundAtomic(t, backend) })
+			t.Run("atomic copied policies and shared Rule state", func(t *testing.T) { testBoundAtomic(t, backend) })
 			t.Run("idempotency and recovery", func(t *testing.T) { testBoundIdempotency(t, backend) })
 			t.Run("independent subset admissions", func(t *testing.T) { testBoundSubsets(t, backend) })
 			t.Run("subset idempotency", func(t *testing.T) { testBoundSubsetIdempotency(t, backend) })

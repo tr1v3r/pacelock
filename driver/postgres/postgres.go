@@ -5,6 +5,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -12,7 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tr1v3r/pacelock"
 )
@@ -220,11 +223,52 @@ func (d *Driver) Lookup(ctx context.Context, r pacelock.LookupRequest) (pacelock
 
 func decodeDecision(raw []byte) (pacelock.Decision, error) {
 	var decision pacelock.Decision
-	if len(raw) > 65536 {
-		return decision, pacelock.ErrState
+	bad := func() (pacelock.Decision, error) {
+		return pacelock.Decision{}, fmt.Errorf("%w: malformed admission record", pacelock.ErrState)
 	}
-	if err := json.Unmarshal(raw, &decision); err != nil {
-		return decision, fmt.Errorf("%w: malformed admission record", pacelock.ErrState)
+	if len(raw) > 65536 || !utf8.Valid(raw) {
+		return bad()
+	}
+	// Accept only the current Decision object, not missing fields, case aliases,
+	// duplicate keys or unknown extensions. Limited:null is emitted for allowances.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return bad()
+	}
+	seen := make(map[string]bool, 3)
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || seen[name] {
+			return bad()
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return bad()
+		}
+		switch name {
+		case "Allowed":
+			if bytes.Equal(value, []byte("null")) || json.Unmarshal(value, &decision.Allowed) != nil {
+				return bad()
+			}
+		case "RetryAfter":
+			if bytes.Equal(value, []byte("null")) || json.Unmarshal(value, &decision.RetryAfter) != nil {
+				return bad()
+			}
+		case "Limited":
+			if json.Unmarshal(value, &decision.Limited) != nil {
+				return bad()
+			}
+		default:
+			return bad()
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || len(seen) != 3 {
+		return bad()
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return bad()
 	}
 	if err := decision.Validate(); err != nil {
 		return pacelock.Decision{}, err
