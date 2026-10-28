@@ -128,3 +128,6 @@ concurrency, logical expiry, migration, cleanup, ACL/OOM and lost-response fault
 
 Short local baseline/MSET and candidate-cleanup measurements are in the
 [verification record](../../docs/validation/redis-mset-local.md); they are not production SLOs.
+The [Lua scalar-vs-Q2 experiment](bench/lua-parse/README.md) includes a reproducible
+harness and raw timings; its scalar prototype drops policy checks and is not a
+contract-preserving replacement.

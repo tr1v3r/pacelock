@@ -108,3 +108,5 @@ for step := 0; step < 8; step++ {
 旧状态读取、清理、ACL/OOM 和响应丢失故障。
 
 旧协议与 MSET、候选清理的短时本地实测见[验证记录](../../docs/validation/redis-mset-local.md)，不代表生产 SLO。
+[Lua 单数字与 Q2 对照实验](bench/lua-parse/README.zh-CN.md)提供可复现程序和原始耗时；
+其中单数字原型移除了策略校验，不是保持原契约的替换方案。
