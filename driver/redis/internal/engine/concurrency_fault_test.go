@@ -142,7 +142,7 @@ func testContentionLookup(t *testing.T, f *contentionFixture) {
 }
 
 func testContentionBadState(t *testing.T, f *contentionFixture) {
-	for _, kind := range []string{"pending", "record", "quota", "wrong_type"} {
+	for _, kind := range []string{"tagged_record", "record", "quota", "wrong_type"} {
 		t.Run(kind, func(t *testing.T) {
 			l := f.limiter(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -154,14 +154,13 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			var seedErr error
 			want, outcome := ErrState, Unknown
 			switch kind {
-			case "pending":
+			case "tagged_record":
 				_, args, err := l.prepare(rules)
 				if err != nil {
 					t.Fatal(err)
 				}
 				args[0] = time.Minute.Milliseconds()
 				seedErr = f.clients[0].Set(ctx, l.attemptKey("id"), "P1|"+fingerprint(args), time.Minute).Err()
-				want = ErrOutcomeUnknown
 			case "record":
 				seedErr = f.clients[0].Set(ctx, l.attemptKey("id"), "broken", time.Minute).Err()
 			case "quota":
@@ -177,7 +176,7 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			contentionWave(t, 300, func(ctx context.Context, i int) {
 				current := f.caller(l, i)
 				var err error
-				if (kind == "pending" || kind == "record") && i%2 == 0 {
+				if (kind == "tagged_record" || kind == "record") && i%2 == 0 {
 					_, _, err = current.Lookup(ctx, "id")
 				} else {
 					_, err = current.AllowOnce(ctx, "id", time.Minute, rules...)
@@ -189,7 +188,7 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			if quotaState(t, f, l, "q") != before {
 				t.Fatal("failed concurrent requests debited healthy quota")
 			}
-			if kind == "pending" || kind == "record" {
+			if kind == "tagged_record" || kind == "record" {
 				if n, err := f.clients[0].Exists(ctx, l.key("side")).Result(); err != nil || n != 0 {
 					t.Fatalf("wrote side quota: %d %v", n, err)
 				}

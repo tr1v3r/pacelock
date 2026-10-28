@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -11,6 +12,66 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
+	l, c := integration(t)
+	ctx := context.Background()
+	const now int64 = 1700000000000000
+	const clock = "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])"
+	if strings.Count(source, clock) != 1 {
+		t.Fatal("production clock changed")
+	}
+	fixedClock := redis.NewScript(strings.Replace(source, clock, fmt.Sprintf("local now = %d", now), 1))
+	for _, offset := range []int64{-1, 0, 1} {
+		for _, policy := range []string{"same", "step", "burst"} {
+			t.Run(fmt.Sprintf("tat_offset=%d/policy=%s", offset, policy), func(t *testing.T) {
+				r := Rule{Name: "boundary", Policy: Policy{Rate: 1, Period: 7 * time.Microsecond, Burst: 3}, Cost: 1}
+				before := fmt.Sprintf("%d:7:3", now+offset)
+				if policy == "step" {
+					r.Policy.Period = 11 * time.Microsecond
+				} else if policy == "burst" {
+					r.Policy.Burst = 4
+				}
+				if err := c.Set(ctx, l.key(r.Name), before, 0).Err(); err != nil {
+					t.Fatal(err)
+				}
+				keys, args, err := l.prepare([]Rule{r})
+				if err != nil {
+					t.Fatal(err)
+				}
+				values, err := fixedClock.Run(ctx, c, keys, args...).Int64Slice()
+				if offset > 0 && policy != "same" {
+					if err == nil || !errors.Is(scriptFailure("allow", err), ErrPolicyMismatch) {
+						t.Fatalf("active policy change: %v", err)
+					}
+					if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != before {
+						t.Fatalf("active policy mismatch mutated state: %q", raw)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				d, err := decodeDecision(values, []string{r.Name})
+				if err != nil || !d.Allowed {
+					t.Fatalf("plain quota boundary: %+v %v", d, err)
+				}
+				base := now
+				if offset > 0 {
+					base += offset
+				}
+				step := r.Policy.Period.Microseconds()
+				want := fmt.Sprintf("%d:%d:%d", base+step, step, r.Policy.Burst)
+				if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != want {
+					t.Fatalf("quota=%q want=%q", raw, want)
+				}
+				if ttl := c.PTTL(ctx, l.key(r.Name)).Val(); ttl != -1 {
+					t.Fatalf("quota has native TTL: %s", ttl)
+				}
+			})
+		}
+	}
+}
 
 // Compare production Lua against an integer token-bucket oracle. Capture the
 // single MSET and resulting values inside the same script, including debts shorter
@@ -129,7 +190,7 @@ return {decision, states, expiries, writes}
 			state, stateOK := states[i].(string)
 			expected := before[i]
 			if want.Allowed {
-				expected = fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst)
+				expected = fmt.Sprintf("%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst)
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
@@ -142,7 +203,7 @@ return {decision, states, expiries, writes}
 		if want.Allowed {
 			command := []interface{}{"MSET"}
 			for i, r := range rules {
-				command = append(command, keys[i], fmt.Sprintf("Q2|%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst))
+				command = append(command, keys[i], fmt.Sprintf("%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst))
 			}
 			expectedWrites = append(expectedWrites, command)
 		}

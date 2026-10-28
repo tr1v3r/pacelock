@@ -54,12 +54,90 @@ func boundBackends(t *testing.T) []backend {
 func TestBoundDriverContract(t *testing.T) {
 	for _, backend := range boundBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
-			t.Run("atomic copied policies and compatibility", func(t *testing.T) { testBoundAtomic(t, backend) })
+			t.Run("atomic copied policies and shared Rule state", func(t *testing.T) { testBoundAtomic(t, backend) })
 			t.Run("idempotency and recovery", func(t *testing.T) { testBoundIdempotency(t, backend) })
+			t.Run("independent subset admissions", func(t *testing.T) { testBoundSubsets(t, backend) })
+			t.Run("subset idempotency", func(t *testing.T) { testBoundSubsetIdempotency(t, backend) })
 			t.Run("local policy mismatch is uncharged", func(t *testing.T) { testBoundChargePolicyMismatch(t, backend) })
 			t.Run("equivalent effective policies", func(t *testing.T) { testBoundEquivalentPolicies(t, backend) })
 			t.Run("concurrent admission and reordered retries", func(t *testing.T) { testBoundConcurrency(t, backend) })
 		})
+	}
+}
+
+func testBoundSubsets(t *testing.T, backend backend) {
+	for _, once := range []bool{false, true} {
+		ctx := context.Background()
+		quotas := boundQuotas()
+		b := bind(t, limiter(t, backend, 0, freshDomain()), quotas...)
+		call := func(id string, charges ...pacelock.StaticCharge) (pacelock.Decision, error) {
+			if once {
+				r, err := b.AllowOnce(ctx, id, time.Minute, charges...)
+				return r.Decision, err
+			}
+			return b.Allow(ctx, charges...)
+		}
+		if d, err := call("exhaust-rpm", quotas[0].StaticCharge(2)); err != nil || !d.Allowed {
+			t.Fatalf("once=%t exhaust RPM: %+v %v", once, d, err)
+		}
+		if d, err := call("tokens-only", quotas[1].StaticCharge(4)); err != nil || !d.Allowed {
+			t.Fatalf("omitted exhausted RPM blocked tokens: %+v %v", d, err)
+		}
+		if d, err := call("deny-rpm", quotas[0].StaticCharge(1)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"rpm"}) {
+			t.Fatalf("selected denial: %+v %v", d, err)
+		}
+		if d, err := call("tokens-still-debited", quotas[1].StaticCharge(2)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"tokens"}) {
+			t.Fatalf("later denial rolled back prior token debit: %+v %v", d, err)
+		}
+		if d, err := call("remaining-token", quotas[1].StaticCharge(1)); err != nil || !d.Allowed {
+			t.Fatalf("omitted token was debited or denied call charged: %+v %v", d, err)
+		}
+	}
+}
+
+func testBoundSubsetIdempotency(t *testing.T, backend backend) {
+	ctx := context.Background()
+	l := limiter(t, backend, 0, freshDomain())
+	quotas := boundQuotas()
+	omitted := pacelock.Quota{Name: "omitted", Policy: quotas[0].Policy}
+	b := bind(t, l, quotas[0], omitted, quotas[1])
+	// An exhausted omitted quota must neither block admission nor enter its receipt.
+	if d, err := b.Allow(ctx, omitted.StaticCharge(2)); err != nil || !d.Allowed {
+		t.Fatalf("exhaust omitted: %+v %v", d, err)
+	}
+	first, err := b.AllowOnce(ctx, "subset", time.Minute, quotas[1].StaticCharge(3), quotas[0].StaticCharge(1))
+	if err != nil || !first.Allowed || first.Replayed {
+		t.Fatalf("subset admission: %+v %v", first, err)
+	}
+	// Removing or changing only unselected binding entries cannot change identity.
+	omitted.Policy.Burst++
+	for _, other := range []*pacelock.StaticLimiter{b, bind(t, l, quotas...), bind(t, l, omitted, quotas[0], quotas[1])} {
+		r, err := other.AllowOnce(ctx, "subset", time.Minute, quotas[0].StaticCharge(1), quotas[1].StaticCharge(3))
+		if err != nil || !r.Replayed || !reflect.DeepEqual(r.Decision, first.Decision) {
+			t.Fatalf("canonical subset replay: %+v %v", r, err)
+		}
+	}
+	for _, selected := range [][]pacelock.StaticCharge{
+		{quotas[0].StaticCharge(1)},
+		{quotas[1].StaticCharge(3)},
+		{quotas[0].StaticCharge(1), (pacelock.Quota{Name: "omitted", Policy: quotas[0].Policy}).StaticCharge(1), quotas[1].StaticCharge(3)},
+	} {
+		if _, err := b.AllowOnce(ctx, "subset", time.Minute, selected...); !errors.Is(err, pacelock.ErrConflict) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+			t.Fatalf("changed subset must conflict without debit: %v", err)
+		}
+	}
+	if r, err := l.AllowStaticOnce(ctx, "subset", time.Minute, rule("rpm", 2, 1), rule("tokens", 5, 3)); err != nil || !r.Replayed {
+		t.Fatalf("selected-only fingerprint: %+v %v", r, err)
+	}
+	if d, err := b.Allow(ctx, quotas[1].StaticCharge(2), quotas[0].StaticCharge(1)); err != nil || !d.Allowed {
+		t.Fatalf("replay/conflict debited subset: %+v %v", d, err)
+	}
+	denied, err := b.AllowOnce(ctx, "denied-subset", time.Minute, quotas[1].StaticCharge(1))
+	if err != nil || denied.Allowed || denied.Replayed || !reflect.DeepEqual(denied.Limited, []string{"tokens"}) {
+		t.Fatalf("subset denial: %+v %v", denied, err)
+	}
+	if replay, err := b.AllowOnce(ctx, "denied-subset", time.Minute, quotas[1].StaticCharge(1)); err != nil || !replay.Replayed || !reflect.DeepEqual(replay.Decision, denied.Decision) {
+		t.Fatalf("subset denial replay: %+v %v", replay, err)
 	}
 }
 

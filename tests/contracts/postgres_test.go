@@ -50,6 +50,33 @@ func pgScopeID(s pacelock.Scope) string {
 }
 func pgItemID(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }
 
+func TestPostgresRejectsMalformedReceipt(t *testing.T) {
+	db, d, s, l := postgresFixture(t)
+	ctx := context.Background()
+	r := rule("q", 5, 1)
+	if _, err := l.AllowStaticOnce(ctx, "malformed", time.Minute, r); err != nil {
+		t.Fatal(err)
+	}
+	var before int64
+	if err := db.QueryRow(`SELECT tat_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, pgScopeID(s), pgItemID(r.Name)).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE pacelock_admissions SET decision=$1 WHERE scope_id=$2 AND admission_id=$3`, []byte(`{"Allowed":true}`), pgScopeID(s), pgItemID("malformed")); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the driver boundary directly, not only the facade's validation.
+	if _, err := d.AdmitStatic(ctx, pacelock.StaticAdmission{Scope: s, ID: "malformed", Retention: time.Minute, Rules: []pacelock.Rule{r}}); !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+		t.Fatal(err)
+	}
+	if _, found, err := d.Lookup(ctx, pacelock.LookupRequest{Scope: s, ID: "malformed"}); found || !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+		t.Fatal(found, err)
+	}
+	var after int64
+	if err := db.QueryRow(`SELECT tat_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, pgScopeID(s), pgItemID(r.Name)).Scan(&after); err != nil || after != before {
+		t.Fatalf("malformed replay mutated quota: before=%d after=%d err=%v", before, after, err)
+	}
+}
+
 func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
 	db, _, s, l := postgresFixture(t)
 	// A real server-side trigger raises only on this test's second quota. The first

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -75,8 +77,8 @@ func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Durat
 
 // Lookup returns a retained complete decision. found=false does not prove no
 // debit: the record may be expired, lost, or the original command still in flight.
-// A pending record returns ErrOutcomeUnknown. This method never debits and does
-// not extend TTL. RetryAfter is the original observation, not a countdown.
+// Malformed records return ErrState with Unknown. This method never debits or
+// extends retention. RetryAfter is the original observation, not a countdown.
 // Primary routing is intentional: a replica may not yet have the admission.
 // ID has the same bounds as AllowOnce. Use Decision only when err is nil and found is true.
 func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
@@ -106,7 +108,7 @@ func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, fou
 	return d, true, nil
 }
 
-// lookupSource filters expired v2 records while preserving legacy receipts.
+// lookupSource validates receipts and filters logically expired records.
 //
 //go:embed lookup.lua
 var lookupSource string
@@ -127,42 +129,58 @@ func (l *Limiter) attemptKey(id string) string {
 	return fmt.Sprintf("%sattempt:%x", l.prefix, sha256.Sum256([]byte(id)))
 }
 
-// fingerprint binds retention and ordered effective rules to the versioned script arguments.
+// fingerprint binds retention and ordered effective rules, excluding the script's
+// fingerprint argument without modifying the caller's slice.
 func fingerprint(args []interface{}) string {
-	// All values are validated integers or UTF-8 strings. The empty second slot
-	// is included to bind the versioned argument layout, without hash ambiguity.
-	data, _ := json.Marshal(args)
+	values := make([]interface{}, 0, len(args))
+	for i, value := range args {
+		if i != 1 {
+			values = append(values, value)
+		}
+	}
+	data, _ := json.Marshal(values)
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 // decodeRecord validates a retained result; an empty fingerprint or nil name list
 // skips the corresponding caller-specific match.
 func decodeRecord(raw, expected string, expectedNames []string) (Decision, error) {
-	if len(raw) > 65536 || len(raw) < 67 || (raw[:3] != "P1|" && raw[:3] != "C1|") {
+	if len(raw) > 65536 || len(raw) <= 65 || raw[64] != '|' {
 		return Decision{}, fmt.Errorf("%w: malformed admission record", ErrState)
 	}
-	fp := raw[3:67]
+	fp := raw[:64]
 	if _, err := hex.DecodeString(fp); err != nil {
 		return Decision{}, fmt.Errorf("%w: invalid admission fingerprint", ErrState)
 	}
 	if expected != "" && fp != expected {
 		return Decision{}, fmt.Errorf("%w: unexpected admission fingerprint", ErrState)
 	}
-	if raw[:3] == "P1|" {
-		if len(raw) != 67 {
-			return Decision{}, fmt.Errorf("%w: malformed pending record", ErrState)
-		}
-		return Decision{}, ErrOutcomeUnknown
-	}
-	if len(raw) <= 68 || raw[67] != '|' {
-		return Decision{}, fmt.Errorf("%w: missing admission result", ErrState)
-	}
 	var record struct {
 		Names  []string `json:"names"`
 		Values []int64  `json:"values"`
 	}
-	if err := json.Unmarshal([]byte(raw[68:]), &record); err != nil {
+	// Read the two required root fields explicitly, in storage order. Struct
+	// decoding accepts case aliases and duplicate keys, which are not receipts.
+	payload := raw[65:]
+	if !utf8.ValidString(payload) {
+		return Decision{}, fmt.Errorf("%w: invalid admission UTF-8", ErrState)
+	}
+	decoder := json.NewDecoder(strings.NewReader(payload))
+	token := func(want json.Token) bool {
+		got, err := decoder.Token()
+		return err == nil && got == want
+	}
+	if !token(json.Delim('{')) || !token("names") || decoder.Decode(&record.Names) != nil ||
+		!token("values") || decoder.Decode(&record.Values) != nil || !token(json.Delim('}')) {
 		return Decision{}, fmt.Errorf("%w: invalid admission result", ErrState)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return Decision{}, fmt.Errorf("%w: trailing admission result", ErrState)
+	}
+	for _, name := range record.Names {
+		if !utf8.ValidString(name) {
+			return Decision{}, fmt.Errorf("%w: invalid admission name UTF-8", ErrState)
+		}
 	}
 	if expectedNames != nil && (len(record.Names) != len(expectedNames) || !equalNames(record.Names, expectedNames)) {
 		return Decision{}, fmt.Errorf("%w: unexpected admission quota names", ErrState)

@@ -23,13 +23,13 @@ func TestRedisPruneContracts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			complete := "C1|" + strings.Repeat("a", 64) + `|{"names":["q"],"values":[1,0,0]}`
+			complete := strings.Repeat("a", 64) + `|{"names":["q"],"values":[1,0,0]}`
 			const expired = 137
 			for i := 0; i < expired; i++ {
-				key, raw := l.key(fmt.Sprint(i)), fmt.Sprintf("Q2|%d:1:1", now.UnixMicro()-1)
+				key, raw := l.key(fmt.Sprint(i)), fmt.Sprintf("%d:1:1", now.UnixMicro()-1)
 				if i%2 == 0 {
 					key = l.attemptKey(fmt.Sprint(i))
-					raw = fmt.Sprintf("E2|%d|%s", now.UnixMicro()-1, complete)
+					raw = fmt.Sprintf("%d|%s", now.UnixMicro()-1, complete)
 				}
 				if err := f.clients[0].Set(ctx, key, raw, 0).Err(); err != nil {
 					t.Fatal(err)
@@ -37,9 +37,13 @@ func TestRedisPruneContracts(t *testing.T) {
 			}
 			live := contentionRule("live", 1000, 1)
 			requireAllowed(t, l, live)
-			pending := l.attemptKey("legacy-pending")
-			if err := f.clients[0].Set(ctx, pending, "P1|"+strings.Repeat("a", 64), time.Minute).Err(); err != nil {
-				t.Fatal(err)
+			preservedReceipts := map[string]string{
+				l.attemptKey("live-envelope"): fmt.Sprintf("%d|%s", now.Add(time.Hour).UnixMicro(), complete),
+			}
+			for key, raw := range preservedReceipts {
+				if err := f.clients[0].Set(ctx, key, raw, time.Minute).Err(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before := quotaState(t, f, l, "live")
 			cursor := PruneCursor{}
@@ -61,8 +65,13 @@ func TestRedisPruneContracts(t *testing.T) {
 			if deleted != expired {
 				t.Fatalf("deleted=%d want=%d", deleted, expired)
 			}
-			if quotaState(t, f, l, "live") != before || f.clients[0].Exists(ctx, pending).Val() != 1 {
-				t.Fatal("cleanup removed active or legacy state")
+			if quotaState(t, f, l, "live") != before {
+				t.Fatal("cleanup mutated active quota")
+			}
+			for key, want := range preservedReceipts {
+				if raw, err := f.clients[0].Get(ctx, key).Result(); err != nil || raw != want {
+					t.Fatalf("cleanup mutated preserved receipt: got=%q want=%q err=%v", raw, want, err)
+				}
 			}
 			if r, err := l.Prune(ctx, cursor, 3); err != nil || r.Examined != 0 || !r.Cursor.Done() {
 				t.Fatalf("completed cursor: %+v %v", r, err)
@@ -77,7 +86,7 @@ func TestRedisPruneContracts(t *testing.T) {
 			// Concurrent cleanup of an old candidate cannot reset newly admitted debt.
 			racing := f.limiter(t)
 			active := contentionRule("q", 37, 1)
-			if err := f.clients[0].Set(ctx, racing.key("q"), "Q2|1:1:1", 0).Err(); err != nil {
+			if err := f.clients[0].Set(ctx, racing.key("q"), "1:1:1", 0).Err(); err != nil {
 				t.Fatal(err)
 			}
 			selected := PruneCursor{scope: racing.prefix, position: "0", pending: []string{racing.key("q")}}
@@ -99,34 +108,76 @@ func TestRedisPruneContracts(t *testing.T) {
 			}
 			requireDenied(t, racing, active)
 
-			// An unknown encoding remains untouched; malformed v2 expiry errors.
-			bad := l.key("bad")
-			if err := f.clients[0].Set(ctx, bad, "Q2|invalid", 0).Err(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := l.Prune(ctx, PruneCursor{scope: l.prefix, position: "0", pending: []string{bad}}, 1); !errors.Is(err, ErrState) {
-				t.Fatalf("malformed candidate: %v", err)
-			}
-			if f.clients[0].Get(ctx, bad).Val() != "Q2|invalid" {
-				t.Fatal("cleanup deleted malformed state")
-			}
-
-			for _, entry := range []struct{ key, raw string }{
-				{l.key("wrong-role"), "E2|1|" + complete},
-				{l.attemptKey("wrong-role"), "Q2|1:1:1"},
+			// Validate every candidate before deleting anything, including expired
+			// values whose payload has the wrong format or protocol role.
+			for _, entry := range []struct{ name, key, raw string }{
+				{"stale Q2", l.key("bad"), "Q2|1:1:1"},
+				{"active Q2", l.key("bad"), fmt.Sprintf("Q2|%d:1:1", now.Add(time.Hour).UnixMicro())},
+				{"unknown quota", l.key("bad"), "broken"},
+				{"missing quota field", l.key("bad"), "1:1"},
+				{"extra quota field", l.key("bad"), "1:1:1:1"},
+				{"zero step", l.key("bad"), "1:0:1"},
+				{"zero burst", l.key("bad"), "1:1:0"},
+				{"receipt envelope on quota", l.key("bad"), "1|" + complete},
+				{"complete receipt on quota", l.key("bad"), complete},
+				{"pending receipt on quota", l.key("bad"), "P1|" + strings.Repeat("a", 64)},
+				{"quota on receipt", l.attemptKey("bad"), "1:1:1"},
+				{"Q2 on receipt", l.attemptKey("bad"), "Q2|1:1:1"},
+				{"malformed receipt", l.attemptKey("bad"), "1|" + strings.Repeat("a", 64) + "|{}"},
+				{"tagged complete", l.attemptKey("bad"), "C1|" + complete},
+				{"tagged envelope", l.attemptKey("bad"), "E2|1|C1|" + complete},
+				{"tagged marker", l.attemptKey("bad"), "P1|" + strings.Repeat("a", 64)},
 			} {
-				if err := f.clients[0].Set(ctx, entry.key, entry.raw, 0).Err(); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := l.Prune(ctx, PruneCursor{scope: l.prefix, position: "0", pending: []string{entry.key}}, 1); !errors.Is(err, ErrState) {
-					t.Fatalf("wrong protocol role: %v", err)
-				}
-				if f.clients[0].Get(ctx, entry.key).Val() != entry.raw {
-					t.Fatal("cleanup deleted corrupt protocol role")
-				}
+				t.Run(entry.name, func(t *testing.T) {
+					expiredQuota, expiredReceipt := l.key("expired-peer"), l.attemptKey("expired-peer")
+					before := map[string]string{
+						expiredQuota: "1:1:1", expiredReceipt: "1|" + complete, entry.key: entry.raw,
+					}
+					if err := f.clients[0].MSet(ctx, before).Err(); err != nil {
+						t.Fatal(err)
+					}
+					cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{expiredQuota, expiredReceipt, entry.key}}
+					if _, err := l.Prune(ctx, cursor, 3); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
+						t.Fatalf("invalid candidate: %v", err)
+					}
+					for key, want := range before {
+						if raw, err := f.clients[0].Get(ctx, key).Result(); err != nil || raw != want {
+							t.Fatalf("cleanup mutated %s: got=%q want=%q err=%v", key, raw, want, err)
+						}
+					}
+				})
 			}
 
 		})
+	}
+}
+
+func TestRedisPrunePlainQuotaExpiryBoundaries(t *testing.T) {
+	l, c := integration(t)
+	ctx := context.Background()
+	const now int64 = 1700000000000000
+	const clock = "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])"
+	scriptSource := protocolSource + pruneSource
+	if strings.Count(scriptSource, clock) != 1 {
+		t.Fatal("production clock changed")
+	}
+	fixedClock := redis.NewScript(strings.Replace(scriptSource, clock, fmt.Sprintf("local now = %d", now), 1))
+	var keys []string
+	for _, offset := range []int64{-1, 0, 1} {
+		key := l.key(fmt.Sprint(offset))
+		keys = append(keys, key)
+		if err := c.Set(ctx, key, fmt.Sprintf("%d:1:1", now+offset), 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deleted, err := fixedClock.Run(ctx, c, keys).Int64(); err != nil || deleted != 2 {
+		t.Fatalf("expiry boundary: deleted=%d err=%v", deleted, err)
+	}
+	if n := c.Exists(ctx, keys[:2]...).Val(); n != 0 {
+		t.Fatalf("tat <= now left %d quota keys", n)
+	}
+	if raw := c.Get(ctx, keys[2]).Val(); raw != fmt.Sprintf("%d:1:1", now+1) {
+		t.Fatalf("tat > now was mutated: %q", raw)
 	}
 }
 
@@ -134,7 +185,7 @@ func TestRedisPruneLostReplyIsSafeToRepeat(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	key := l.key("expired")
-	if err := c.Set(ctx, key, "Q2|1:1:1", 0).Err(); err != nil {
+	if err := c.Set(ctx, key, "1:1:1", 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 	cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{key}}

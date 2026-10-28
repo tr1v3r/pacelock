@@ -46,8 +46,6 @@ func scriptFailure(op string, err error) error {
 		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrState, err))
 	case "PACE_CONFLICT":
 		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrConflict, err))
-	case "PACE_PENDING":
-		return failure(op, Unknown, fmt.Errorf("%w: %w", ErrOutcomeUnknown, err))
 	case "PACE_RECORD":
 		return failure(op, Unknown, fmt.Errorf("%w: %w", ErrState, err))
 	default:

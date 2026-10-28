@@ -172,7 +172,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 }
 
-func TestRedisManagedLegacyDebtAndStaticReplay(t *testing.T) {
+func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("legacy", 2, 1)
@@ -242,7 +242,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"D3|-1", "D3|9007199254740991", "D3|bad"} {
+	for _, raw := range []string{"D3|-1", "D3|9007199254740991", "D3|bad", "Q2|1:1:1", "P3|1:1:1", "E2|1|C1|removed"} {
 		c.Set(ctx, l.key(r.Name), raw, 0)
 		if _, err := l.AdmitManaged(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s debt: %v", raw, err)

@@ -22,7 +22,7 @@ in this suite add tests only; they do not change admission or accounting behavio
 | Policy initialization race | 200 callers with two policies and unique side quotas | First policy wins; losing policy reports `ErrPolicyMismatch`; errors and denials leave side quotas absent |
 | Validation/cancellation/observer | 600 mixed valid, invalid, pre-canceled and expired-context operations | Exact valid debits, pre-dispatch errors are `NotCharged`, untouched keys remain absent, one correct observer event per call |
 | Lookup/replay race | 300 readers/writers then 500 readers/replays over 100 IDs | Reads observe missing or complete results, never torn records; completed reads/replays do not change quota or refresh TTL |
-| Pending/corrupt state | 300 callers per pending record, malformed record, malformed quota and wrong Redis type | Correct error/outcome classification, no extra debit or new pre-write-error record |
+| Corrupt state | 300 callers per malformed record, malformed quota and wrong Redis type | Correct error/outcome classification, no extra debit or new pre-write-error record |
 | Lost responses | 400 dispatched calls per EOF, cancellation and deadline injection, then 400 recovery calls | Completed Redis work can return `Unknown`; SDK does not retry internally; lookup/replay recovers without a second debit |
 | Small connection pool | 500 callers sharing one client with one connection per node | Exact admission count, bounded completion, client remains usable |
 | Exhausted connection pool | Pin every connection, then 100 deadline-bound calls | Backend deadline errors conservatively report `Unknown`; independently verify no state was written; release restores service |
@@ -44,16 +44,16 @@ No exact p95/p99 latency or fairness among competing callers is asserted.
 The response-loss/cancellation/deadline cases replace a successful **real Redis
 command result** with a transport/context error. They test recovery after execution;
 they do not simulate TCP loss or cancellation interrupting the Redis script.
-Pending/corrupt state cases seed explicit fixtures. The existing ACL integration
+Corrupt state cases seed explicit fixtures. The existing ACL integration
 tests now exercise all-or-none MSET ACL/OOM rejection, errors before/after the
 commit boundary, and recovery of complete records. Additional standalone/Cluster
 cleanup tests cover strict candidate budgets, SCAN overflow, stale candidates and
-200 concurrent cleanup/admission calls without resetting capacity. Legacy Pending
-fixtures remain blocked; new writes never create Pending.
+200 concurrent cleanup/admission calls without resetting capacity. Malformed receipts
+return `ErrState` / `Unknown` without a second debit.
 
 ## CI and local reproduction
 
-Existing required CI check names stay unchanged. All six Go 1.24/stable × Redis
+Existing required CI check names stay unchanged. All six Go 1.26/stable × Redis
 7.0/7/8 jobs run the full suite and additionally repeat contention three times.
 The `cluster` job does the same with both standalone and Cluster configured.
 Every run uses `-race`; repeat runs use `-shuffle=on`. Scenario order is also
@@ -97,7 +97,10 @@ Those need deployment-specific load and fault testing. Redis Cluster fixtures he
 have three masters and no replicas. Existing model/fuzz tests continue to cover
 algorithm boundaries independently of these concurrent executions.
 
-## Local verification — 2026-10-23
+## Archived local verification — 2026-10-23
+
+These results describe the earlier native-TTL protocol and its then-current tests,
+not validation of the current state format or regression suite.
 
 On macOS/arm64 with dedicated Docker Redis 7.4.11 and three Redis 7.4.11 masters:
 

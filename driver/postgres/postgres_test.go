@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/tr1v3r/pacelock"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -374,6 +375,39 @@ func TestReceiptReplayBeforeConfiguration(t *testing.T) {
 		}
 	}
 }
+func TestMalformedReceiptRejectedBeforeConfiguration(t *testing.T) {
+	for _, dynamic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dynamic=%t", dynamic), func(t *testing.T) {
+			a := static()
+			a.ID, a.Retention = "malformed", time.Minute
+			m := managed(1)
+			m.ID, m.Retention = a.ID, a.Retention
+			fingerprint := a.Fingerprint()
+			if dynamic {
+				fingerprint = m.Fingerprint()
+			}
+			raw := []byte(`{"Allowed":true}`)
+			steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions", rows: [][]driver.Value{{fingerprint, raw, testNow + 1000000}}}, sqlStep{kind: "rollback"})
+			d := scripted(t, steps)
+			var receipt pacelock.Receipt
+			var err error
+			if dynamic {
+				receipt, err = d.Admit(context.Background(), m)
+			} else {
+				receipt, err = d.AdmitStatic(context.Background(), a)
+			}
+			if !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown || !reflect.DeepEqual(receipt, pacelock.Receipt{}) {
+				t.Fatalf("malformed replay: %+v %v", receipt, err)
+			}
+			lookup := scripted(t, []sqlStep{{kind: "query", contains: "FROM pacelock_admissions", rows: [][]driver.Value{{raw}}}})
+			decision, found, err := lookup.Lookup(context.Background(), pacelock.LookupRequest{Scope: testScope, ID: a.ID})
+			if found || !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown || !reflect.DeepEqual(decision, pacelock.Decision{}) {
+				t.Fatalf("malformed lookup: %+v %t %v", decision, found, err)
+			}
+		})
+	}
+}
+
 func TestManagedReceiptCommitsWithDebt(t *testing.T) {
 	for _, commitFails := range []bool{false, true} {
 		t.Run(fmt.Sprint(commitFails), func(t *testing.T) {
@@ -425,6 +459,43 @@ func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
 	for _, s := range []string{"CREATE TABLE IF NOT EXISTS pacelock_policies", "interval_us >= 0", "revision >= 1 AND revision <= 9007199254740991"} {
 		if !strings.Contains(schema, s) {
 			t.Errorf("missing %q", s)
+		}
+	}
+}
+
+func TestDecodeDecision(t *testing.T) {
+	for _, want := range []pacelock.Decision{
+		{Allowed: true},
+		{Allowed: true, Limited: []string{}},
+		{RetryAfter: time.Second, Limited: []string{"requests", "tokens"}},
+	} {
+		raw, err := json.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := decodeDecision(raw)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("round trip %s: %+v %v", raw, got, err)
+		}
+	}
+	for _, raw := range []string{
+		`null`, `[]`, `{}`, `{"Allowed":true}`,
+		`{"allowed":true,"RetryAfter":0,"Limited":null}`,
+		`{"Allowed":true,"RetryAfter":0,"Limited":null,"extra":1}`,
+		`{"Allowed":true,"Allowed":false,"RetryAfter":1,"Limited":["q"]}`,
+		`{"Allowed":null,"RetryAfter":1,"Limited":["q"]}`,
+		`{"Allowed":true,"RetryAfter":null,"Limited":null}`,
+		`{"Allowed":false,"RetryAfter":1,"Limited":[null]}`,
+		`{"Allowed":false,"RetryAfter":0,"Limited":["q"]}`,
+		`{"Allowed":true,"RetryAfter":0,"Limited":["q"]}`,
+		`{"Allowed":false,"RetryAfter":1,"Limited":["q","q"]}`,
+		`{"Allowed":true,"RetryAfter":0,"Limited":null} {}`,
+		`{"Allowed":true,"RetryAfter":0,"Limited":null`,
+		"{\"Allowed\":false,\"RetryAfter\":1,\"Limited\":[\"\xff\"]}",
+		strings.Repeat(" ", 65537),
+	} {
+		if got, err := decodeDecision([]byte(raw)); !errors.Is(err, pacelock.ErrState) || !reflect.DeepEqual(got, pacelock.Decision{}) {
+			t.Fatalf("accepted malformed record %q: %+v %v", raw, got, err)
 		}
 	}
 }

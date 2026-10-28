@@ -89,7 +89,11 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 	b := bindForTest(t, l, quotas...)
 	invalid := [][]StaticCharge{
 		nil,
-		{rpm.StaticCharge(1)},
+		{rpm.StaticCharge(0)},
+		{rpm.StaticCharge(-1)},
+		{rpm.StaticCharge(3)},
+		{(Quota{Name: "unknown", Policy: rpm.Policy}).StaticCharge(1)},
+		{{}},
 		{rpm.StaticCharge(1), tokens.StaticCharge(1), (Quota{Name: "extra", Policy: rpm.Policy}).StaticCharge(1)},
 		{rpm.StaticCharge(1), rpm.StaticCharge(1)},
 		{rpm.StaticCharge(1), (Quota{Name: "unknown", Policy: tokens.Policy}).StaticCharge(1)},
@@ -132,6 +136,12 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 		}
 	}
 	for _, current := range []*StaticLimiter{nil, {}} {
+		if _, err := current.Allow(context.Background(), rpm.StaticCharge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+			t.Fatal(err)
+		}
+		if _, err := current.AllowOnce(context.Background(), "id", time.Minute, rpm.StaticCharge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+			t.Fatal(err)
+		}
 		if _, err := current.Allow(context.Background()); !errors.Is(err, ErrInvalid) {
 			t.Fatal(err)
 		}
@@ -233,7 +243,7 @@ func TestBoundStaticChargePolicyValidation(t *testing.T) {
 			b := bindForTest(t, l, quotas...)
 			changed := quotas[0]
 			tc.change(&changed)
-			charges := []StaticCharge{quotas[1].StaticCharge(1), changed.StaticCharge(1)}
+			charges := []StaticCharge{changed.StaticCharge(1)}
 			for _, once := range []bool{false, true} {
 				var err error
 				if once {
@@ -283,6 +293,51 @@ func TestBoundEquivalentStaticChargePolicies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBoundSubsetNormalization(t *testing.T) {
+	var events []Event
+	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+	l, _ := NewWithOptions(s, "test", "subsets", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
+	quotas := append(boundTestQuotas(), Quota{Name: "third", Policy: boundTestQuotas()[0].Policy})
+	b := bindForTest(t, l, quotas...)
+	beforeRules := append([]Rule(nil), b.rules...)
+	beforeIndex := make(map[string]int)
+	for name, i := range b.index {
+		beforeIndex[name] = i
+	}
+	for _, selected := range [][]StaticCharge{
+		{quotas[1].StaticCharge(3)},
+		{quotas[2].StaticCharge(2), quotas[0].StaticCharge(1)},
+		{quotas[0].StaticCharge(1), quotas[2].StaticCharge(2)},
+	} {
+		before := append([]StaticCharge(nil), selected...)
+		want := []Rule{quotas[1].rule(3)}
+		if len(selected) == 2 {
+			want = []Rule{quotas[0].rule(1), quotas[2].rule(2)}
+		}
+		for _, once := range []bool{false, true} {
+			var err error
+			if once {
+				_, err = b.AllowOnce(context.Background(), "id", time.Minute, selected...)
+			} else {
+				_, err = b.Allow(context.Background(), selected...)
+			}
+			if err != nil || !reflect.DeepEqual(s.request.Rules, want) {
+				t.Fatalf("once=%t: rules=%+v want=%+v err=%v", once, s.request.Rules, want, err)
+			}
+			e := events[len(events)-1]
+			if e.RuleCount != len(selected) || e.Result != "allowed" {
+				t.Fatalf("subset observation: %+v", e)
+			}
+			if !reflect.DeepEqual(selected, before) || !reflect.DeepEqual(b.rules, beforeRules) || !reflect.DeepEqual(b.index, beforeIndex) {
+				t.Fatal("subset admission mutated caller or binding")
+			}
+		}
+	}
+	if len(events) != 6 || s.calls != 6 {
+		t.Fatalf("events=%d calls=%d", len(events), s.calls)
 	}
 }
 

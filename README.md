@@ -58,7 +58,7 @@ The default `@latest` currently selects an older API and does not include all AP
 shown here. Keep the resolved pseudo-version in your application's `go.mod` for
 reproducible builds; `@dev` moves as development continues and is not a stable release.
 
-The constructor now accepts `pacelock.Driver`, a breaking pre-v1 change.
+The constructor accepts `pacelock.Driver`.
 Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` for the example.
 
 ```go
@@ -153,18 +153,24 @@ values are public name/cost literals.
   afterward affects neither the binding nor previously constructed charges. Each
   call assembles its own rules without mutating inputs.
 - `bound.Allow(ctx, charges...)` and `bound.AllowOnce(ctx, id, retention, charges...)`
-  accept `...StaticCharge`. Each call must supply every bound quota exactly once,
-  constructed with `q.StaticCharge(cost)`, with `0 < cost <= Burst`. Missing, duplicate,
+  accept any nonempty subset of bound quotas as `...StaticCharge`, each selected quota
+  exactly once, constructed with `q.StaticCharge(cost)`, with `0 < cost <= Burst`.
+  Omitted quotas are neither checked nor charged. An empty call, duplicate,
   unknown, zero-value or otherwise invalid charges return `ErrInvalid` with
   `NotCharged` before dispatch. There are no default costs or zero-cost exemptions.
+  Each call is atomic only across its selected quotas; separate calls are not atomic
+  together. Submit every quota that must pass together in the same call.
 - Each charge's captured policy must be fully valid, and its name, effective
   `Interval` (rounded upward to microseconds), `Burst` and `Revision` must match the binding.
   Different valid `Rate` / `Period` expressions with the same effective interval
   are accepted. An invalid or nonmatching captured policy is a local `ErrInvalid` /
   `NotCharged`, not the backend's `ErrPolicyMismatch`.
-- Charge order is arbitrary. The binding order determines `Decision.Limited` and
-  the ordered rules used for idempotency. Reordering charges preserves a replay;
-  changing the binding order changes the retained attempt's parameters.
+- Charge order is arbitrary. Selected quotas are normalized to binding order for
+  `Decision.Limited` and idempotency. Fingerprints include only the selected quota
+  names, their normalized order, effective policies, costs and retention. Reordering
+  charges preserves a replay; changing the subset or the selected quotas' relative
+  binding order with the same retained ID returns `ErrConflict`. Unselected quotas
+  do not affect the fingerprint.
 - Build quota names from trusted application identity and select policies in
   application code. For dynamic tenants/models, create a binding for the applicable
   set; binding is local and needs no prior registration or mandatory cache.
@@ -190,6 +196,8 @@ if !decision.Allowed { /* reject */ }
 ### Explicit low-level static API
 
 `Rule` remains the caller-policy path: use `AllowStatic(ctx, rules...)`, `AllowStaticOnce(ctx, id, retention, rules...)` and `WaitStatic(ctx, rules...)`, with policy Revision 0. `Validate` / `Evaluate` are pure helpers; `EvaluateManaged` also remains pure. Static admission cannot bypass configured dynamic quotas.
+
+Neither static API detects an applicable quota omitted by the caller.
 
 ## PostgreSQL and the Driver boundary
 
@@ -349,17 +357,19 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 - An ID is scoped to namespace/domain. Default dynamic fingerprints bind **ordered
   names, costs and retention**, not policy versions. Static fingerprints additionally
-  bind effective intervals and bursts, preserving the legacy encoding. Bound static
+  bind effective intervals and bursts, preserving the effective-rule encoding. Bound static
   calls normalize order. Cross-mode reuse conflicts through the fingerprint discriminator.
   Names must be valid UTF-8 for retained admissions; IDs contain 1–256 bytes.
+  Static binding fingerprints contain only selected quotas, normalized to binding
+  order; changing the subset conflicts, while omitted quotas do not affect identity.
 - Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
   a value covering your recovery window. Replays and queries never extend it.
 - Both allow and deny decisions are retained. A denied ID stays denied while
   retained; a later, genuinely new attempt needs a new ID. Replayed `RetryAfter`
   is the original delay, not a countdown or fresh capacity estimate.
 - Redis writes quotas and the complete decision in one final MSET, after all
-  checks/encoding. New operations do not create Pending. Legacy pending records
-  still return `ErrOutcomeUnknown`; do not delete or refund them automatically.
+  checks/encoding. Malformed receipts return `ErrState` / `Unknown`, never a
+  missing result or permission for a new admission.
   Redis expiry is logical; schedule bounded physical cleanup for every scope.
   See the [Redis protocol and cleanup guide](driver/redis/README.md).
 - `found=false` does **not** prove no debit. The command may still be in flight,
@@ -373,14 +383,14 @@ For a complete application-owned flow using explicit static policies, see the [d
 ## Errors and observation
 
 Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`, `ErrConflict`,
-`ErrOutcomeUnknown`, `ErrBackend`, and wrapped context/transport errors. Admission
+`ErrBackend`, and wrapped context/transport errors. Admission
 errors expose `*pacelock.Error` with `Op` and `Outcome`:
 
 | Result | Meaning | Application action |
 |---|---|---|
 | `Allowed=false`, no error | Quota denied; no quota debit | Reject or schedule a new attempt |
 | `NotCharged` error | This invocation is known not to debit | Fix input/policy, or handle cancellation |
-| `Unknown` error | May have charged; legacy writes can be partial | Query retained ID; use explicit recovery policy |
+| `Unknown` error | May have charged; confirmation is unavailable | Query retained ID; use explicit recovery policy |
 | `Lookup`: missing | No retained complete result was found | Preserve uncertainty about previous execution |
 
 A `NotCharged` result never clears uncertainty from an earlier call. On **any**
@@ -420,7 +430,7 @@ panics propagate.
 - Pre-dispatch cancellation does not debit; cancellation after dispatch cannot
   undo Redis writes. The SDK creates no goroutines and imposes no hidden timeout.
 - Use dedicated keys, primary routing, TLS/authentication and Redis `noeviction`.
-  The new Redis protocol uses a single commit command; crash/failover durability
+  The Redis protocol uses a single commit command; crash/failover durability
   still depends on deployment.
   Clock jumps, eviction and failover data loss can weaken limits and deduplication.
 
@@ -459,6 +469,5 @@ Deployment load, memory and failover tools with raw local observations are docum
 MIT licensed.
 
 The core, both runtime drivers, the optional pgx example and the
-integration-test modules require Go 1.26+ (the pgx/text floor was 1.25; the
-go-redis v9.23 dependency raises it to 1.26). Production applications should
+integration-test modules require Go 1.26+. Production applications should
 use a maintained Go release.

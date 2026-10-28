@@ -37,7 +37,7 @@ type PruneResult struct {
 	Cursor PruneCursor
 	// Examined is the number of candidate values checked, at most the requested limit.
 	Examined int
-	// Deleted is the number of logically expired v2 values physically removed.
+	// Deleted is the number of logically expired values physically removed.
 	Deleted int64
 }
 
@@ -56,8 +56,8 @@ var pruneScript = redis.NewScript(protocolSource + pruneSource)
 // Prune performs at most one SCAN page and checks at most limit candidate values,
 // with 1 <= limit <= MaxPruneKeys. SCAN COUNT is only a discovery-work hint;
 // overflow is buffered in the cursor. This is not a hard Redis latency bound.
-// Legacy state keeps its native TTL. Active debt, live receipts and old pending
-// markers are never reset. The caller owns scheduling; no worker is started.
+// Active debt and live receipts are never reset. Malformed candidates abort the
+// batch without deleting any keys. The caller owns scheduling; no worker is started.
 func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := l.ready(ctx); err != nil {
 		return PruneResult{}, failure("prune", NotCharged, err)

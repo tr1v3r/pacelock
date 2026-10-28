@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -105,7 +106,6 @@ func TestTransportAndReplyErrors(t *testing.T) {
 		{"policy", nil, serverError("PACE_POLICY conflict"), ErrPolicyMismatch, NotCharged},
 		{"state", nil, serverError("PACE_STATE wrong type"), ErrState, NotCharged},
 		{"record", nil, serverError("PACE_RECORD bad record"), ErrState, Unknown},
-		{"pending", nil, serverError("PACE_PENDING incomplete"), ErrOutcomeUnknown, Unknown},
 		{"conflict", nil, serverError("PACE_CONFLICT mismatch"), ErrConflict, NotCharged},
 		{"non-server error", nil, errors.New("PACE_STATE not a Redis error"), ErrBackend, Unknown},
 		{"prefix lookalike", nil, serverError("PACE_STATE_OTHER not ours"), ErrBackend, Unknown},
@@ -175,7 +175,7 @@ func TestAdmissionObservers(t *testing.T) {
 		if once {
 			request.ID, request.Retention = "id", time.Minute
 			dynamicOp, staticOp = "allow_once", "allow_static_once"
-			s.reply = []interface{}{int64(1), "C1|" + request.Fingerprint() + `|{"names":["q"],"values":[1,0,0]}`}
+			s.reply = []interface{}{int64(1), request.Fingerprint() + `|{"names":["q"],"values":[1,0,0]}`}
 		}
 		if _, err := l.AdmitManaged(context.Background(), request); err != nil {
 			t.Fatal(err)
@@ -184,7 +184,7 @@ func TestAdmissionObservers(t *testing.T) {
 			rules := []Rule{rule("q", 1, 1)}
 			_, args, _ := l.prepare(rules)
 			args[0] = request.Retention.Milliseconds()
-			s.reply = []interface{}{int64(1), "C1|" + fingerprint(args) + `|{"names":["q"],"values":[1,0,0]}`}
+			s.reply = []interface{}{int64(1), fingerprint(args) + `|{"names":["q"],"values":[1,0,0]}`}
 			if _, err := l.AllowOnce(context.Background(), "id", request.Retention, rules...); err != nil {
 				t.Fatal(err)
 			}
@@ -204,10 +204,25 @@ func TestAdmissionObservers(t *testing.T) {
 
 func TestRecordValidation(t *testing.T) {
 	fp := strings.Repeat("a", 64)
-	good := "C1|" + fp + `|{"names":["q"],"values":[1,0,0]}`
-	for _, raw := range []string{"", "C1|", "P1|" + fp + "x", "C1|" + strings.Repeat("z", 64) + "|{}", "C1|" + fp + "|{}", "C1|" + fp + `|{"names":["q"],"values":[0,1,2]}`} {
+	good := fp + `|{"names":["q"],"values":[1,0,0]}`
+	for _, raw := range []string{"", "C1|", "P1|" + fp + "x", strings.Repeat("z", 64) + "|{}", fp + "|{}", fp + `|{"names":["q"],"values":[0,1,2]}`} {
 		if _, err := decodeRecord(raw, "", nil); !errors.Is(err, ErrState) {
 			t.Fatalf("%q: %v", raw, err)
+		}
+	}
+	for _, payload := range malformedReceiptPayloads() {
+		if _, err := decodeRecord(fp+"|"+payload, "", nil); !errors.Is(err, ErrState) {
+			t.Fatalf("malformed payload %q: %v", payload, err)
+		}
+	}
+	for _, name := range []string{"é中文😀", "quote\"slash/\\\n\t\x00"} {
+		encoded, err := json.Marshal([]string{name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := `{"names":` + string(encoded) + `,"values":[0,86400000000,1]}`
+		if d, err := decodeRecord(fp+"|"+payload, fp, []string{name}); err != nil || d.Allowed || d.RetryAfter != MaxHorizon || !reflect.DeepEqual(d.Limited, []string{name}) {
+			t.Fatalf("valid Unicode/escaped name: %+v %v", d, err)
 		}
 	}
 	if d, err := decodeRecord(good, fp, []string{"q"}); err != nil || !d.Allowed {
@@ -216,7 +231,7 @@ func TestRecordValidation(t *testing.T) {
 	if _, err := decodeRecord(good, fp, []string{"other"}); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
-	if _, err := decodeRecord("P1|"+fp, "", nil); !errors.Is(err, ErrOutcomeUnknown) {
+	if _, err := decodeRecord("P1|"+fp, "", nil); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 }
@@ -244,7 +259,7 @@ func FuzzInterval(f *testing.F) {
 }
 
 func FuzzRecord(f *testing.F) {
-	f.Add("C1|" + strings.Repeat("a", 64) + `|{"names":["q"],"values":[1,0,0]}`)
+	f.Add(strings.Repeat("a", 64) + `|{"names":["q"],"values":[1,0,0]}`)
 	f.Add("")
 	f.Fuzz(func(t *testing.T, raw string) {
 		d, err := decodeRecord(raw, "", nil)
@@ -271,6 +286,15 @@ func TestFingerprintBindsParameters(t *testing.T) {
 	equivalent[0] = int64(1000)
 	if fingerprint(first) != fingerprint(equivalent) {
 		t.Fatal("effective policies should match")
+	}
+	saved := append([]interface{}(nil), first...)
+	first[1] = "already populated"
+	if fingerprint(first) != fingerprint(saved) || first[1] != "already populated" {
+		t.Fatal("fingerprint slot included or mutated")
+	}
+	first[1] = saved[1]
+	if !reflect.DeepEqual(first, saved) {
+		t.Fatal("fingerprint mutated arguments")
 	}
 	if reflect.DeepEqual(first, second) {
 		t.Fatal(fmt.Sprint(first))

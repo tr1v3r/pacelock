@@ -57,7 +57,7 @@ This deliberately sacrifices automatic progress when execution is uncertain.
 A real adapter must reconcile with its own business record/provider operation ID;
 there is no exactly-once guarantee across a file, Redis and an upstream service.
 
-Missing records, pending errors and expired recovery windows preserve uncertainty.
+Missing records, malformed receipts and expired recovery windows preserve uncertainty.
 Denied IDs stay denied and their RetryAfter is historical, not a countdown.
 Lookup does not extend retention. The example never deletes or refunds Redis
 state, and never reuses an expired ID. A genuinely new business attempt uses `new`

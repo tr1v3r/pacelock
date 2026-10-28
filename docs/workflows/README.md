@@ -47,6 +47,11 @@ reviewed snapshots, not automatically synchronized documentation. Re-trace the
 implementation and update the JSON references when API, accounting, storage or
 recovery contracts change; do not just replace the revision hash.
 
+The Redis diagram's labels and cards describe the current unversioned quota and
+receipt formats, no Pending state, and role-aware pruning. Its pinned source links
+predate this cleanup; use the [current Redis guide](../../driver/redis/README.md)
+for the authoritative storage and error contract.
+
 The checked-in HTML was generated with Archify 3.2.0. To regenerate from the
 repository root with that version available, set `ARCHIFY_CLI` to the installed
 `bin/archify.mjs` path and run:

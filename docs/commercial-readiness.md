@@ -6,8 +6,7 @@ For PostgreSQL deployment limits, see [its guide](../driver/postgres/README.md).
 Scope: the existing immediate, known-cost, weighted multidimensional limiter.
 This work does not turn the limiter into a scheduler, concurrency owner, billing
 ledger, or output-token reservation system. Dynamic-default admission is a breaking
-pre-v1 API migration; see [compatibility](compatibility.md). Quota wire encoding and
-accounting semantics are preserved.
+pre-v1 API migration; see [compatibility](compatibility.md). Accounting semantics are preserved.
 
 ## Contracts fixed before implementation
 
@@ -23,10 +22,10 @@ accounting semantics are preserved.
   entire business request across multiple upstream attempts. Retention is an
   explicit whole-millisecond duration between 1 ms and 24 h. It is not extended
   by reads or replays. Order is significant: dynamic IDs bind names/costs and retention, not policy
-  versions; static IDs also bind effective policies with their preserved encoding.
+  versions; static IDs also bind effective policies with effective-rule encoding.
   Dynamic/static modes have distinct fingerprints. A mismatch never charges.
-- New Redis operations commit complete results without Pending. Legacy Pending
-  remains unknown and cannot be replayed into another debit while retained.
+- Redis operations commit complete results. Malformed receipts return
+  `ErrState` / `Unknown`, never missing or permission to debit again.
   Logical expiry is independent of bounded application-scheduled cleanup.
   Only a complete record can be replayed or returned by `Lookup`. Missing records
   do not prove that an admission never happened. Expiry, eviction, deletion and
@@ -43,7 +42,7 @@ accounting semantics are preserved.
 ## Delivery checks
 
 - [x] Defensive inputs, complete reply/state validation, typed outcome errors
-- [x] Bounded idempotency, conflict detection, pending protection, lookup
+- [x] Bounded idempotency, conflict detection, corrupt-receipt protection, lookup
 - [x] Optional dependency-free observation and runnable examples
 - [x] Model, fuzz, contention, replay, cancellation and lost-response tests
 - [x] Redis Cluster integration and reproducible local/CI infrastructure

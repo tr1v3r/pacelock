@@ -31,6 +31,8 @@ JSON 是可编辑图源。每个 HTML 均内置查看器，读者无需安装 Ar
 [`6a8d58fc558fb8896ac9b8919c62f1bd7f3f8109`](https://github.com/tr1v3r/pacelock/tree/6a8d58fc558fb8896ac9b8919c62f1bd7f3f8109)。
 后续文件即使迁移，源码链接也固定指向该版本。这些是经过核对的快照，不会随实现自动更新。API、扣减、存储或恢复契约变化时，需要重新追踪实现并更新 JSON 引用，不能只替换版本哈希。
 
+Redis 图的标签及说明卡片已更新为当前无版本前缀的额度/结果格式、无 Pending 状态及按键角色清理。固定源码链接早于此次清理；存储和错误契约以[当前 Redis 指南](../../driver/redis/README.zh-CN.md)为准。
+
 已提交 HTML 由 Archify 3.2.0 生成。在安装该版本后，从仓库根目录重新生成；先将 `ARCHIFY_CLI` 设为安装目录中的 `bin/archify.mjs` 路径：
 
 ```sh

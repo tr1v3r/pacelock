@@ -40,15 +40,15 @@ slot; more independent domains can spread across Cluster masters, but on standal
 Redis they still share one server. The tool uses the existing conservative
 no-redirect client settings; topology mutation tests are separate from load tests.
 
-## Redis v2 interpretation
+## Current Redis protocol interpretation
 
 The archived October 24 results below used the old native-TTL/Pending protocol.
 They do not measure the current MSET protocol or cleanup throughput. `-expiry`
-waits for logical deadlines; v2 physical memory/key counts will not drain without
+waits for logical deadlines; current physical memory/key counts will not drain without
 application-scheduled `Driver.Prune` cycles. Measure cleanup lag, per-scope scan
 cost, idle scopes and prolonged maintenance failure as part of new acceptance.
-The old ACL partial-write scenario is replaced by an all-or-none MSET ACL test;
-legacy Pending preservation still has regression coverage.
+Current ACL coverage checks all-or-none MSET rejection; malformed receipts return
+`ErrState` / `Unknown` and cannot become a new admission.
 
 ## What the load results mean
 
@@ -71,7 +71,8 @@ legacy Pending preservation still has regression coverage.
   SCAN key counts are approximate while expiry is active. Used memory includes
   allocator, connections and server overhead; RSS need not fall when keys expire.
 - `-expiry` waits retention plus two seconds and samples again. First-allow records
-  and quota debt should drain; first-denial records expire but the deliberately
+  and quota debt logically expire; physical removal requires cleanup. First-denial
+  records expire but the deliberately
   exhausted 24-hour quota keys remain. Replay/lookup seeds deliberately have a
   24-hour retention, so the short retention wait is not an expiry assertion there.
 - The tool captures Go build/dependency/VCS metadata and Redis version/config
@@ -92,8 +93,8 @@ The noeviction OOM case sets maxmemory below current usage on the isolated fixtu
 admissions must return errors, never normal quota denials. The synthetic clock
 case executes production Lua with only its `now` expression replaced: a forward
 jump replenishes capacity early and a large backward jump returns PACE_STATE.
-It is an algorithm boundary test, **not a host-clock chaos test**. The core suite now exercises genuine MSET ACL rejection and legacy Pending
-preservation. The archived partial-write observation describes only the old protocol.
+It is an algorithm boundary test, **not a host-clock chaos test**. The core suite exercises genuine MSET ACL rejection and malformed-receipt
+recovery boundaries. The archived partial-write observation describes only the old protocol.
 Live ASK/MOVED migration and lost-response accounting are covered by the Cluster
 transport regression introduced with the redirect work; run it when that change
 is present. Passing standalone/three-master tests alone does not establish HA.
@@ -103,7 +104,7 @@ is present. Passing standalone/three-master tests alone does not establish HA.
 Define the target load, duration, tail latency, maximum tolerable lost admissions,
 extra capacity, recovery time and memory headroom **before** running acceptance.
 Do not encode machine-specific throughput thresholds in shared CI. Archive raw
-results even when limits fail. Follow up on Unknown/pending outcomes without
+results even when limits fail. Follow up on Unknown outcomes without
 resetting quota keys or reusing expired IDs. Set alarms for Redis memory, eviction,
 replication lag, pool saturation and backend errors; define explicit degraded-mode
 and business-reconciliation procedures.

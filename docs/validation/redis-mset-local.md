@@ -2,6 +2,12 @@
 
 > Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
 
+> Archived snapshot: these runs used Q2 quotas, E2/C1/P1 receipts and the
+> then-supported native-TTL readers. Those formats/readers are not current.
+> Measurements and regression coverage below describe only that earlier tree;
+> they do not validate today's key prefix, quota/receipt format or fingerprint.
+> See [current state contracts](../compatibility.md#redis-state).
+
 These are short local correctness/performance observations, not production SLOs.
 Measured on macOS/arm64, Apple M3 Pro, Go 1.27.3, Redis 7.4.2 on host loopback,
 without persistence or replicas. Baseline source: `0f70f5f`. Candidate: the MSET
@@ -46,7 +52,7 @@ module verification, vet and real-backend race tests. The Redis engine reported
 Both existing fuzz targets passed 20 seconds each. Go 1.27.3 govulncheck v1.9.0
 with `-test` passed all five modules with no reachable vulnerabilities.
 
-Regression coverage includes one-MSET model snapshots; before/after-commit and
+The archived run’s regression coverage included one-MSET model snapshots; before/after-commit and
 encoding faults; actual ACL/OOM rejection; lost replies; logical expiry without
 physical deletion; legacy debt/C1/P1; strict cleanup candidate budgets and overflow;
 malformed/wrong-role state; stale candidates; lost cleanup replies; Cluster ACLs;

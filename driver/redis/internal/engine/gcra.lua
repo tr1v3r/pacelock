@@ -17,11 +17,8 @@ if retention > 0 then
         local read, problem = receipt_body(raw, now)
         if problem == 'malformed' then return redis.error_reply('PACE_RECORD malformed admission record') end
         if read then
-            if string.sub(read, 4, 67) ~= fingerprint then
+            if string.sub(read, 1, 64) ~= fingerprint then
                 return redis.error_reply('PACE_CONFLICT admission parameters differ')
-            end
-            if string.sub(read, 1, 3) == 'P1|' then
-                return redis.error_reply('PACE_PENDING legacy interrupted admission; outcome unknown')
             end
             return {1, read}
         end
@@ -83,7 +80,7 @@ for i = 1, count do
     if managed then
         writes[#writes + 1] = string.format('D3|%.0f', nexttat)
     else
-        writes[#writes + 1] = string.format('Q2|%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])
+        writes[#writes + 1] = string.format('%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])
     end
     result[i + 2] = 0
     if wait > 0 then
@@ -97,8 +94,8 @@ if result[1] == 0 then writes = {} end
 local response = result
 if recordKey then
     -- All encoding and response assembly must finish before the commit command.
-    local complete = 'C1|' .. fingerprint .. '|' .. cjson.encode({names = names, values = result})
-    local envelope = string.format('E2|%.0f|', now + retention * 1000) .. complete
+    local complete = fingerprint .. '|' .. encode_decision(names, result)
+    local envelope = string.format('%.0f|', now + retention * 1000) .. complete
     writes[#writes + 1] = recordKey
     writes[#writes + 1] = envelope
     response = {0, complete}

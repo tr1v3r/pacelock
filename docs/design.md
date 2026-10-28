@@ -4,9 +4,9 @@
 
 ## 已实现：可替换 Driver
 
-核心模块只依赖标准库，公共构造函数接受 `Driver`，这是 pre-v1 破坏性变更。
+核心模块只依赖标准库，公共构造函数接受 `Driver`。
 Driver 以 `Admit` / `Lookup` 表达完整原子操作，Redis 和 PostgreSQL 是独立模块。
-Redis 保留原键名，v2 值采用逻辑过期和单次 MSET 提交；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
+Redis 采用逻辑过期和单次 MSET 提交；PG 用 domain 行锁、服务端时间和短事务，复用核心 `Evaluate`。
 当前不支持调用者业务事务接入，不提供跨后端债务迁移或故障自动切换。
 统一契约见 [driver.md](driver.md)，PG 部署边界见[指南](../driver/postgres/README.zh-CN.md)。
 下文 Redis 数据布局、Lua 提交和逻辑过期说明专属于 Redis Driver。
@@ -38,7 +38,9 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 默认路径是控制面用 `UpdatePolicies` 发布 `Quota{Name, Policy{Revision>0, ...}}`，数据面仅调用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce`。后端在同一原子边界读取最新策略与债务；请求节点不用携带 revision、刷新 binding 或轮询配置。Revision 为正且单调递增，最大 9007199254740991；同版本同有效策略只读成功，旧版本或冲突返回 `ErrPolicyMismatch`。更新永久配置，不读写、不重标定、不重置绝对 TAT；缩小 burst 后超过容量的债务仍自然恢复。`Rate=0` 暂停并返回 `ErrPaused` / `NotCharged`，更高 revision 恢复；缺失策略返回 `ErrPolicyMissing`，不是无限额度。没有默认动态 Wait，也没有后台轮询。
 
-显式静态路径要求 Revision=0：`BindStatic` 本地校验并复制固定额度，得到不可变且并发安全的 `StaticLimiter`。通过 `q.StaticCharge(cost)` 捕获完整额度值与消耗到封装的 `StaticCharge`，构造不校验、不做 I/O；不要用字段字面量。每次绑定准入必须为全部额度各提供一次合法消耗，按绑定顺序整理；遗漏、重复、未知或策略不匹配在派发前返回 `ErrInvalid` / `NotCharged`。修改原 Quota 不影响已有绑定或消耗；变更静态策略需新建绑定，但不能重置债务或绕过后端冲突保护。
+显式静态路径要求 Revision=0。`BindStatic` 在本地校验并复制固定额度集合，返回 `StaticLimiter`，不访问后端。通过 `q.StaticCharge(cost)` 捕获额度快照和消耗。`Allow` / `AllowOnce` 每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性。空调用、重复、未知额度、零值 StaticCharge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 StaticCharge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 StaticCharge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
+
+Charge 顺序不影响结果，选中额度按绑定顺序整理，用于阻塞额度和幂等参数。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集或选中额度的相对绑定顺序返回 `ErrConflict`，未选中额度不影响指纹。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 StaticCharge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
 
 底层调用方策略保留 `Rule`，使用 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`。动态 `Driver.Admit(Admission)` 是必需契约；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 与 `PolicyDriver` 分别提供静态准入和配置发布，缺少可选能力时返回 `ErrUnsupported`。`Lookup` 共享。已配置动态策略的名称拒绝新静态准入，历史回执仍先重放。`Validate` / `Evaluate` / `EvaluateManaged` 保持纯计算。
 
@@ -88,7 +90,7 @@ allowed   = retry == 0
 
 ```text
 pacelock:v1:{sha256(length(namespace):namespace + domain)}:sha256(Name)
-static debt = Q2|TAT_microseconds:effective_interval_microseconds:Burst
+static debt = TAT_microseconds:effective_interval_microseconds:Burst
 dynamic debt = D3|TAT_microseconds
 configuration = P3|effective_interval_microseconds:Burst:Revision (permanent)
 ```
@@ -97,11 +99,12 @@ configuration = P3|effective_interval_microseconds:Burst:Revision (permanent)
 
 对于未命中已有准入记录的新尝试，脚本读取 Redis TIME，再读取并校验全部额度状态、计算全部候选值，全部通过后才写入额度；`AllowOnce` 的拒绝记录仍会保存。显式静态模式下，活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。上述静态校验仅在状态存在时有效；默认动态配置永久保留 revision 栅栏，策略变更使用 UpdatePolicies 并保留绝对 TAT。静态配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
 
-额度在 TAT 时逻辑过期，表示容量已全部恢复。所有校验、候选值、JSON 和响应编码在写入前完成，最后仅一次 MSET 提交本次允许的全部额度和完整准入记录；拒绝只保存准入记录，普通 Allow 拒绝不写入。结果使用 `E2|expires_us|C1|fingerprint|json`，按 Redis 时间加 retention 逻辑过期。重放不修改截止时间。
+静态额度使用 `tat:interval:burst`，动态债务使用 `D3|tat`；债务均在 `tat <= now` 时逻辑过期，不依赖原生 TTL，表示容量已全部恢复，静态额度可采用新策略，动态配置身份永久保留。所有校验、候选值、JSON 和响应编码在写入前完成，最后仅一次 MSET 提交本次允许的全部额度和完整准入记录；拒绝只保存准入记录，普通 Allow 拒绝不写入。结果使用 `expires_us|fingerprint|decision_json`，按 Redis 时间加 retention 逻辑过期。重放不修改截止时间。
 
-MSET 清除原生 TTL。应用通过 `Driver.Prune(ctx, scope, cursor, limit)` 调度物理清理：每次最多发现一页 SCAN、读取 limit 个候选值（上限 64），多出的候选保留在不透明游标中。SCAN COUNT 为提示，不是扫描耗时硬上限。候选在短 Lua 内重新读取、检查过期，最后一次 DEL；不能凭旧扫描结果删除并发更新后的状态。应对所有使用过的作用域重复完整周期；清理故障不影响逻辑过期，但会积累内存。域内不会聚合成一个大 key。永久配置/revision 不参与 Prune。
+MSET 清除原生 TTL。应用通过 `Driver.Prune(ctx, scope, cursor, limit)` 调度物理清理：每次最多发现一页 SCAN、读取 limit 个候选值（上限 64），多出的候选保留在不透明游标中。SCAN COUNT 为提示，不是扫描耗时硬上限。候选在短 Lua 内按键角色重新读取：`:attempt:` 解析结果记录，额度键解析额度。全部候选校验通过后，一次 DEL 删除已过期额度和结果记录；格式损坏或角色不符则整批报错、不删除。不能凭旧扫描结果删除并发更新后的状态。应对所有使用过的作用域重复完整周期；清理故障不影响逻辑过期，但会积累内存。域内不会聚合成一个大 key。
+永久配置/revision 在校验后永久保留，不参与删除。
 
-Period 和 Burst × I 仍限制为 24 小时。TAT 以整微秒序列化；服务端时钟须处于 IEEE-754 精确整数范围。旧值继续读取并保留债务、原生 TTL 和 Pending；启用新写入前须停止并排空旧写入方，不能混跑或直接回滚。详见 Redis 中英文指南及 compatibility.md。
+Period 和 Burst × I 仍限制为 24 小时。TAT 以整微秒序列化；服务端时钟须处于 IEEE-754 精确整数范围。静态结果指纹按规则顺序编码为 `[retention_ms,step,burst,cost,name,...]`，没有空占位项。损坏的结果记录返回 `ErrState` / `Unknown`，不会视为缺失或授权重新准入。详见 Redis 中英文指南及[状态契约](compatibility.md#redis-state)。
 
 复杂度是每次 O(维度数)；单次最多 32 维，避免任意长脚本阻塞 Redis。不作通用吞吐量承诺；可复现基准及实测环境见 [verification.md](verification.md)。
 
@@ -148,11 +151,13 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 ## 已实现：有保留期限的幂等准入与查询
 
-`AllowOnce` 的 ID 在 namespace/domain 内生效，默认动态指纹绑定有序名称、Cost 和保留期，不绑定策略版本；显式静态指纹还绑定有效间隔与 Burst，保持旧编码。两种模式有指纹区分，跨模式复用 ID 返回 ErrConflict。回执先于当前配置或暂停检查重放。保留期限为 1ms～24h 的整毫秒，重放和查询不延长逻辑截止时间。
+`AllowOnce` 的 ID 在 namespace/domain 内生效，默认动态指纹绑定有序名称、Cost 和保留期，不绑定策略版本；显式静态指纹还绑定有效间隔与 Burst，使用有效规则编码。两种模式有指纹区分，跨模式复用 ID 返回 ErrConflict。回执先于当前配置或暂停检查重放。保留期限为 1ms～24h 的整毫秒，重放和查询不延长逻辑截止时间。
 
-记录与额度同槽，使用独立 `attempt:sha256(id)` 后缀。脚本先读有效记录：完整记录直接重放，参数不符报冲突，旧 P1 报 ErrOutcomeUnknown。无有效记录时检查所有额度、完成编码，最后一次 MSET 提交允许的额度及完整结果。新操作没有 Pending。拒绝仍会保存，所以相同 ID 不会随容量恢复改变决策。
+静态指纹只包含本次选中额度，按绑定顺序整理；改变子集或选中额度的相对顺序会冲突。
 
-故障测试验证真实 MSET ACL 拒绝和 OOM 不留下部分额度/结果，提交前错误不写入，提交后错误及丢响应可恢复完整结果；同时保留旧 Pending 的阻断测试。逻辑过期、过期策略变更、有界清理、扫描溢出、陈旧候选与清理响应丢失均有测试。
+记录与额度同槽，使用独立 `attempt:sha256(id)` 后缀。脚本先读有效记录：完整记录直接重放，参数不符报冲突；损坏记录返回 `ErrState` / `Unknown`。记录缺失或合法过期时检查所有额度、完成编码，最后一次 MSET 提交允许的额度及完整结果。拒绝仍会保存，所以相同 ID 不会随容量恢复改变决策。
+
+故障测试验证真实 MSET ACL 拒绝和 OOM 不留下部分额度/结果，提交前错误不写入，提交后错误及丢响应可恢复完整结果；损坏记录阻止重新准入。逻辑过期、过期策略变更、有界清理、扫描溢出、陈旧候选与清理响应丢失均有测试。
 
 `Lookup` 使用主节点路由，返回保留的原始决策；RetryAfter 是原始观测值。缺失不证明从未扣减：记录可能过期、被删除、被淘汰或在故障切换中丢失，原命令也可能仍在执行。幂等窗口仅覆盖记录存续期，不保证全时段 exactly-once，更不保证上游执行恰好一次。
 
@@ -160,7 +165,7 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 ## 已实现：错误与观测
 
-准入错误包装为 `*Error`，保留 errors.Is/As 与底层错误链。Outcome 为 NotCharged 或 Unknown；前者只说明本次调用未扣减，不消除先前尝试的不确定性。返回协议损坏、传输错误、运行时错误和处理中记录均保守标记 Unknown。任何错误下忽略 Decision。
+准入错误包装为 `*Error`，保留 errors.Is/As 与底层错误链。Outcome 为 NotCharged 或 Unknown；前者只说明本次调用未扣减，不消除先前尝试的不确定性。返回协议损坏、传输错误、运行时错误和损坏的结果记录均保守标记 Unknown。任何错误下忽略 Decision。
 
 `NewWithOptions` 提供可选 Observer，同步执行且不创建后台 goroutine。事件包含操作、耗时、结果、规则数、重放标识和错误。调用方负责回调并发安全与指标低基数；panic 向外传播。SDK 不引入具体遥测运行时依赖。
 
@@ -186,7 +191,7 @@ Airlock 的并发准入限制正在执行的工作量；Pacelock 限制随时间
 
 ## 验证与参考
 
-测试覆盖参数与精度边界、联合拒绝不扣减、跨客户端加权竞争、策略冲突、状态损坏、过期恢复、命名隔离、派发前取消、并发幂等、拒绝重放、响应丢失后的恢复及 ACL 部分写入。还有三主节点 Cluster 路由、随机 token bucket 模型对照、模糊测试和性能基准。CI 配置真实 Redis 与 Go race detector。
+测试覆盖参数与精度边界、联合拒绝不扣减、跨客户端加权竞争、策略冲突、状态损坏、过期恢复、命名隔离、派发前取消、并发幂等、拒绝重放、响应丢失后的恢复及 MSET ACL 原子拒绝。还有三主节点 Cluster 路由、随机 token bucket 模型对照、模糊测试和性能基准。CI 配置真实 Redis 与 Go race detector。
 
 本地验证记录见 [verification.md](verification.md)。未承诺生产故障切换持久性、OOM 下的可用性、生产吞吐或 LLM 供应商兼容性；这些需要目标部署验证。
 

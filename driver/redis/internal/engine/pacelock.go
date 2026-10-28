@@ -30,7 +30,6 @@ var (
 	ErrPolicyMismatch = pacelock.ErrPolicyMismatch
 	ErrState          = pacelock.ErrState
 	ErrConflict       = pacelock.ErrConflict
-	ErrOutcomeUnknown = pacelock.ErrOutcomeUnknown
 	ErrBackend        = pacelock.ErrBackend
 )
 
@@ -75,7 +74,7 @@ func NewWithOptions(client redis.Scripter, namespace, domain string, options Opt
 		return nil, err
 	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:v1:{%x}:", digest), observer: options.Observer}, nil
+	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:{%x}:", digest), observer: options.Observer}, nil
 }
 
 // nilClient detects nil interfaces and typed nil transports without invoking them.
@@ -91,7 +90,7 @@ func nilClient(client redis.Scripter) bool {
 	return false
 }
 
-// protocolSource contains shared logical-expiry and legacy-format readers.
+// protocolSource contains shared quota and admission-record readers.
 //
 //go:embed protocol.lua
 var protocolSource string

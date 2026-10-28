@@ -32,8 +32,6 @@ var (
 	ErrState = errors.New("pacelock: invalid backend state")
 	// ErrConflict reports reuse of a retained ID with different parameters.
 	ErrConflict = errors.New("pacelock: admission ID used with different parameters")
-	// ErrOutcomeUnknown reports an admission whose debit cannot be established.
-	ErrOutcomeUnknown = errors.New("pacelock: admission outcome unknown")
 	// ErrBackend wraps an unclassified backend or transport failure.
 	ErrBackend = errors.New("pacelock: backend failure")
 	// ErrPaused rejects a fresh admission until the managed policy is resumed.

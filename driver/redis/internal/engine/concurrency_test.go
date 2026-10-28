@@ -201,7 +201,7 @@ func TestRedisConcurrency(t *testing.T) {
 				{"policy_race", testContentionPolicy},
 				{"invalid_and_canceled", testContentionCancellation},
 				{"lookup_and_replay", testContentionLookup},
-				{"pending_and_corrupt", testContentionBadState},
+				{"malformed_records_and_quotas", testContentionBadState},
 				{"lost_responses", testContentionLostResponses},
 				{"small_pool", testContentionSmallPool},
 				{"pool_exhaustion", testContentionPoolExhaustion},

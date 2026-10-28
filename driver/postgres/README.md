@@ -98,6 +98,24 @@ Old PostgreSQL code cannot coexist with active dynamic policies: it does not che
 the separate configuration table and can bypass managed limits. Run Migrate during
 controlled setup with no concurrent migration runners; DDL takes table locks.
 
+The common `BindStatic` API validates and copies fixed quotas locally. Construct charges
+with `q.StaticCharge(cost)`, a value-receiver method that captures the complete quota and
+cost in private fields without validation or I/O; do not use charge field literals.
+`Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
+charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
+accept any nonempty subset of bound quotas as `...StaticCharge`, each selected quota
+exactly once with `0 < cost <= Burst`. Omitted quotas are neither checked nor charged.
+Selected charges are normalized to binding order. Idempotency fingerprints include
+only selected names, normalized order, effective policies, costs and retention;
+changing the subset with the same retained ID returns `ErrConflict`. Reordering
+input charges does not change the fingerprint. Separate calls are not atomic together.
+Each captured policy must be fully valid, and its name, effective interval (rounded upward
+to microseconds) and burst must match the binding. Equivalent valid policy
+expressions are accepted. Empty calls, duplicate, unknown, invalid or mismatched charges return local
+`ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
+Rule APIs share the same Driver and storage; blocking admission uses `limiter.WaitStatic` with rules, not a bound wait method.
+See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+
 ## Transactions and failure contract
 
 Each admission uses Read Committed, INSERT ON CONFLICT for a permanent domain guard,

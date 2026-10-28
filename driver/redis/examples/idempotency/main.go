@@ -52,7 +52,7 @@ func main() {
 		defer cancel()
 		decision, found, lookupErr := limiter.Lookup(query, id)
 		log.Printf("recovery: found=%t decision=%+v error=%v", found, decision, lookupErr)
-		// Missing/pending records do not establish that no debit happened.
+		// Missing records or lookup errors do not establish that no debit happened.
 		return
 	}
 	log.Printf("original decision: %+v", receipt)

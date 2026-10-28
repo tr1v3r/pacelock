@@ -182,7 +182,7 @@ func run() error {
 		}
 		limiters[i] = l
 		digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-		prefixes[i] = fmt.Sprintf("pacelock:v1:{%x}:*", digest)
+		prefixes[i] = fmt.Sprintf("pacelock:{%x}:*", digest)
 		if *mode == "deny" || *mode == "once-deny" {
 			if _, err := l.AllowStatic(ctx, rules...); err != nil {
 				return err

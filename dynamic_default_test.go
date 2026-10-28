@@ -21,9 +21,10 @@ func (*dynamicOnlyDriver) Lookup(context.Context, LookupRequest) (Decision, bool
 	return Decision{}, false, nil
 }
 
-func TestAdmissionFingerprintCompatibility(t *testing.T) {
+func TestAdmissionFingerprintEncoding(t *testing.T) {
 	static := StaticAdmission{Rules: []Rule{sampleRule()}, Retention: time.Minute}
-	if got, want := static.Fingerprint(), "0121d9100e9fab0980a9be637a02f64ef8c5b0b6899317d77ffee647a9ec1002"; got != want {
+	// Static fingerprints use the current protocol without a compatibility slot.
+	if got, want := static.Fingerprint(), "10e07ca7947bdd45374a09b74df360d81744c2cc95a6c4dd828928bdb5098c94"; got != want {
 		t.Fatalf("static fingerprint changed: %s != %s", got, want)
 	}
 	dynamic := Admission{Charges: []Charge{{Name: "q", Cost: 1}}, Retention: time.Minute}

@@ -24,12 +24,21 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
 
 默认先用 `UpdatePolicies` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
 
+每次静态绑定调用接受已绑定额度的任意非空子集，
+每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。
+选中 StaticCharge 按绑定顺序整理，幂等指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；
+同一仍保留的 ID 改变子集返回 `ErrConflict`，调整传入 StaticCharge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
+须与绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 StaticCharge 在准入前
+本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待仍通过 `limiter.WaitStatic` 传入规则，不提供绑定等待方法。
+详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+
 ## 单命令提交与恢复
 
 Lua 读取准入记录及本次涉及的额度，校验策略、计算 GCRA，提前编码全部值及响应，
 最后仅执行一次 `MSET`。允许时提交最多 32 个独立的小额度值和一条完整结果；拒绝时
 只提交结果；普通 `Allow` 只提交获准扣减的额度。不会读取或重写整个 domain 对象。
-新准入不再写 Pending。`Lookup` 查询权威主节点，不延长保留期限。
+`Lookup` 查询权威主节点，不延长保留期限。
 
 脚本收到明确的 MSET 命令拒绝（例如 ACL/OOM）时返回 `NotCharged`。没有明确拒绝响应
 的错误，包括响应丢失，仍为 `Unknown`。提交后丢响应可通过保留的完整结果恢复。
@@ -61,11 +70,11 @@ Lua 准入中读取后端最新策略，调用方无需刷新 binding 或传递 
 burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。用更高 revision 恢复，债务
 随时间自然恢复。不提供动态 Wait；仅提供 `WaitStatic`。结果先于当前策略校验重放，跨更新、暂停也不变；
 历史允许结果**不代表可以再次执行上游请求**。托管 fingerprint 绑定有序名称、消耗和保留期，
-不包含策略版本。静态 fingerprint 不变，同 ID 的静态与托管请求冲突。
+不包含策略版本。静态 fingerprint 编码有效规则，同 ID 的静态与托管请求冲突。
 
 配置与债务分离：同槽 `policy:<name_hash>` 键永久保存 `P3|interval_us:burst:revision`，
 interval 为零表示暂停。更新只读写配置，不读写债务或其过期时间；相同 revision 的等效更新
-完全不写入。原额度键保存 `D3|tat_us` 托管债务，仍可读取 Q2/旧债务。Prune 回收过期债务，
+完全不写入。原额度键保存 `D3|tat_us` 托管债务，仍可读取 普通静态债务。Prune 回收过期债务，
 但校验并永久保留配置；内存包含所有曾配置名称，不提供自动策略退役或重置。
 
 激活前必须让**全部读取、写入及维护进程**升级为理解新协议的版本：旧写入方不检查配置键，
@@ -74,16 +83,18 @@ interval 为零表示暂停。更新只读写配置，不读写债务或其过�
 
 ## 逻辑过期与有界物理清理
 
-键名和 hash tag 保持 `pacelock:v1:{scope_hash}:...`，新值格式为：
+键前缀为 `pacelock:{scope_hash}:`，结果记录使用 `attempt:` 后缀。值格式为：
 
 ```text
-额度：Q2|tat_us:interval_us:burst（静态）或 D3|tat_us（托管债务）
+额度：tat_us:interval_us:burst（静态）或 D3|tat_us（托管债务）
 策略：P3|interval_us:burst:revision（独立同槽键）
-结果：E2|expires_us|C1|fingerprint|decision_json
+结果：expires_us|fingerprint|decision_json
 ```
 
 静态额度在 TAT 时逻辑过期，表示债务已全部恢复；托管额度的债务也在 TAT 时恢复，但策略身份永不过期。
 结果在 Redis 准入时间加 retention 后过期。即使键仍存在，读取也会忽略逻辑过期的静态状态。重放和查询不延长截止时间。
+
+结果仅接受写入器规范 JSON：固定字段顺序、整数数值及 UTF-8 名称；先校验再判断过期。拒绝已移除的 Q2/E2/C1/P1 格式。
 这些编码属于内部协议，应用不得自行构造。
 
 MSET 会清除原生 TTL，因此应用必须安排物理清理以控制内存。准入正确性依赖逻辑过期，
@@ -109,8 +120,10 @@ for step := 0; step < 8; step++ {
   最多发现一页 SCAN。COUNT 仅为提示，不是扫描工作量或延迟硬上限；多出的键保存在游标中。
 - 发现阶段按作用域路由到当前主节点，支持 Cluster。SCAN 实际遍历所在节点的键空间，
   再按作用域筛选；大量作用域重复扫描可能昂贵，需单独测量和安排维护预算。
-- 短 Lua 重新读取候选值，最后一次 DEL 删除已过期的 v2 值。旧扫描结果不能授权删除
-  已被并发更新的活跃债务或新记录。旧格式及 Pending 保留原生 TTL。
+- 短 Lua 按键角色重新读取候选值：`:attempt:` 键解析结果记录，额度键解析
+  `tat:interval:burst`。全部候选校验通过后，一次 DEL 删除已过期额度和结果记录。
+  格式损坏或角色不符时整批报错、不删除。旧扫描结果不能授权删除已被并发更新的活跃
+  债务或新记录。
 - 仅成功时使用 `Examined`、`Deleted`、`Cursor`。丢失清理响应后可安全重试；计数不构成
   恰好一次的审计账本。
 - 游标不可透明解析或序列化，只在内存中保留并绑定作用域。重启或拓扑变化后从零开始。
@@ -120,16 +133,14 @@ for step := 0; step < 8; step++ {
   清理额外需要 `+scan +del`，可使用独立维护身份；Cluster 还需 `+cluster|slots`。
   详见[安全策略](../../SECURITY.md)。
 
-## 升级与回滚
+## 结果记录处理
 
-启用 v2 写入前停止旧写入方并等待在途调用结束。不支持新旧写入方混跑，也不支持未经转换
-直接回滚。保持原键、作用域和策略：新读取器兼容旧额度字符串和 C1 记录，保留原债务及结果
-的剩余 TTL；新的成功扣减会原地更新为 v2 值。旧 P1 仍返回 `ErrOutcomeUnknown`，不会自动
-退款或删除；v2 不再产生 P1。旧脚本无法理解新值。
+结果记录使用逻辑过期，指纹按规则顺序编码为
+`[retention_ms,step,burst,cost,name,...]`。损坏记录返回 `ErrState` / `Unknown`，
+不会视为缺失或授权重新准入；应保留不确定性并排查，不自动删记录或退款。
+详见[状态契约](../../docs/compatibility.md#redis-state)。
 
-部署前安排清理并更新 ACL。不要通过改名或删键获得新容量。回滚需先停止写入，进行保留
-债务和绝对截止时间的转换，或等待全部债务、记录过期并清理；未提供自动回滚转换器。
-详见[兼容性说明](../../docs/compatibility.md)。
+部署前安排清理并配置 ACL。不要通过改名或删键获得新容量。
 
 使用主节点、TLS/认证、受控 ACL、noeviction 和明确的持久化配置。
 [运维说明](../../docs/operations.md)、[核心用法](../../README.zh-CN.md)及
@@ -137,8 +148,8 @@ for step := 0; step < 8; step++ {
 
 在本模块执行 `REDIS_ADDR=localhost:16379 go run ./examples/llm`。
 根目录执行 `sh scripts/check.sh` 检查全部模块；Redis 测试覆盖模型对照、并发、逻辑过期、
-旧状态读取、清理、ACL/OOM 和响应丢失故障。
+状态校验、结果记录处理、清理、ACL/OOM 和响应丢失故障。
 
 旧协议与 MSET、候选清理的短时本地实测见[验证记录](../../docs/validation/redis-mset-local.md)，不代表生产 SLO。
-[Lua 单数字与 Q2 对照实验](bench/lua-parse/README.zh-CN.md)提供可复现程序和原始耗时；
+历史 [Lua 编码对照实验](bench/lua-parse/README.zh-CN.md)提供当时额度编码的可复现程序和原始耗时；
 其中单数字原型移除了策略校验，不是保持原契约的替换方案。
