@@ -101,7 +101,7 @@ var protocolSource string
 var admissionSource string
 
 // source is the complete script, also used by model and failure-injection tests.
-var source = protocolSource + admissionSource
+var source = protocolSource + "\nlocal managed = false\n" + admissionSource
 
 // admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
 var admissionScript = redis.NewScript(source)
@@ -123,26 +123,27 @@ func interval(r Rule) (int64, error) {
 // A timeout or cancellation after dispatch can leave the debit outcome unknown.
 // On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow", len(rules))
+	finish := l.observe(ctx, "allow_static", len(rules))
 	defer func() { finish(decision, false, err) }()
 	if err := l.ready(ctx); err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
+		return Decision{}, failure("allow_static", NotCharged, err)
 	}
 	keys, args, err := l.prepare(rules)
 	if err != nil {
-		return Decision{}, failure("allow", NotCharged, err)
+		return Decision{}, failure("allow_static", NotCharged, err)
 	}
+	keys = l.withPolicyKeys(keys, rules)
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
-		return Decision{}, scriptFailure("allow", err)
+		return Decision{}, scriptFailure("allow_static", err)
 	}
 	values, err := cmd.Int64Slice()
 	if err != nil {
-		return Decision{}, failure("allow", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
+		return Decision{}, failure("allow_static", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
 	}
 	d, err := decodeDecision(values, namesOf(rules))
 	if err != nil {
-		return Decision{}, failure("allow", Unknown, err)
+		return Decision{}, failure("allow_static", Unknown, err)
 	}
 	return d, nil
 }
@@ -172,6 +173,11 @@ func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 		step, _ := interval(r)
 		keys[i] = l.key(r.Name)
 		args = append(args, step, r.Policy.Burst, r.Cost, r.Name)
+	}
+	for _, r := range rules {
+		if r.Policy.Revision != 0 {
+			return nil, nil, fmt.Errorf("%w: use managed admission for managed policies", ErrInvalid)
+		}
 	}
 	return keys, args, nil
 }

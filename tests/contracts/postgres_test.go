@@ -54,7 +54,7 @@ func TestPostgresRejectsMalformedReceipt(t *testing.T) {
 	db, d, s, l := postgresFixture(t)
 	ctx := context.Background()
 	r := rule("q", 5, 1)
-	if _, err := l.AllowOnce(ctx, "malformed", time.Minute, r); err != nil {
+	if _, err := l.AllowStaticOnce(ctx, "malformed", time.Minute, r); err != nil {
 		t.Fatal(err)
 	}
 	var before int64
@@ -65,7 +65,7 @@ func TestPostgresRejectsMalformedReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Exercise the driver boundary directly, not only the facade's validation.
-	if _, err := d.Admit(ctx, pacelock.Admission{Scope: s, ID: "malformed", Retention: time.Minute, Rules: []pacelock.Rule{r}}); !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+	if _, err := d.AdmitStatic(ctx, pacelock.StaticAdmission{Scope: s, ID: "malformed", Retention: time.Minute, Rules: []pacelock.Rule{r}}); !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 		t.Fatal(err)
 	}
 	if _, found, err := d.Lookup(ctx, pacelock.LookupRequest{Scope: s, ID: "malformed"}); found || !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
@@ -93,7 +93,7 @@ func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
 	if _, err := db.Exec("CREATE TRIGGER " + name + " BEFORE INSERT OR UPDATE ON pacelock_quotas FOR EACH ROW EXECUTE FUNCTION " + name + "()"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := l.AllowOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
+	_, err := l.AllowStaticOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
 	if err == nil || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
 	if _, err = db.Exec("DROP TRIGGER " + name + " ON pacelock_quotas"); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := l.AllowOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
+	receipt, err := l.AllowStaticOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
 	if err != nil || !receipt.Allowed || receipt.Replayed {
 		t.Fatal(receipt, err)
 	}
@@ -179,18 +179,18 @@ func TestPostgresLostCommitReplyRecovery(t *testing.T) {
 	}
 	broken, _ := pacelock.New(fault, s.Namespace, s.Domain)
 	connector.armed.Store(true)
-	if _, err := broken.AllowOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+	if _, err := broken.AllowStaticOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 		t.Fatal(err)
 	}
 	decision, found, err := l.Lookup(context.Background(), "lost")
 	if err != nil || !found || !decision.Allowed {
 		t.Fatal(decision, found, err)
 	}
-	replay, err := l.AllowOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1))
+	replay, err := l.AllowStaticOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1))
 	if err != nil || !replay.Replayed || !replay.Allowed {
 		t.Fatal(replay, err)
 	}
-	if d, err := normal.Admit(context.Background(), pacelock.Admission{Scope: s, Rules: []pacelock.Rule{rule("q", 1, 1)}}); err != nil || d.Allowed {
+	if d, err := normal.AdmitStatic(context.Background(), pacelock.StaticAdmission{Scope: s, Rules: []pacelock.Rule{rule("q", 1, 1)}}); err != nil || d.Allowed {
 		t.Fatal(d, err)
 	}
 }
@@ -210,7 +210,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	_, err = l.AllowOnce(ctx, "canceled", time.Minute, r)
+	_, err = l.AllowStaticOnce(ctx, "canceled", time.Minute, r)
 	cancel()
 	if !errors.Is(err, context.DeadlineExceeded) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		d, err := l.Allow(ctx, r)
+		d, err := l.AllowStatic(ctx, r)
 		if err == nil && !d.Allowed {
 			err = fmt.Errorf("stale transaction clock: %+v", d)
 		}
@@ -241,7 +241,7 @@ func TestPostgresPrunePreservesActiveDebt(t *testing.T) {
 	db, d, s, l := postgresFixture(t)
 	short := rule("expired", 1, 1)
 	short.Policy.Period = 20 * time.Millisecond
-	if _, err := l.AllowOnce(context.Background(), "short", 20*time.Millisecond, short); err != nil {
+	if _, err := l.AllowStaticOnce(context.Background(), "short", 20*time.Millisecond, short); err != nil {
 		t.Fatal(err)
 	}
 	mustAllow(t, l, rule("active", 1, 1))
@@ -250,7 +250,7 @@ func TestPostgresPrunePreservesActiveDebt(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatal(n, err)
 	}
-	decision, err := l.Allow(context.Background(), rule("active", 1, 1))
+	decision, err := l.AllowStatic(context.Background(), rule("active", 1, 1))
 	if err != nil || decision.Allowed {
 		t.Fatal(decision, err)
 	}

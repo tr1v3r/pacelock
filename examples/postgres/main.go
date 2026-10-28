@@ -40,14 +40,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	rpm := pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}}
-	tokens := pacelock.Quota{Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}}
-	// Bind copies the fixed quota set; each charge captures its quota by value.
-	bound, err := limiter.Bind(rpm, tokens)
-	if err != nil {
+	rpm := pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10}}
+	tokens := pacelock.Quota{Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000}}
+	// Publish from an application-owned monotonic configuration source.
+	// Admission callers need only names and costs, not policy snapshots.
+	if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil {
 		log.Fatal(err)
 	}
-	d, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
+	d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 	if err != nil {
 		log.Printf("admission failed: outcome=%s error=%v", pacelock.OutcomeOf(err), err)
 		return

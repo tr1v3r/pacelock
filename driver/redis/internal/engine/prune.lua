@@ -6,7 +6,10 @@ for i = 1, #KEYS do
     local raw = redis.pcall('GET', KEYS[i])
     if type(raw) == 'table' and raw.err then return redis.error_reply('PACE_STATE unreadable cleanup candidate') end
     if raw then
-        if string.find(KEYS[i], ':attempt:', 1, true) then
+        if string.find(KEYS[i], ':policy:', 1, true) then
+            -- Managed policies are permanent, including paused policies.
+            if not policy_state(raw) then return redis.error_reply('PACE_STATE malformed cleanup policy') end
+        elseif string.find(KEYS[i], ':attempt:', 1, true) then
             local body, problem = receipt_body(raw, now)
             if problem == 'malformed' then return redis.error_reply('PACE_STATE malformed cleanup receipt') end
             if problem == 'expired' then expired[#expired + 1] = KEYS[i] end

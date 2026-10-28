@@ -33,6 +33,6 @@ func (l *Limiter) observe(ctx context.Context, op string, count int) func(Decisi
 		if err != nil {
 			result = "error"
 		}
-		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, Replayed: op == "allow_once" && replayed, RetryAfter: d.RetryAfter, Err: err})
+		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, Replayed: (op == "allow_once" || op == "allow_static_once") && replayed, RetryAfter: d.RetryAfter, Err: err})
 	}
 }

@@ -70,7 +70,7 @@ func main() {
 	info, err := c.Info(ctx, "server").Result()
 	must(err)
 	start := strings.Index(string(protocol), "local function quota_state(")
-	end := strings.Index(string(protocol), "local function receipt_body(")
+	end := strings.Index(string(protocol), "local function policy_state(")
 	if start < 0 || end < 0 {
 		panic("reader boundaries missing")
 	}
@@ -193,9 +193,9 @@ return sum
 	full := []fullCase{}
 	for _, n := range []int{1, 4, 32} {
 		for _, tuple := range []bool{false, true} {
-			mode, script := "scalar", scalarProtocol+"\n"+scalarGCRA
+			mode, script := "scalar", scalarProtocol+"\nlocal managed = false\n"+scalarGCRA
 			if tuple {
-				mode, script = "tuple", string(protocol)+"\n"+string(gcra)
+				mode, script = "tuple", string(protocol)+"\nlocal managed = false\n"+string(gcra)
 			}
 			sha, err := c.ScriptLoad(ctx, script).Result()
 			must(err)
@@ -259,7 +259,7 @@ return sum
 		LuaSHA256                 string `json:"lua_sha256"`
 		Rounds, Iterations, Batch int
 		Results                   []*Result `json:"results"`
-	}{info, "tat_us:interval_us:burst", fmt.Sprintf("%x", sha256.Sum256([]byte(string(protocol)+"\n"+string(gcra)))), *rounds, *iterations, *batch, results}
+	}{info, "tat_us:interval_us:burst", fmt.Sprintf("%x", sha256.Sum256([]byte(string(protocol)+"\nlocal managed = false\n"+string(gcra)))), *rounds, *iterations, *batch, results}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	must(enc.Encode(out))

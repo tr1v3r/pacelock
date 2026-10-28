@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,6 +43,144 @@ func (h *askLossHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.
 			}
 		}
 		return err
+	}
+}
+
+// TestClusterStaticResharding fails closed when static debt exists but its
+// explicit policy key is absent on a migrating slot. The server-side error count
+// detects retries even inside go-redis's node transport loop.
+func TestClusterStaticResharding(t *testing.T) {
+	addresses := os.Getenv("PACELOCK_REDIS_CLUSTER_ADDRS")
+	if addresses == "" {
+		t.Skip("Cluster fixture required")
+	}
+	for _, retries := range []int{-1, 0, 2} {
+		t.Run(fmt.Sprintf("retries=%d", retries), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			admin := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ",")})
+			defer admin.Close()
+			l, err := New(admin, "static-resharding", fmt.Sprint(time.Now().UnixNano()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			slot, err := admin.ClusterKeySlot(ctx, l.key("q")).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			slots, err := admin.ClusterSlots(ctx).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sourceAddr, targetAddr string
+			for _, s := range slots {
+				if int(slot) >= s.Start && int(slot) <= s.End {
+					sourceAddr = s.Nodes[0].Addr
+				}
+			}
+			for _, s := range slots {
+				if s.Nodes[0].Addr != sourceAddr {
+					targetAddr = s.Nodes[0].Addr
+					break
+				}
+			}
+			if sourceAddr == "" || targetAddr == "" {
+				t.Fatal("need multiple masters")
+			}
+			source := redis.NewClient(&redis.Options{Addr: sourceAddr, MaxRetries: -1})
+			defer source.Close()
+			target := redis.NewClient(&redis.Options{Addr: targetAddr, MaxRetries: -1})
+			defer target.Close()
+			sourceID, err := source.ClusterMyID(ctx).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetID, err := target.ClusterMyID(ctx).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep debt on its original owner. No keys are migrated or created on target.
+			defer func() {
+				cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				if err := source.Do(cleanup, "cluster", "setslot", slot, "stable").Err(); err != nil {
+					t.Error(err)
+				}
+				if err := target.Do(cleanup, "cluster", "setslot", slot, "stable").Err(); err != nil {
+					t.Error(err)
+				}
+				if err := source.Del(cleanup, l.key("q"), l.policyKey("q")).Err(); err != nil {
+					t.Error(err)
+				}
+			}()
+			r := rule("q", 2, 1)
+			if d, e := l.Allow(ctx, r); e != nil || !d.Allowed {
+				t.Fatalf("seed: %+v %v", d, e)
+			}
+			before, err := source.Get(ctx, l.key("q")).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, e := source.Exists(ctx, l.policyKey("q")).Result(); e != nil || n != 0 {
+				t.Fatalf("policy must be absent: %d %v", n, e)
+			}
+			client := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: retries, MaxRedirects: 3, ClusterSlots: func(context.Context) ([]redis.ClusterSlot, error) { return slots, nil }})
+			defer client.Close()
+			l.client = safeScripter(client)
+			if err := client.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error { return admissionScript.Load(ctx, node).Err() }); err != nil {
+				t.Fatal(err)
+			}
+			if err := target.Do(ctx, "cluster", "setslot", slot, "importing", sourceID).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := source.Do(ctx, "cluster", "setslot", slot, "migrating", targetID).Err(); err != nil {
+				t.Fatal(err)
+			}
+			countErrors := func() int64 {
+				t.Helper()
+				info, e := source.Info(ctx, "errorstats").Result()
+				if e != nil {
+					t.Fatal(e)
+				}
+				for _, line := range strings.Split(info, "\n") {
+					if raw, ok := strings.CutPrefix(strings.TrimSpace(line), "errorstat_TRYAGAIN:count="); ok {
+						n, e := strconv.ParseInt(raw, 10, 64)
+						if e != nil {
+							t.Fatal(e)
+						}
+						return n
+					}
+				}
+				return 0
+			}
+			attemptsBefore := countErrors()
+			d, err := l.Allow(ctx, r)
+			if !errors.Is(err, ErrBackend) || OutcomeOf(err) != Unknown || !strings.Contains(err.Error(), "TRYAGAIN") || d.Allowed {
+				t.Fatalf("resharding: %+v %v", d, err)
+			}
+			if attempts := countErrors() - attemptsBefore; attempts != 1 {
+				t.Fatalf("hidden command replay: TRYAGAIN responses=%d, want 1", attempts)
+			}
+			if got, e := source.Get(ctx, l.key("q")).Result(); e != nil || got != before {
+				t.Fatalf("rejected admission changed debt: %q %v", got, e)
+			}
+			if err := source.Do(ctx, "cluster", "setslot", slot, "stable").Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := target.Do(ctx, "cluster", "setslot", slot, "stable").Err(); err != nil {
+				t.Fatal(err)
+			}
+			if n, e := source.Exists(ctx, l.policyKey("q")).Result(); e != nil || n != 0 {
+				t.Fatalf("rejected admission wrote policy: %d %v", n, e)
+			}
+			// Exactly one token remains after the seeded debit: TRYAGAIN consumed none.
+			for _, want := range []bool{true, false} {
+				d, e := l.Allow(ctx, r)
+				if e != nil || d.Allowed != want {
+					t.Fatalf("remaining quota want %t: %+v %v", want, d, e)
+				}
+			}
+		})
 	}
 }
 
@@ -134,18 +274,32 @@ func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 	if err := c.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error { return node.Command(ctx).Err() }); err != nil {
 		t.Fatal(err)
 	}
+	// Both explicit keys must exist on the importing node for multi-key ASK.
+	// An absent static policy key may instead return TRYAGAIN during resharding.
+	if err := source.MSet(ctx, l.key("q"), "D3|0", l.policyKey("q"), "P3|3600000000:2:1").Err(); err != nil {
+		t.Fatal(err)
+	}
 	if err := target.Do(ctx, "cluster", "setslot", slot, "importing", sourceID).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if err := source.Do(ctx, "cluster", "setslot", slot, "migrating", targetID).Err(); err != nil {
 		t.Fatal(err)
 	}
-	r := rule("q", 2, 1)
+	host, port, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{l.key("q"), l.policyKey("q")} {
+		if err := source.Do(ctx, "MIGRATE", host, port, key, 0, 5000).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := managedRequest("q", 1)
 	// Force NOSCRIPT on all masters to combine fallback with ASK.
 	if err := admin.ForEachMaster(ctx, func(ctx context.Context, c *redis.Client) error { return c.ScriptFlush(ctx).Err() }); err != nil {
 		t.Fatal(err)
 	}
-	d, err := l.Allow(ctx, r)
+	d, err := l.AdmitManaged(ctx, r)
 	if err != nil || !d.Allowed {
 		t.Fatalf("ASK: %+v %v", d, err)
 	}
@@ -153,7 +307,7 @@ func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 		t.Fatalf("ASK successful executions=%d", hook.successes.Load())
 	}
 	hook.lose.Store(true)
-	_, err = l.Allow(ctx, r)
+	_, err = l.AdmitManaged(ctx, r)
 	if !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
 		t.Fatalf("ASK lost reply: %v", err)
 	}
@@ -167,7 +321,7 @@ func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 		t.Fatal(err)
 	}
 	// Static old slot map forces MOVED. Denial proves exactly two prior debits.
-	d, err = l.Allow(ctx, r)
+	d, err = l.AdmitManaged(ctx, r)
 	if err != nil || d.Allowed {
 		t.Fatalf("MOVED accounting: %+v %v", d, err)
 	}

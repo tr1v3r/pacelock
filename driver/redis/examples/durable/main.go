@@ -1,4 +1,6 @@
 // An application-owned journal; this is not part of the limiter API.
+// This example opts into static admission and pins policies for retained attempts.
+// The default dynamic API instead fingerprints names/costs independently of policy.
 package main
 
 import (
@@ -58,8 +60,8 @@ func rules(a attempt) ([]pacelock.Rule, error) {
 
 // admission is the SDK surface used by the journal, allowing recovery tests without Redis.
 type admission interface {
-	// AllowOnce records one admission decision for the persisted ID and fixed policy.
-	AllowOnce(context.Context, string, time.Duration, ...pacelock.Rule) (pacelock.Receipt, error)
+	// AllowStaticOnce records one admission decision for the persisted ID and fixed policy.
+	AllowStaticOnce(context.Context, string, time.Duration, ...pacelock.Rule) (pacelock.Receipt, error)
 	// Lookup recovers a retained decision without debiting; missing does not prove no prior debit.
 	Lookup(context.Context, string) (pacelock.Decision, bool, error)
 }
@@ -179,7 +181,7 @@ func advance(ctx context.Context, j journal, l admission, action, fault string, 
 		if err = j.save(a); err != nil {
 			return err
 		}
-		receipt, callErr := l.AllowOnce(ctx, a.ID, retention, r...)
+		receipt, callErr := l.AllowStaticOnce(ctx, a.ID, retention, r...)
 		if fault == "after-admission" {
 			return errors.New("injected lost admission response; journal remains admitting")
 		}

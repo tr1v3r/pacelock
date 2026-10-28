@@ -1,5 +1,7 @@
 # Redis MSET local verification — 2026-10-28
 
+> Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
+
 > Archived snapshot: these runs used Q2 quotas, E2/C1/P1 receipts and the
 > then-supported native-TTL readers. Those formats/readers are not current.
 > Measurements and regression coverage below describe only that earlier tree;

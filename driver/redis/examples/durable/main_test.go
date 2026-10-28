@@ -16,7 +16,7 @@ type fakeAdmission struct {
 	err      error
 }
 
-func (f *fakeAdmission) AllowOnce(_ context.Context, _ string, _ time.Duration, r ...pacelock.Rule) (pacelock.Receipt, error) {
+func (f *fakeAdmission) AllowStaticOnce(_ context.Context, _ string, _ time.Duration, r ...pacelock.Rule) (pacelock.Receipt, error) {
 	f.calls++
 	if len(r) != 3 {
 		panic("missing quota")

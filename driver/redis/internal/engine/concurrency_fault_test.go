@@ -75,7 +75,7 @@ func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	if allowed.Load() != 200 {
 		t.Fatalf("admitted=%d want 200", allowed.Load())
 	}
-	want := map[string]int{"allow/allowed": 100, "allow/error": 200, "allow_once/allowed": 100, "allow_once/error": 100, "lookup/error": 100}
+	want := map[string]int{"allow_static/allowed": 100, "allow_static/error": 200, "allow_static_once/allowed": 100, "allow_static_once/error": 100, "lookup/error": 100}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("observer events %v want %v", events, want)
 	}

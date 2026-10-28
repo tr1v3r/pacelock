@@ -9,12 +9,18 @@ Applications own the initialized go-redis Client/ClusterClient and close it.
 driver, err := redisdriver.New(client)
 if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
+if err != nil { return err }
+if err := limiter.UpdatePolicies(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
+    Revision: 1, Rate: 60, Period: time.Minute, Burst: 10,
+}}); err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
+// On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
 Import `redisdriver "github.com/tr1v3r/pacelock/driver/redis"` and
 `"github.com/tr1v3r/pacelock"`. Construction performs no I/O or option mutation.
-One domain is one Cluster slot. Every caller must use matching scope, names and
-effective policies, and include every applicable quota in an admission.
+One domain is one Cluster slot. Every caller must use matching scope and names, and include every applicable
+quota in an admission. Backend configuration owns the current dynamic policies.
 
 ## Single-command commit and recovery
 
@@ -30,14 +36,9 @@ responses, remain `Unknown`. A lost post-commit response can be recovered using
 the complete retained result. This does not promise crash/failover durability or
 upstream execution deduplication. Never blindly retry ordinary `Allow` or refund.
 
-Define named `Quota` values such as `rpm` and `tokens`, then call
-`limiter.Bind(rpm, tokens)` to validate and copy the fixed quota set locally.
-Submit `bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))`, or pass the same
-`...Charge` values to `bound.AllowOnce(ctx, id, retention, charges...)`.
-`q.Charge(cost)` captures a quota value snapshot and cost in private fields without
-validation or I/O. `Quota.Name` / `Policy` remain public; later mutation affects
-neither earlier charges nor bindings. Change policies by creating a new binding.
-Each call accepts any nonempty subset of bound quotas, each selected quota exactly
+By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
+
+Each static bound call accepts any nonempty subset of bound quotas, each selected quota exactly
 once with `0 < cost <= Burst`; omitted quotas are neither checked nor charged.
 Selected charges are normalized to binding order. Idempotency fingerprints include
 only selected names, normalized order, effective policies, costs and retention;
@@ -47,32 +48,76 @@ Each captured policy must be fully valid, with matching name, effective
 microsecond-rounded interval and burst; equivalent valid policy expressions are
 accepted. Empty calls, duplicate, unknown, invalid or mismatched charges fail locally with `ErrInvalid` /
 `NotCharged` before admission, not backend `ErrPolicyMismatch`. Rule APIs share the same
-Driver and storage; blocking admission uses `limiter.Wait` with
+Driver and storage; blocking admission uses `limiter.WaitStatic` with
 rules, not a bound wait method. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects. Ring is unsupported. Custom Scripters/hooks/factories/proxies must
-preserve no-replay and primary-routing behavior.
+preserve no-replay and primary-routing behavior. All admissions pass explicit debt
+and policy keys (plus optional receipt). During Cluster resharding, mixed/missing
+keys can yield `TRYAGAIN`; this remains a conservative `Unknown` transport error,
+never an implicit replay. Retry/recovery decisions belong to the caller.
+
+## Default dynamic policies
+
+Dynamic admission is the default. Publish positive, monotonically
+increasing revisions and `limiter.UpdatePolicies(ctx, quotas...)` (or the driver's
+`UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`). Each batch
+is atomic with admission, using one final MSET and the same NoRetry transport.
+Updates preserve absolute TAT exactly, including debt above a reduced capacity.
+Same revision plus the same effective interval/burst is idempotent; lower revisions
+or same-revision conflicts return `ErrPolicyMismatch`. Roll back parameters only at
+a higher revision. `NotCharged` describes quota debit, not an assertion that an
+ambiguous update failed: transport/lost-reply failures remain `Unknown` and need
+an explicit same-revision retry if desired.
+
+The data plane passes names and costs only: `limiter.Allow(ctx,
+pacelock.Charge{Name: "rpm", Cost: 1})`, or `AllowOnce(ctx, id,
+retention, charges...)`. The driver's mandatory `Admit(Admission)` operation resolves
+current backend policies in the admission Lua call; callers do not refresh bindings
+or send revisions. Missing configuration returns `ErrPolicyMissing` / `NotCharged`.
+Static Rule/BindStatic calls reject positive revisions locally; static admission against a
+configured quota returns `ErrPolicyMismatch`, preventing bypass even after idle/prune.
+
+Managed `Rate=0` returns `ErrPaused` / `NotCharged` without debit or receipt write,
+even when cost exceeds the paused burst. Otherwise over-burst cost returns `ErrInvalid`.
+Resume with a higher revision; debt recovers naturally. There is no dynamic Wait; only `WaitStatic` is provided.
+Receipts replay before current policy checks, including across updates and pauses.
+Their historical allowed result is **not permission to execute upstream again**.
+Managed fingerprints bind ordered names/costs and retention, not policy revisions;
+static fingerprints bind effective rules, and static/managed requests with one ID conflict.
+
+Configuration and debt are separate. The same-slot `policy:<name_hash>` key holds
+permanent `P3|interval_us:burst:revision` (zero interval means paused). Updates read
+and change only configuration, never debt or its expiry; same-revision equivalent
+updates perform no write. Existing quota keys hold managed debt as `D3|tat_us`,
+with plain static debts still readable. Prune reclaims expired debt but validates and
+retains configuration forever. Memory therefore includes all configured names;
+there is no automatic policy retirement/reset.
+
+Deploy protocol-aware binaries to **every reader, writer and maintenance process
+before activation**: older writers do not check configuration keys and can bypass
+policy. Mixed-version activation and unconverted rollback are unsupported. Idle or
+pruning does not make rollback safe. Callers own configuration polling/publication;
+the SDK starts no worker. See the [runnable managed example](examples/managed/main.go).
 
 ## Logical expiry and bounded physical cleanup
 
 Keys use `pacelock:{scope_hash}:...`, with an `attempt:` suffix for receipts. Values use:
 
 ```text
-quota:   tat_us:interval_us:burst
+quota:   tat_us:interval_us:burst (static) or D3|tat_us (managed debt)
+policy:  P3|interval_us:burst:revision (separate same-slot key)
 receipt: expires_us|fingerprint|decision_json
 ```
 
-The sole quota format is `tat:interval:burst`, without a version prefix. Every
-quota logically expires when `tat <= now`, regardless of native TTL; its debt is
-then fully replenished and a new policy may apply. Active quotas still require
-matching interval and burst. A receipt expires at Redis admission time plus
-retention. Reads ignore logically expired state even if its key is still present.
-Replays/queries never extend deadlines. `decision_json` is the writer's canonical
-`{"names":[...],"values":[...]}` form: fixed field order, no extra fields or
-whitespace, with UTF-8 names and integer values. Invalid receipts are rejected
-before expiry is applied. These encodings are internal; applications must not
-construct them.
+A static quota logically expires at its TAT, when its debt is fully replenished.
+Managed quota debt also recovers at TAT, but its policy identity never expires.
+A receipt expires at Redis admission time plus retention. Reads ignore logically
+expired static state even if its key is still present. Replays/queries never extend deadlines.
+These encodings are internal; applications must not construct them.
+
+Receipts accept only canonical writer JSON with fixed field order, integer values and UTF-8 names; validate before expiry. Removed Q2/E2/C1/P1 formats are rejected.
 
 MSET clears native TTLs. Physical deletion is therefore an application-owned
 operational requirement for bounded memory, separate from admission correctness.

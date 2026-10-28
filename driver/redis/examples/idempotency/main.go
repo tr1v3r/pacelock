@@ -34,29 +34,29 @@ func main() {
 	}
 	id := hex.EncodeToString(bytes[:]) // Persist alongside the business attempt before use.
 	rpm := pacelock.Quota{
-		Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+		Name: "requests", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 	}
-	bound, err := limiter.Bind(rpm)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// Keep the binding and captured charges unchanged for retained-attempt recovery.
-	charges := []pacelock.Charge{rpm.Charge(1)}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	receipt, err := bound.AllowOnce(ctx, id, 10*time.Minute, charges...)
+	if err := limiter.UpdatePolicies(ctx, rpm); err != nil {
+		log.Fatal(err)
+	}
+	// Keep names, costs and retention unchanged for retained-attempt recovery.
+	// Policy updates do not change the fingerprint of this admission attempt.
+	charges := []pacelock.Charge{{Name: rpm.Name, Cost: 1}}
+	receipt, err := limiter.AllowOnce(ctx, id, 10*time.Minute, charges...)
 	if err != nil {
 		log.Printf("admission error: outcome=%s error=%v", pacelock.OutcomeOf(err), err)
 		// A fresh deadline allows a read after the first context has expired.
 		query, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		decision, found, lookupErr := bound.Lookup(query, id)
+		decision, found, lookupErr := limiter.Lookup(query, id)
 		log.Printf("recovery: found=%t decision=%+v error=%v", found, decision, lookupErr)
 		// Missing records or lookup errors do not establish that no debit happened.
 		return
 	}
 	log.Printf("original decision: %+v", receipt)
-	replay, err := bound.AllowOnce(ctx, id, 10*time.Minute, charges...)
+	replay, err := limiter.AllowOnce(ctx, id, 10*time.Minute, charges...)
 	if err != nil {
 		log.Fatal(err)
 	}

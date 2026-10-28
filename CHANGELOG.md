@@ -4,15 +4,20 @@
 
 - Standard-library core with independent Redis and PostgreSQL drivers, shared
   atomic admission contracts, and explicit PostgreSQL schema setup via `Migrate`.
-- Fixed `Policy` / `Quota` bindings and snapshot-based `Quota.Charge(cost)` values;
-  nonempty-subset validation before dispatch. Rule-based admission and `Wait` remain
-  available alongside `BoundLimiter`. Omitted bound quotas are neither checked nor
+- Backend-authoritative dynamic admission is the default: publish versioned
+  policies with `UpdatePolicies`, then call `Allow` / `AllowOnce` with names/costs.
+  Rate 0 pauses fresh admissions; updates preserve absolute debt and retained replay.
+- Explicit static `BindStatic` / `StaticLimiter` bindings and snapshot-based
+  `Quota.StaticCharge(cost)` values validate nonempty subsets before dispatch.
+  Rule-based `AllowStatic` / `AllowStaticOnce` / `WaitStatic` remain available. Omitted bound quotas are neither checked nor
   charged; selected quotas are atomic within each call, not across separate calls.
   Idempotency fingerprints include only selected quotas in binding order; changing
   the subset with the same retained ID conflicts.
-- Redis keys use `pacelock:{scope_hash}:`, quotas use `tat:interval:burst`, and
-  receipts use `expires_us|fingerprint|decision_json`. Fingerprints encode
-  `[retention_ms,step,burst,cost,name,...]` without an empty placeholder.
+- Redis keys use `pacelock:{scope_hash}:`, static quotas use `tat:interval:burst`,
+  dynamic debts use `D3|tat`, and permanent policies use `P3|interval:burst:revision`.
+  Receipts use `expires_us|fingerprint|decision_json`. Static fingerprints encode
+  `[retention_ms,step,burst,cost,name,...]` without an empty placeholder; dynamic
+  fingerprints use a distinct discriminator and do not bind policy revisions.
 - One final Redis MSET atomically commits admitted quotas and complete receipts.
   Logical expiry is independent of caller-scheduled bounded `Driver.Prune` cleanup.
 - Bounded idempotency retains both allow and deny decisions, detects parameter

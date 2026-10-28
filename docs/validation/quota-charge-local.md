@@ -1,5 +1,7 @@
 # Quota.Charge local verification — 2026-10-28
 
+> Historical snapshot: measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. This is not a current default dynamic API example.
+
 > Archived measurement of the tree identified below, not validation of the current
 > Redis key prefix, quota/receipt encoding or fingerprint. API measurements remain
 > factual observations of that tree, not current performance guarantees.

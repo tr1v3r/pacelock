@@ -1,5 +1,7 @@
 # 准入流程图
 
+> 历史快照：本文图示、测量和 API 名称对应文中固定源码版本，早于 dynamic-default 改名；原静态 Allow/AllowOnce/Wait/Bind 现对应 AllowStatic/AllowStaticOnce/WaitStatic/BindStatic，原 Quota.Charge 现为 Quota.StaticCharge。不是当前默认动态 API 用法。
+
 [English](README.md)
 
 三张带源码依据的交互式流程图，分别追踪一次准入尝试。图中标签和说明卡片使用简体中文，Go API 与协议名称保持原文。

@@ -1,6 +1,6 @@
 # Redis Lua 单数字与三字段基准
 
-可运行程序测量**当前**无版本前缀的 `tat:interval:burst`，与单数字 TAT 原型比较，
+可运行程序测量**当前**无版本前缀的静态 `tat:interval:burst`，与单数字 TAT 原型比较，
 直接读取此 checkout 的 Lua。单数字原型去掉了策略冲突检测，**不是保持原契约的替代实现**。
 
 在 Redis driver 模块目录中，连接**独立、可销毁的 Redis**：

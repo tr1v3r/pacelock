@@ -1,4 +1,28 @@
-# Compatibility and state contracts
+# Compatibility and migration
+
+## Dynamic-default API migration (breaking pre-v1)
+
+- Default `Allow(ctx, ...Charge{Name, Cost})` and `AllowOnce(ctx, id, retention, ...Charge)`
+  resolve backend policies. First publish `Quota{Name, Policy{Revision: 1, ...}}` through
+  `UpdatePolicies`; request nodes do not refresh policies or carry revisions.
+- Former dynamic `AllowManaged` / `AllowManagedOnce` become `Allow` / `AllowOnce`;
+  `NamedCharge` becomes public name/cost `Charge`. The old names are removed.
+- Former static `Allow` / `AllowOnce` become `AllowStatic` / `AllowStaticOnce`;
+  `Wait` becomes `WaitStatic`. `Rule` remains the low-level caller-policy value.
+- `Bind` becomes `BindStatic` and returns `StaticLimiter` (formerly `BoundLimiter`).
+  Its methods remain `Allow` / `AllowOnce` / `Lookup`; `q.Charge(cost)` becomes
+  `q.StaticCharge(cost)` returning encapsulated `StaticCharge`. Static revisions are 0.
+- Dynamic `Driver.Admit(Admission)` is mandatory (`ManagedAdmission` → `Admission`).
+  Static support moves to optional `StaticDriver.AdmitStatic(StaticAdmission)`;
+  `PolicyDriver` is unchanged and `Lookup` is shared. Update custom drivers too.
+- There is no default/dynamic Wait or automatic policy watcher. Pure `Evaluate` and
+  `EvaluateManaged` remain available; the API rename itself does not reset debt.
+
+For PostgreSQL: **Migrate → upgrade all binaries → activate configuration**. Run
+`Migrate` before upgraded binaries serve even static traffic. For either backend,
+upgrade every writer/maintenance process before publishing dynamic policies; old
+writers can bypass configuration. Mixed activation and unconverted rollback are unsupported.
+
 
 ## Supported contract
 
@@ -62,32 +86,42 @@ pacelock:{domain_digest}:attempt:sha256(admission_id)
 The state formats are:
 
 ```text
-TAT_microseconds:effective_interval_microseconds:Burst
+TAT_microseconds:effective_interval_microseconds:Burst (static debt)
+D3|TAT_microseconds (dynamic debt)
+P3|effective_interval_microseconds:Burst:Revision (permanent dynamic configuration)
 expires_at_microseconds|fingerprint|{"names":[...],"values":[allowed,retry_us,blocked_flags...]}
 ```
 
-Every quota logically expires when `tat <= now`, regardless of native TTL, and
-may then use a new policy. Active quotas require matching effective interval and
-burst. Complete-result expiry equals admission Redis time plus retention.
+Debt logically expires when `tat <= now`, regardless of native TTL. Active static
+quotas require matching effective interval and burst; dynamic policy identity never
+expires. Complete-result expiry equals admission Redis time plus retention.
 One MSET commits admitted quotas and the complete receipt, clearing native TTLs;
 physical removal requires explicit bounded cleanup. Replays and lookups do not
-change either deadline. Fingerprints encode ordered effective rules and retention
-as `[retention_ms,step,burst,cost,name,...]`, without an empty placeholder.
+change either deadline. Static fingerprints use `[retention_ms,step,burst,cost,name,...]`,
+without an empty placeholder. Dynamic fingerprints bind ordered names/costs and
+retention, not revisions, with a distinct managed-admission-v1 discriminator.
+Removed Q2/E2/C1/P1 formats are not accepted.
 
-A malformed receipt returns `ErrState` / `Unknown`, never missing or permission
-for a new admission. Preserve uncertainty: do not delete or refund state to retry.
-
-Prune selects the parser by key role (`:attempt:` for receipts, otherwise quota),
-validates all candidates before deletion, and removes expired quotas and receipts
-in one DEL. Malformed or wrong-role values fail the batch without deleting any
-candidates.
+Malformed receipts return `ErrState` / `Unknown`, never missing or permission to
+admit again. Prune parses candidates by key role, validates the entire batch before
+one DEL, removes only expired debts/receipts, and permanently retains valid policy
+configuration. Malformed or wrong-role candidates fail without deleting anything.
 
 These are internal formats, not application APIs. See the bilingual Redis guides
 for cleanup cursor semantics, ACLs and operational limits.
 
 ## Policy changes
 
-An active policy mismatch rejects before quota mutation. Coordinate policy changes
+Default dynamic policy changes use `UpdatePolicies` with monotonically increasing
+positive revisions (maximum 9007199254740991). Equivalent same-revision publications
+are read-only successes; stale/conflicting publications return `ErrPolicyMismatch`.
+Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening.
+`Rate=0` pauses; resume or roll back parameters at a higher revision. Retained
+receipts replay before current configuration checks. Missing policy fails closed,
+and static admission cannot bypass configured policies.
+
+For the explicit Revision-0 static alternative, active policy mismatch rejects
+before quota mutation. Coordinate static policy changes
 across callers. Either wait for the old quota to replenish and expire while
 coordinating traffic, or design an explicit debt-preserving migration outside this
 SDK. Renaming a quota/domain creates fresh capacity; deleting keys silently resets

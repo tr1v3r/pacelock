@@ -14,14 +14,13 @@ if err := driver.Migrate(setupCtx); err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
 rpm := pacelock.Quota{
-    Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10},
+    Name: "requests", Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 }
 tokens := pacelock.Quota{
-    Name: "input-tokens", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000},
+    Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000},
 }
-bound, err := limiter.Bind(rpm, tokens)
-if err != nil { return err }
-decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
+if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
 
@@ -29,16 +28,82 @@ Import `"github.com/tr1v3r/pacelock/driver/postgres"` and the core package. For 
 register `_ "github.com/jackc/pgx/v5/stdlib"` in the application and use
 `sql.Open("pgx", dsn)`. Pin the transport version in the application. Constructors do
 not connect, migrate or close db. Run Migrate explicitly during setup with a
-migration-capable role. It creates the fixed logged tables from schema.sql; it does
-not upgrade incompatible existing tables. Use a trusted, stable search_path and
+migration-capable role. It creates the fixed logged tables from schema.sql and
+adds a separate `pacelock_policies` configuration table. The existing quota/debt
+and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
+schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-The common `Bind` API validates and copies fixed quotas locally. Construct charges
-with `q.Charge(cost)`, a value-receiver method that captures the complete quota and
+By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
+
+## Default dynamic policies
+
+The driver implements mandatory dynamic `pacelock.Driver`, optional
+`pacelock.PolicyDriver` and `pacelock.StaticDriver` interfaces. The control plane publishes configuration; the data plane sends **only
+names and costs** and uses the latest persisted configuration under the scope lock.
+No local policy refresh, new binding or SDK worker is needed on admission nodes.
+The caller owns polling its configuration source and publishing updates.
+
+```go
+// Control plane: publish an authoritative version from your configuration source.
+err = limiter.UpdatePolicies(ctx, pacelock.Quota{
+    Name: "requests",
+    Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
+})
+if err != nil { return err }
+// Data plane: the same call automatically uses future published versions.
+decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
+// Or retain a decision; the ID fingerprint includes names/costs, not policy versions.
+receipt, err := limiter.AllowOnce(ctx, "operation-id", time.Minute,
+    pacelock.Charge{Name: "requests", Cost: 1})
+_ = decision
+_ = receipt
+```
+
+Publish positive, monotonically increasing revisions (at most 9007199254740991).
+Updates take the same scope lock as admission and validate the complete batch with
+`ApplyPolicies` before writing. Only the separate policy table is read or written:
+TAT and debt expiry remain untouched, including during pause/resume. Higher revisions
+replace configuration; identical revisions with equal effective interval/burst are
+read-only successes. Older revisions or same-version conflicts return
+`ErrPolicyMismatch`. Debt can exceed a newly reduced capacity and recovers naturally;
+changing configuration never resets it.
+
+Managed admission fails closed with `ErrPolicyMissing` / `NotCharged` if any policy
+is absent. Costs above the current burst return `ErrInvalid`, not retryable denial.
+A managed `Rate: 0` pauses admission (positive Period/Burst still required):
+`ErrPaused` / `NotCharged` is returned before the over-burst check, without a debit
+or receipt write. Resume by publishing a higher positive-rate revision. There is
+no managed Wait API; caller retry/config polling remains outside the SDK.
+
+Existing retained receipts replay **before** current policy checks, unchanged by
+pauses or updates. Managed retries with the same names/costs replay across revisions.
+Static and managed requests sharing an ID conflict. A replayed historical allow is
+not permission to execute upstream again. Static Rule/BindStatic requests reject managed
+revision fields locally, and new static admissions to configured quotas return
+`ErrPolicyMismatch`; old static receipts still replay before this bypass guard.
+
+Update failures before commit roll back; commit errors are `Unknown`, meaning the
+policy update may have committed, not that any quota was debited. Retry identical
+revisions explicitly to resolve uncertainty; a newer update may supersede them.
+There are no hidden retries. Cancellation before dispatch causes no mutation.
+
+**Rollout order: migrate → upgrade every binary → activate managed policies.**
+Run `Migrate` **before upgraded request-serving binaries handle any traffic, even
+static-only traffic**: new static admission queries the policy table to prevent
+bypass. Migration only adds the table, so old binaries can continue serving static
+traffic while binaries are upgraded, provided no managed policies are activated.
+Once every binary sharing the database is upgraded, publish managed configuration.
+Old PostgreSQL code cannot coexist with active dynamic policies: it does not check
+the separate configuration table and can bypass managed limits. Run Migrate during
+controlled setup with no concurrent migration runners; DDL takes table locks.
+
+The common `BindStatic` API validates and copies fixed quotas locally. Construct charges
+with `q.StaticCharge(cost)`, a value-receiver method that captures the complete quota and
 cost in private fields without validation or I/O; do not use charge field literals.
 `Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
 charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
-accept any nonempty subset of bound quotas as `...Charge`, each selected quota
+accept any nonempty subset of bound quotas as `...StaticCharge`, each selected quota
 exactly once with `0 < cost <= Burst`. Omitted quotas are neither checked nor charged.
 Selected charges are normalized to binding order. Idempotency fingerprints include
 only selected names, normalized order, effective policies, costs and retention;
@@ -48,7 +113,7 @@ Each captured policy must be fully valid, and its name, effective interval (roun
 to microseconds) and burst must match the binding. Equivalent valid policy
 expressions are accepted. Empty calls, duplicate, unknown, invalid or mismatched charges return local
 `ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
-Rule APIs share the same Driver and storage; blocking admission uses `limiter.Wait` with rules, not a bound wait method.
+Rule APIs share the same Driver and storage; blocking admission uses `limiter.WaitStatic` with rules, not a bound wait method.
 See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 ## Transactions and failure contract
@@ -57,7 +122,9 @@ Each admission uses Read Committed, INSERT ON CONFLICT for a permanent domain gu
 then SELECT FOR UPDATE on that guard. This serializes even initially missing quota
 and receipt rows. Backend time is sampled once with clock_timestamp after locking.
 All quota rows and a retained allow/deny result commit together. PostgreSQL uses
-the core Evaluate transition; Redis's equivalent runs inside Lua.
+the core Evaluate / EvaluateManaged transitions; Redis's equivalents run inside Lua.
+Managed admission validates original debt fields, then applies current configuration
+in memory. Debt rows store interval/burst for integrity checks, not policy authority.
 
 Before Commit is sent, failures roll back and are NotCharged. Every Commit error
 is conservatively Unknown; recover by retained ID with a fresh context. There is
@@ -73,9 +140,11 @@ Upstream execution still needs application coordination.
 - Use logged tables, fsync and a suitable synchronous_commit/replication policy.
   Async commit or failover to a lagging standby may lose debt and retained IDs.
   Wall-clock jumps are not eliminated by PostgreSQL.
-- Expired rows are logically ignored. Schedule `driver.Prune(ctx, scope, limit)`
-  externally to remove at most limit rows from each data table per call (1..10000).
-  It takes the same domain lock and preserves active debt. Domain guard rows are
+- Expired debt is logically ignored, but managed policy identity persists forever.
+  Schedule `driver.Prune(ctx, scope, limit)` externally to remove at most limit
+  expired debt rows (static or managed) and limit expired receipts per call (1..10000).
+  It takes the same domain lock and never touches the policy table.
+  Account for persistent policy cardinality. Domain guard rows are
   deliberately retained; plan for domain cardinality. Do not independently delete
   guard rows or delete active state. Tune vacuum for frequently updated quota rows.
 - This version owns its transaction and cannot join a business transaction. It

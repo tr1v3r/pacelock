@@ -1,5 +1,7 @@
 # Concurrency test contracts
 
+> Historical snapshot: diagrams, measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. These are not current default dynamic API examples.
+
 `TestRedisConcurrency` is part of the default `go test ./...` suite. With Redis
 fixtures configured, the same 18 scenario groups run against standalone Redis and
 a three-master Cluster. No opt-in stress flag or build tag is required. Changes

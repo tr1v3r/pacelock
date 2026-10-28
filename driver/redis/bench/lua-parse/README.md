@@ -1,7 +1,7 @@
 # Redis Lua scalar vs tuple benchmark
 
 The runnable harness measures the **current** unversioned `tat:interval:burst`
-quota representation against an experimental scalar TAT. It loads this checkout's
+static quota representation against an experimental scalar TAT. It loads this checkout's
 actual Lua. The scalar prototype removes policy-conflict detection, so it is not
 a contract-equivalent production alternative.
 

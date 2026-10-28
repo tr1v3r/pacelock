@@ -30,7 +30,7 @@ func TestCurrentNamespaceAndFingerprint(t *testing.T) {
 	}
 	args[0] = int64(60000)
 	before := append([]interface{}(nil), args...)
-	want := (pacelock.Admission{Scope: pacelock.Scope{Namespace: "ns", Domain: "domain"}, ID: "id", Retention: time.Minute, Rules: rules}).Fingerprint()
+	want := (pacelock.StaticAdmission{Scope: pacelock.Scope{Namespace: "ns", Domain: "domain"}, ID: "id", Retention: time.Minute, Rules: rules}).Fingerprint()
 	if got := fingerprint(args); got != want {
 		t.Fatalf("engine fingerprint=%s core=%s", got, want)
 	}
@@ -133,6 +133,11 @@ func TestRedisCanonicalReceiptRejectsBeforeMutation(t *testing.T) {
 				}
 				if _, err := l.AllowOnce(ctx, "bad", time.Minute, rule("q", 3, 1), rule("side", 3, 1)); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 					t.Fatalf("admit: %v", err)
+				}
+				managed := managedRequest("q", 1)
+				managed.ID, managed.Retention = "bad", time.Minute
+				if _, err := l.AdmitManaged(ctx, managed); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+					t.Fatalf("managed admit: %v", err)
 				}
 				cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{peerKey, l.key("q"), badKey}}
 				if _, err := l.Prune(ctx, cursor, 3); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {

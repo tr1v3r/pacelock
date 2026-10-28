@@ -132,7 +132,11 @@ func (l *Limiter) ownedKey(key string) bool {
 	if !ok {
 		return false
 	}
-	suffix = strings.TrimPrefix(suffix, "attempt:")
+	if strings.HasPrefix(suffix, "attempt:") {
+		suffix = strings.TrimPrefix(suffix, "attempt:")
+	} else {
+		suffix = strings.TrimPrefix(suffix, "policy:")
+	}
 	if len(suffix) != 64 {
 		return false
 	}

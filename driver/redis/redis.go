@@ -1,6 +1,7 @@
 // Package redisdriver implements Pacelock atomic admission using Redis Lua.
 // It commits quotas and complete receipts in one MSET, with logical expiry and
-// caller-scheduled bounded cleanup. Quotas and receipts use unversioned formats. One domain
+// caller-scheduled bounded cleanup. Static quotas and receipts use unversioned
+// formats; managed policies and debt use P3 and D3 respectively. One domain
 // occupies one Redis Cluster hash slot; transport commands prevent ambiguous replay.
 package redisdriver
 
@@ -19,6 +20,44 @@ import (
 type Driver struct{ client redis.Scripter }
 
 var _ pacelock.Driver = (*Driver)(nil)
+var _ pacelock.PolicyDriver = (*Driver)(nil)
+var _ pacelock.StaticDriver = (*Driver)(nil)
+
+// Admit reads authoritative policies and atomically admits named costs.
+func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
+	op := "allow"
+	if request.ID != "" {
+		op = "allow_once"
+	}
+	if err := request.Validate(); err != nil {
+		return pacelock.Receipt{}, inputError(op, err)
+	}
+	if d == nil {
+		return pacelock.Receipt{}, inputError(op, pacelock.ErrInvalid)
+	}
+	l, err := engine.New(d.client, request.Namespace, request.Domain)
+	if err != nil {
+		return pacelock.Receipt{}, inputError(op, err)
+	}
+	return l.AdmitManaged(ctx, request)
+}
+
+// UpdatePolicies atomically changes managed policies while preserving all debt.
+// Unknown failures may have committed; explicitly retrying the same revision and
+// effective policy is idempotent. The transport never retries ambiguous commands.
+func (d *Driver) UpdatePolicies(ctx context.Context, request pacelock.PolicyUpdate) error {
+	if err := request.Validate(); err != nil {
+		return inputError("update_policies", err)
+	}
+	if d == nil {
+		return inputError("update_policies", pacelock.ErrInvalid)
+	}
+	l, err := engine.New(d.client, request.Namespace, request.Domain)
+	if err != nil {
+		return inputError("update_policies", err)
+	}
+	return l.UpdatePolicies(ctx, request.Quotas...)
+}
 
 // New validates an initialized go-redis client without connecting or changing its
 // options. Configure the client before use. The constructor accepts Client,
@@ -30,13 +69,13 @@ func New(client redis.Scripter) (*Driver, error) {
 	return &Driver{client: client}, nil
 }
 
-// Admit executes all dimensions and optional retained deduplication in one Lua
+// AdmitStatic executes all dimensions and optional retained deduplication in one Lua
 // operation with one final MSET. Command rejection does not debit; lost responses
 // and other ambiguous failures retain Unknown. Malformed receipts are rejected.
-func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
-	op := "allow"
+func (d *Driver) AdmitStatic(ctx context.Context, request pacelock.StaticAdmission) (pacelock.Receipt, error) {
+	op := "allow_static"
 	if request.ID != "" {
-		op = "allow_once"
+		op = "allow_static_once"
 	}
 	if err := request.Validate(); err != nil {
 		return pacelock.Receipt{}, inputError(op, err)
