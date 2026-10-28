@@ -47,9 +47,9 @@ func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Durat
 		}
 	}
 	args[0] = retention.Milliseconds()
-	fp := fingerprint(args)
+	fp := (pacelock.Admission{Rules: rules, Retention: retention}).Fingerprint()
 	args[1] = fp
-	keys = append(keys, l.attemptKey(id))
+	keys = append(l.withPolicyKeys(keys, rules), l.attemptKey(id))
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
 		return Receipt{}, scriptFailure("allow_once", err)

@@ -102,7 +102,7 @@ var protocolSource string
 var admissionSource string
 
 // source is the complete script, also used by model and failure-injection tests.
-var source = protocolSource + admissionSource
+var source = protocolSource + "\nlocal managed = false\n" + admissionSource
 
 // admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
 var admissionScript = redis.NewScript(source)
@@ -133,6 +133,7 @@ func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, 
 	if err != nil {
 		return Decision{}, failure("allow", NotCharged, err)
 	}
+	keys = l.withPolicyKeys(keys, rules)
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
 		return Decision{}, scriptFailure("allow", err)
@@ -173,6 +174,11 @@ func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 		step, _ := interval(r)
 		keys[i] = l.key(r.Name)
 		args = append(args, step, r.Policy.Burst, r.Cost, r.Name)
+	}
+	for _, r := range rules {
+		if r.Policy.Revision != 0 {
+			return nil, nil, fmt.Errorf("%w: use managed admission for managed policies", ErrInvalid)
+		}
 	}
 	return keys, args, nil
 }

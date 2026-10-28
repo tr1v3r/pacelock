@@ -34,6 +34,12 @@ func scriptFailure(op string, err error) error {
 	switch token {
 	case "PACE_COMMIT":
 		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrBackend, err))
+	case "PACE_MISSING":
+		return failure(op, NotCharged, fmt.Errorf("%w: %w", pacelock.ErrPolicyMissing, err))
+	case "PACE_INVALID":
+		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrInvalid, err))
+	case "PACE_PAUSED":
+		return failure(op, NotCharged, fmt.Errorf("%w: %w", pacelock.ErrPaused, err))
 	case "PACE_POLICY":
 		return failure(op, NotCharged, fmt.Errorf("%w: %w", ErrPolicyMismatch, err))
 	case "PACE_STATE":

@@ -5,10 +5,11 @@ import (
 	"time"
 )
 
-// QuotaState is a persisted GCRA state in integer Unix microseconds. Its zero
-// value means absent. ExpiresAt is the logical expiry, rounded up to milliseconds
-// from the admission time; expiry restores full capacity and permits a new policy.
-// State is not an execution record or a billing ledger.
+// QuotaState represents GCRA state in integer Unix microseconds; zero means absent.
+// ExpiresAt is debt expiry, rounded up to milliseconds from admission time.
+// Managed drivers persist configuration separately from debt: a configuration-only
+// state carries Interval/Burst/Revision and zero TAT/ExpiresAt. EvaluateManaged
+// combines them temporarily for calculation. State is not a billing ledger.
 type QuotaState struct {
 	// TAT is the theoretical recovery-completion time in Unix microseconds.
 	TAT int64
@@ -18,6 +19,9 @@ type QuotaState struct {
 	Burst int64
 	// ExpiresAt is the logical expiry in Unix microseconds.
 	ExpiresAt int64
+	// Revision identifies managed configuration. The configuration record persists
+	// even when its separate debt record expires. Interval=0 means paused.
+	Revision int64
 }
 
 // Evaluate calculates an atomic multi-quota transition without I/O or mutation.
@@ -33,10 +37,8 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 	if len(states) != len(rules) {
 		return Decision{}, nil, fmt.Errorf("%w: state count", ErrInvalid)
 	}
-	const exactLimit int64 = 9007199254740991
-	horizon := MaxHorizon.Microseconds()
-	if now < 0 || now > exactLimit-2*horizon {
-		return Decision{}, nil, fmt.Errorf("%w: backend clock outside supported range", ErrState)
+	if err := validateBackendTime(now); err != nil {
+		return Decision{}, nil, err
 	}
 	decision.Allowed = true
 	next = make([]QuotaState, len(rules))
@@ -45,9 +47,22 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 		step := interval.Microseconds()
 		s := states[i]
 		tat := now
-		if s != (QuotaState{}) && s.ExpiresAt > now {
-			if s.Interval < 1 || s.Interval > horizon || s.Burst < 1 || s.Burst > horizon/s.Interval || s.TAT < 0 || s.TAT > now+horizon || s.ExpiresAt < s.TAT || s.ExpiresAt-s.TAT > 999 {
-				return Decision{}, nil, fmt.Errorf("%w: invalid quota state", ErrState)
+		if s.Revision != 0 || r.Policy.Revision != 0 {
+			if s != (QuotaState{}) {
+				if err := validateQuotaState(now, s); err != nil {
+					return Decision{}, nil, err
+				}
+			}
+			if s.Revision == 0 || s.Revision != r.Policy.Revision || s.Interval != step || s.Burst != r.Policy.Burst {
+				return Decision{}, nil, fmt.Errorf("%w: quota %q revision", ErrPolicyMismatch, r.Name)
+			}
+			if step == 0 {
+				return Decision{}, nil, fmt.Errorf("%w: quota %q", ErrPaused, r.Name)
+			}
+			tat = max(tat, s.TAT)
+		} else if s != (QuotaState{}) && s.ExpiresAt > now {
+			if err := validateQuotaState(now, s); err != nil {
+				return Decision{}, nil, err
 			}
 			if s.Interval != step || s.Burst != r.Policy.Burst {
 				return Decision{}, nil, fmt.Errorf("%w: quota %q", ErrPolicyMismatch, r.Name)
@@ -63,7 +78,7 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 			decision.Limited = append(decision.Limited, r.Name)
 			decision.RetryAfter = max(decision.RetryAfter, time.Duration(wait)*time.Microsecond)
 		}
-		next[i] = QuotaState{TAT: candidate, Interval: step, Burst: r.Policy.Burst, ExpiresAt: now + ((candidate-now+999)/1000)*1000}
+		next[i] = QuotaState{TAT: candidate, Interval: step, Burst: r.Policy.Burst, Revision: r.Policy.Revision, ExpiresAt: now + ((candidate-now+999)/1000)*1000}
 	}
 	if !decision.Allowed {
 		next = nil

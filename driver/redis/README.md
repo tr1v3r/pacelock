@@ -40,28 +40,76 @@ validation or I/O. `Quota.Name` / `Policy` remain public; later mutation affects
 neither earlier charges nor bindings. Change policies by creating a new binding.
 Every call must charge all bound quotas exactly once; order is normalized to binding
 order. Each captured policy must be fully valid, with matching name, effective
-microsecond-rounded interval and burst; equivalent valid policy expressions are
-accepted. Invalid, incomplete or mismatched charges fail locally with `ErrInvalid` /
+microsecond-rounded interval and burst; equivalent valid static policy expressions
+are accepted. Rule/Bind admission requires revision zero. Invalid, incomplete or mismatched charges fail locally with `ErrInvalid` /
 `NotCharged` before admission, not backend `ErrPolicyMismatch`. Existing Rule APIs,
-Driver and storage are unchanged; blocking admission still uses `limiter.Wait` with
+and the base Driver interface remain compatible; blocking admission still uses `limiter.Wait` with
 rules, not a bound wait method. See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
 
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects. Ring is unsupported. Custom Scripters/hooks/factories/proxies must
-preserve no-replay and primary-routing behavior.
+preserve no-replay and primary-routing behavior. All admissions pass explicit debt
+and policy keys (plus optional receipt). During Cluster resharding, mixed/missing
+keys can yield `TRYAGAIN`; this remains a conservative `Unknown` transport error,
+never an implicit replay. Retry/recovery decisions belong to the caller.
+
+## Explicit managed policies
+
+`Policy.Revision == 0` keeps static behavior. Opt in with positive, monotonically
+increasing revisions and `limiter.UpdatePolicies(ctx, quotas...)` (or the driver's
+`UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`). Each batch
+is atomic with admission, using one final MSET and the same NoRetry transport.
+Updates preserve absolute TAT exactly, including debt above a reduced capacity.
+Same revision plus the same effective interval/burst is idempotent; lower revisions
+or same-revision conflicts return `ErrPolicyMismatch`. Roll back parameters only at
+a higher revision. `NotCharged` describes quota debit, not an assertion that an
+ambiguous update failed: transport/lost-reply failures remain `Unknown` and need
+an explicit same-revision retry if desired.
+
+The data plane passes names and costs only: `limiter.AllowManaged(ctx,
+pacelock.NamedCharge{Name: "rpm", Cost: 1})`, or `AllowManagedOnce(ctx, id,
+retention, charges...)`. The driver's optional `AdmitManaged` extension resolves
+current backend policies in the admission Lua call; callers do not refresh bindings
+or send revisions. Missing configuration returns `ErrPolicyMissing` / `NotCharged`.
+Static Rule/Bind calls reject positive revisions locally; static admission against a
+configured quota returns `ErrPolicyMismatch`, preventing bypass even after idle/prune.
+
+Managed `Rate=0` returns `ErrPaused` / `NotCharged` without debit or receipt write,
+even when cost exceeds the paused burst. Otherwise over-burst cost returns `ErrInvalid`.
+Resume with a higher revision; debt recovers naturally. There is no `WaitManaged`.
+Receipts replay before current policy checks, including across updates and pauses.
+Their historical allowed result is **not permission to execute upstream again**.
+Managed fingerprints bind ordered names/costs and retention, not policy revisions;
+static fingerprints remain unchanged and static/managed requests with one ID conflict.
+
+Configuration and debt are separate. The same-slot `policy:<name_hash>` key holds
+permanent `P3|interval_us:burst:revision` (zero interval means paused). Updates read
+and change only configuration, never debt or its expiry; same-revision equivalent
+updates perform no write. Existing quota keys hold managed debt as `D3|tat_us`,
+with Q2/legacy debts still readable. Prune reclaims expired debt but validates and
+retains configuration forever. Memory therefore includes all configured names;
+there is no automatic policy retirement/reset.
+
+Deploy protocol-aware binaries to **every reader, writer and maintenance process
+before activation**: older writers do not check configuration keys and can bypass
+policy. Mixed-version activation and unconverted rollback are unsupported. Idle or
+pruning does not make rollback safe. Callers own configuration polling/publication;
+the SDK starts no worker. See the [runnable managed example](examples/managed/main.go).
 
 ## Logical expiry and bounded physical cleanup
 
 Keys keep their existing `pacelock:v1:{scope_hash}:...` names/hash tag. Values use:
 
 ```text
-quota:   Q2|tat_us:interval_us:burst
+quota:   Q2|tat_us:interval_us:burst (static) or D3|tat_us (managed debt)
+policy:  P3|interval_us:burst:revision (separate same-slot key)
 receipt: E2|expires_us|C1|fingerprint|decision_json
 ```
 
-A quota logically expires at its TAT, when its debt is fully replenished. A receipt
-expires at Redis admission time plus retention. Reads ignore logically expired
-state even if its key is still present. Replays/queries never extend deadlines.
+A static quota logically expires at its TAT, when its debt is fully replenished.
+Managed quota debt also recovers at TAT, but its policy identity never expires.
+A receipt expires at Redis admission time plus retention. Reads ignore logically
+expired static state even if its key is still present. Replays/queries never extend deadlines.
 These encodings are internal; applications must not construct them.
 
 MSET clears native TTLs. Physical deletion is therefore an application-owned

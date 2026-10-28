@@ -18,6 +18,8 @@ const (
 	MaxRules = 32
 	// MaxHorizon bounds periods, burst recovery and admission retention.
 	MaxHorizon = 24 * time.Hour
+	// MaxRevision is the largest policy revision represented exactly by Redis Lua.
+	MaxRevision int64 = 9007199254740991
 )
 
 var (
@@ -33,13 +35,22 @@ var (
 	ErrOutcomeUnknown = errors.New("pacelock: admission outcome unknown")
 	// ErrBackend wraps an unclassified backend or transport failure.
 	ErrBackend = errors.New("pacelock: backend failure")
+	// ErrPaused rejects a fresh admission until the managed policy is resumed.
+	ErrPaused = errors.New("pacelock: quota is paused")
+	// ErrPolicyMissing rejects managed admission without backend configuration.
+	ErrPolicyMissing = errors.New("pacelock: quota policy is not configured")
+	// ErrUnsupported reports a driver without explicit policy management.
+	ErrUnsupported = errors.New("pacelock: policy management is unsupported")
 )
 
 // Policy defines replenishment and total burst capacity independently of a
 // charge. The same named quota must use the same effective policy throughout
 // a domain.
 type Policy struct {
-	// Rate is the positive number of units replenished per Period.
+	// Revision is zero for static policies, or 1..MaxRevision for policies
+	// explicitly installed by UpdatePolicies. Managed revisions never expire.
+	Revision int64
+	// Rate is units replenished per Period. Zero pauses a managed policy.
 	Rate int64
 	// Period is positive and at most MaxHorizon; unit intervals round up to microseconds.
 	Period time.Duration
@@ -63,8 +74,11 @@ type Rule struct {
 // upward to whole microseconds. Drivers must use this effective interval.
 func (r Rule) Interval() (time.Duration, error) {
 	p := r.Policy
-	if r.Name == "" || len(r.Name) > 256 || p.Rate <= 0 || p.Period <= 0 || p.Period > MaxHorizon || p.Burst <= 0 || r.Cost <= 0 || r.Cost > p.Burst {
+	if r.Name == "" || len(r.Name) > 256 || p.Revision < 0 || p.Revision > MaxRevision || p.Rate < 0 || (p.Rate == 0 && p.Revision == 0) || p.Period <= 0 || p.Period > MaxHorizon || p.Burst <= 0 || p.Burst > MaxHorizon.Microseconds() || r.Cost <= 0 || r.Cost > p.Burst {
 		return 0, fmt.Errorf("%w: invalid quota %q", ErrInvalid, r.Name)
+	}
+	if p.Rate == 0 {
+		return 0, nil // A managed pause has no finite refill interval.
 	}
 	us := (p.Period.Nanoseconds() + 999) / 1000
 	step := us / p.Rate

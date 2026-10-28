@@ -22,9 +22,9 @@ limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 捕获到私有字段，不校验、不做 I/O。`Quota.Name` / `Policy` 仍公开，之后修改既不影响先前的
 Charge，也不影响绑定；变更策略需新建 binding。每次必须为全部已绑定额度各提供一次消耗，
 Charge 会按绑定顺序整理。捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
-须与绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前
-本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储
-不变，等待仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
+须与绑定一致；合法且有效静态策略相同的不同写法可接受。Rule/Bind 准入要求 revision 为零。无效、不完整或不匹配的 Charge 在准入前
+本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API 和基础 Driver 接口
+保持兼容，等待仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 单命令提交与恢复
@@ -40,18 +40,53 @@ Lua 读取准入记录及本次涉及的额度，校验策略、计算 GCRA，�
 
 具体客户端继续通过逐命令 NoRetry 禁止不确定重放，并保留有界 MOVED/ASK 重定向。
 不支持 Ring；自定义 Scripter、hooks、工厂和代理须保证不重放及主节点路由。
+全部准入显式传入债务键、策略键及可选结果键。Cluster 迁槽期间，部分键存在或缺失可能导致
+`TRYAGAIN`，保守归类为 `Unknown` 传输错误，绝不隐式重放；是否重试或恢复由调用者决定。
+
+## 显式管理策略
+
+`Policy.Revision == 0` 保持静态行为。通过正数、单调递增的 revision 和
+`limiter.UpdatePolicies(ctx, quotas...)` 启用管理模式，也可调用驱动的
+`UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`。
+每批更新与准入原子串行，最后仅执行一次 MSET，复用 NoRetry 传输。
+更新精确保留原始 TAT，即使债务超过缩小后的容量也不重置。
+同 revision、同有效 interval/burst 可幂等重试；较低 revision 或同 revision 不同策略
+返回 `ErrPolicyMismatch`。回滚参数必须发布更高 revision。`NotCharged` 描述额度扣减，
+不表示不确定更新一定失败；传输错误或响应丢失仍为 `Unknown`，需要时由调用者显式重试同版本。
+
+数据面只传名称和消耗：`limiter.AllowManaged(ctx, pacelock.NamedCharge{Name: "rpm", Cost: 1})`，
+或 `AllowManagedOnce(ctx, id, retention, charges...)`。驱动的可选 `AdmitManaged` 接口在同一次
+Lua 准入中读取后端最新策略，调用方无需刷新 binding 或传递 revision。配置缺失返回
+`ErrPolicyMissing` / `NotCharged`。静态 Rule/Bind 接口在本地拒绝正 revision；对已配置额度
+使用静态准入返回 `ErrPolicyMismatch`，即使空闲或清理后也不能绕过策略。
+
+托管 `Rate=0` 返回 `ErrPaused` / `NotCharged`，不扣减、不写结果；即使消耗超过暂停额度的
+burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。用更高 revision 恢复，债务
+随时间自然恢复。本次不提供 `WaitManaged`。结果先于当前策略校验重放，跨更新、暂停也不变；
+历史允许结果**不代表可以再次执行上游请求**。托管 fingerprint 绑定有序名称、消耗和保留期，
+不包含策略版本。静态 fingerprint 不变，同 ID 的静态与托管请求冲突。
+
+配置与债务分离：同槽 `policy:<name_hash>` 键永久保存 `P3|interval_us:burst:revision`，
+interval 为零表示暂停。更新只读写配置，不读写债务或其过期时间；相同 revision 的等效更新
+完全不写入。原额度键保存 `D3|tat_us` 托管债务，仍可读取 Q2/旧债务。Prune 回收过期债务，
+但校验并永久保留配置；内存包含所有曾配置名称，不提供自动策略退役或重置。
+
+激活前必须让**全部读取、写入及维护进程**升级为理解新协议的版本：旧写入方不检查配置键，
+可能绕过策略。不支持混版本激活或未经转换回滚，空闲或清理也不会使回滚安全。
+配置轮询和发布由应用负责，SDK 不启动工作线程。参见[可运行托管示例](examples/managed/main.go)。
 
 ## 逻辑过期与有界物理清理
 
 键名和 hash tag 保持 `pacelock:v1:{scope_hash}:...`，新值格式为：
 
 ```text
-额度：Q2|tat_us:interval_us:burst
+额度：Q2|tat_us:interval_us:burst（静态）或 D3|tat_us（托管债务）
+策略：P3|interval_us:burst:revision（独立同槽键）
 结果：E2|expires_us|C1|fingerprint|decision_json
 ```
 
-额度在 TAT 时逻辑过期，表示债务已全部恢复；结果在 Redis 准入时间加 retention 后过期。
-即使键仍存在，读取也会忽略逻辑过期状态。重放和查询不延长截止时间。
+静态额度在 TAT 时逻辑过期，表示债务已全部恢复；托管额度的债务也在 TAT 时恢复，但策略身份永不过期。
+结果在 Redis 准入时间加 retention 后过期。即使键仍存在，读取也会忽略逻辑过期的静态状态。重放和查询不延长截止时间。
 这些编码属于内部协议，应用不得自行构造。
 
 MSET 会清除原生 TTL，因此应用必须安排物理清理以控制内存。准入正确性依赖逻辑过期，

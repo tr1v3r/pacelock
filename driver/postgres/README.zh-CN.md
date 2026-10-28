@@ -28,8 +28,9 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 导入 `"github.com/tr1v3r/pacelock/driver/postgres"` 与核心包。使用 pgx 时，
 应用注册 `_ "github.com/jackc/pgx/v5/stdlib"`，调用 `sql.Open("pgx", dsn)`，
 并固定传输驱动版本。构造函数不联网、不迁移、不关闭 db。
-在初始化阶段显式使用具备建表权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
-不升级已有的不兼容表。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
+在初始化阶段显式使用具备迁移权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
+并增加独立的 `pacelock_policies` 配置表。已有额度/债务表与准入记录表结构不变，保留全部债务与记录。
+不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
 公共 `Bind` 接口在本地校验并复制固定额度。通过值接收者方法 `q.Charge(cost)` 将完整额度和消耗
@@ -37,17 +38,68 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 之后修改 Quota 不影响已有 Charge 或绑定，变更策略需新建 binding。`Allow` / `AllowOnce` 仍接收
 `...Charge`，每次必须为全部已绑定额度各提供一次正数消耗。绑定时应包含全部适用额度；Charge
 会按绑定顺序整理。捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
-绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前本地返回
-`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储不变，等待
+绑定一致；合法且有效策略相同的不同写法可接受。Bind 与 Rule 准入仅支持静态策略（Revision 0），
+后端权威配置须使用托管准入。无效、不完整或不匹配的 Charge 在准入前本地返回
+`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule 准入 API 与基础 Driver 接口保持兼容，等待
 仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+
+## 托管策略
+
+Driver 实现可选的 `pacelock.PolicyDriver` 与 `pacelock.ManagedDriver` 接口。
+控制面发布配置，数据面**只传名称与消耗**，获得 scope 锁后使用后端最新配置。
+准入节点无需刷新本地策略或重新绑定，SDK 不启动后台 worker；配置源轮询与发布由调用者负责。
+
+```go
+// 控制面：发布配置源中的权威版本。
+err = limiter.UpdatePolicies(ctx, pacelock.Quota{
+    Name: "requests",
+    Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
+})
+if err != nil { return err }
+// 数据面：相同调用会自动使用以后发布的新版本。
+decision, err := limiter.AllowManaged(ctx, pacelock.NamedCharge{Name: "requests", Cost: 1})
+// 或保留决策：ID 指纹包含名称与消耗，不包含策略版本。
+receipt, err := limiter.AllowManagedOnce(ctx, "operation-id", time.Minute,
+    pacelock.NamedCharge{Name: "requests", Cost: 1})
+_ = decision
+_ = receipt
+```
+
+发布正的单调递增版本（最大 9007199254740991）。更新与准入使用同一 scope 锁，
+通过 `ApplyPolicies` 完整校验批次后写入。更新只读写独立策略表，绝不读写债务，
+暂停与恢复也不修改 TAT 或债务过期时间。更高版本替换配置；相同版本且有效间隔/Burst 相同
+是只读成功，不重写配置。旧版本或同版本不同配置返回 `ErrPolicyMismatch`。
+缩小容量可能使债务暂时超出容量；债务随时间恢复，更新配置不会重置债务。
+
+任何策略缺失时，托管准入关闭放行并返回 `ErrPolicyMissing` / `NotCharged`。
+消耗超过当前 Burst 返回 `ErrInvalid`，不是可以等待恢复的容量拒绝。
+托管策略的 `Rate: 0` 表示暂停（Period、Burst 仍须为正），先于超 Burst 检查返回
+`ErrPaused` / `NotCharged`，不扣减、不写准入记录。以更高版本和正速率恢复。
+本次不提供托管 Wait API，重试与配置轮询由调用者负责。
+
+已有保留记录在当前策略检查**之前**重放，不因暂停或更新改变。托管请求的名称/消耗不变时，
+跨版本重试仍重放原决策。静态与托管请求复用同一 ID 会冲突。历史允许记录重放不代表可以再次执行上游。
+静态 Rule/Bind 请求在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
+`ErrPolicyMismatch`，但旧静态记录仍先于该防绕过检查重放。
+
+更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。
+显式重试相同版本可处理不确定性，但该版本也可能已被更新版本取代。不做隐藏重试，派发前取消不修改状态。
+
+**部署顺序：先迁移 → 升级全部二进制 → 激活托管策略。** 新版请求服务在接收任何流量前
+就必须执行 `Migrate`，**仅有静态流量也不例外**：新版静态准入会查询策略表，防止绕过托管配置。
+迁移只增加表，因此升级期间旧二进制仍可处理静态流量，但此时不能激活任何托管策略。
+共享数据库的全部二进制升级完成后，才能发布托管配置。旧 PostgreSQL 代码无法与动态策略共存：
+它不检查独立配置表，会绕过托管限额。Migrate 应在受控初始化阶段运行，避免并发迁移；DDL 会持有表锁。
 
 ## 事务与故障契约
 
 每次准入使用 Read Committed，通过 INSERT ON CONFLICT 建立永久 domain 锁行，
 再用 SELECT FOR UPDATE 锁定它，覆盖额度或准入记录尚不存在的情况。
 获得锁后用 clock_timestamp 采样一次后端时间，全部额度与允许/拒绝记录在同一事务提交。
-PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行。
+PostgreSQL 使用核心 Evaluate / EvaluateManaged 转换；Redis 的等价计算在 Lua 内执行。
+托管准入先独立校验原债务字段，再在内存中应用当前配置。债务行的间隔/Burst 仅用于完整性校验，
+不是权威策略。
 
 发送 Commit 前的错误回滚并标记 NotCharged；任何 Commit 错误都保守标记 Unknown，
 使用新 context 按仍保留的 ID 查询恢复。不自动重试事务。Lookup 不加 domain 锁，
@@ -60,8 +112,9 @@ PostgreSQL 使用核心 Evaluate 转换；Redis 的等价计算在 Lua 内执行
   锁超时以及有界连接池；不要在事务中调用供应商或等待 RetryAfter。
 - 使用有日志表、fsync 和合适的 synchronous_commit/复制策略。异步提交或切换至落后副本
   可能丢失债务与准入记录。PG 也不能消除墙上时钟跳变。
-- 过期行会被逻辑忽略。应用可调度 `driver.Prune(ctx, scope, limit)`，每次从两张数据表
-  各最多删除 limit 行（1～10000）。它使用同一 domain 锁并保留活跃债务。
+- 过期债务会被逻辑忽略，但托管策略身份永久保留。应用可调度 `driver.Prune(ctx, scope, limit)`，
+  每次最多删除 limit 条过期债务（静态或托管）与 limit 条过期准入记录（1～10000）。
+  它使用同一 domain 锁，绝不触碰策略表，需规划持久化策略基数。
   domain 锁行故意保留，需规划 domain 基数；不要独立删除锁行或活跃状态。
   额度频繁更新，需要关注 vacuum。
 - 当前 Driver 自己管理事务，不能加入业务事务。不提供 Redis 状态自动迁移/故障切换、

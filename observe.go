@@ -11,16 +11,17 @@ type Options struct {
 	Observer Observer
 }
 
-// Observer receives one synchronous event per Allow, Wait, AllowOnce or Lookup call.
-// Bind emits no event. The callback must be fast and concurrency-safe.
+// Observer receives one synchronous event per admission or Lookup call, including
+// managed admissions. Bind and UpdatePolicies emit no event. The callback must be
+// fast and concurrency-safe.
 // Panics propagate; no background work is created.
 type Observer func(context.Context, Event)
 
 // Event describes a call without exposing quota names or admission IDs as fields.
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, wait, allow_once or lookup. Wait emits one event for
-	// the whole call, not one per internal attempt.
+	// Operation is allow, wait, allow_once, allow_managed, allow_managed_once
+	// or lookup. Wait emits one event for the whole call, not per attempt.
 	Operation string
 	// Duration excludes the observer callback execution time.
 	Duration time.Duration
@@ -28,7 +29,7 @@ type Event struct {
 	RuleCount int
 	// Result is allowed, denied, found, missing or error.
 	Result string
-	// Replayed is true only for AllowOnce returning a retained decision.
+	// Replayed is true only for AllowOnce or AllowManagedOnce returning a retained decision.
 	Replayed bool
 	// RetryAfter is the last decision advisory wait (zero after allowance).
 	RetryAfter time.Duration
@@ -58,6 +59,6 @@ func (l *Limiter) observe(ctx context.Context, op string, count int) func(Decisi
 		if err != nil {
 			result = "error"
 		}
-		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, Replayed: op == "allow_once" && replayed, RetryAfter: d.RetryAfter, Err: err})
+		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, Replayed: (op == "allow_once" || op == "allow_managed_once") && replayed, RetryAfter: d.RetryAfter, Err: err})
 	}
 }

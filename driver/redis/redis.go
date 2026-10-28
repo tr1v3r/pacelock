@@ -19,6 +19,40 @@ import (
 type Driver struct{ client redis.Scripter }
 
 var _ pacelock.Driver = (*Driver)(nil)
+var _ pacelock.PolicyDriver = (*Driver)(nil)
+var _ pacelock.ManagedDriver = (*Driver)(nil)
+
+// AdmitManaged reads authoritative policies and atomically admits named costs.
+func (d *Driver) AdmitManaged(ctx context.Context, request pacelock.ManagedAdmission) (pacelock.Receipt, error) {
+	if err := request.Validate(); err != nil {
+		return pacelock.Receipt{}, inputError("allow_managed", err)
+	}
+	if d == nil {
+		return pacelock.Receipt{}, inputError("allow_managed", pacelock.ErrInvalid)
+	}
+	l, err := engine.New(d.client, request.Namespace, request.Domain)
+	if err != nil {
+		return pacelock.Receipt{}, inputError("allow_managed", err)
+	}
+	return l.AdmitManaged(ctx, request)
+}
+
+// UpdatePolicies atomically changes managed policies while preserving all debt.
+// Unknown failures may have committed; explicitly retrying the same revision and
+// effective policy is idempotent. The transport never retries ambiguous commands.
+func (d *Driver) UpdatePolicies(ctx context.Context, request pacelock.PolicyUpdate) error {
+	if err := request.Validate(); err != nil {
+		return inputError("update_policies", err)
+	}
+	if d == nil {
+		return inputError("update_policies", pacelock.ErrInvalid)
+	}
+	l, err := engine.New(d.client, request.Namespace, request.Domain)
+	if err != nil {
+		return inputError("update_policies", err)
+	}
+	return l.UpdatePolicies(ctx, request.Quotas...)
+}
 
 // New validates an initialized go-redis client without connecting or changing its
 // options. Configure the client before use. The constructor accepts Client,

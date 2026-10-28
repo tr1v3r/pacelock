@@ -6,7 +6,11 @@ for i = 1, #KEYS do
     local raw = redis.pcall('GET', KEYS[i])
     if type(raw) == 'table' and raw.err then return redis.error_reply('PACE_STATE unreadable cleanup candidate') end
     if raw then
-        if string.sub(raw, 1, 3) == 'Q2|' then
+        if string.find(KEYS[i], ':policy:', 1, true) then
+            if not policy_state(raw) then return redis.error_reply('PACE_STATE malformed cleanup policy') end
+        elseif string.sub(raw, 1, 3) == 'P3|' then
+            return redis.error_reply('PACE_STATE policy in non-policy key')
+        elseif string.sub(raw, 1, 3) == 'Q2|' or string.sub(raw, 1, 3) == 'D3|' then
             if string.find(KEYS[i], ':attempt:', 1, true) then return redis.error_reply('PACE_STATE quota in receipt key') end
             local state = quota_state(raw, now)
             if not state then return redis.error_reply('PACE_STATE malformed cleanup quota') end

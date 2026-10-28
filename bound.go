@@ -63,7 +63,7 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 	for i, q := range quotas {
 		rules[i] = q.rule(1)
 	}
-	if err := Validate(rules...); err != nil {
+	if err := ValidateStatic(rules...); err != nil {
 		return nil, err
 	}
 	index := make(map[string]int, len(rules))
@@ -156,7 +156,7 @@ func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Ru
 		}
 		// Bind validated the immutable template, including its placeholder cost.
 		boundInterval, _ := rules[i].Interval()
-		if interval != boundInterval || rule.Policy.Burst != rules[i].Policy.Burst {
+		if interval != boundInterval || rule.Policy.Burst != rules[i].Policy.Burst || rule.Policy.Revision != rules[i].Policy.Revision {
 			return nil, fmt.Errorf("%w: quota %q policy differs from binding", ErrInvalid, rule.Name)
 		}
 		seen[i] = true

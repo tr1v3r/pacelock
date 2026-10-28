@@ -62,7 +62,7 @@ func (a Admission) Validate() error {
 	if err := a.Scope.Validate(); err != nil {
 		return err
 	}
-	if err := Validate(a.Rules...); err != nil {
+	if err := ValidateStatic(a.Rules...); err != nil {
 		return err
 	}
 	if a.ID == "" {

@@ -157,7 +157,7 @@ Do not construct charges with field literals.
   unknown, zero-value or otherwise invalid charges return `ErrInvalid` with
   `NotCharged` before dispatch. There are no default costs or zero-cost exemptions.
 - Each charge's captured policy must be fully valid, and its name, effective
-  `Interval` (rounded upward to microseconds) and `Burst` must match the binding.
+  `Interval` (rounded upward to microseconds), `Burst` and `Revision` must match the binding.
   Different valid `Rate` / `Period` expressions with the same effective interval
   are accepted. An invalid or nonmatching captured policy is a local `ErrInvalid` /
   `NotCharged`, not the backend's `ErrPolicyMismatch`.
@@ -209,6 +209,79 @@ logical expiry works without cleanup. The SDK starts no background workers.
 See the [PostgreSQL guide](driver/postgres/README.md), [Redis guide](driver/redis/README.md),
 and [custom-driver contract](docs/driver.md). Drivers are alternatives: switching
 backends does not transfer quota debt or retained IDs and is not automatic failover.
+
+## Backend-managed policies and pause
+
+Use `UpdatePolicies` for the control plane and `AllowManaged` for the data plane.
+Redis and PostgreSQL store persistent configuration separately from expiring TAT
+(debt). Request processes need only quota names and costs, not local policies,
+revisions, bindings or configuration watchers:
+
+```go
+// Control plane: application-owned polling/watch callback publishes source revisions.
+q := pacelock.Quota{Name: "tenant:rpm", Policy: pacelock.Policy{
+    Revision: 1, Rate: 100, Period: time.Minute, Burst: 20,
+}}
+if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+
+// Data plane: this charge stays identical across rate changes and pause/resume.
+charge := pacelock.NamedCharge{Name: "tenant:rpm", Cost: 1}
+decision, err := limiter.AllowManaged(ctx, charge)
+if err != nil { return err }
+if !decision.Allowed { /* reject or schedule another attempt */ }
+
+// Later configuration publication: no debt reset and no request-node refresh.
+q.Policy.Revision = 2
+q.Policy.Rate = 200
+if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+q.Policy.Revision = 3
+q.Policy.Rate = 0 // emergency pause; fresh requests return ErrPaused
+if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+q.Policy.Revision = 4
+q.Policy.Rate = 100 // resume; debt recovered naturally during the pause
+if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+```
+
+- Revisions come from one authoritative configuration source, not per-process
+  counters. Multiple instances may publish the same batch: higher revisions win,
+  identical revision/effective policy is a read-only success, and stale or conflicting
+  revisions return `ErrPolicyMismatch`. Rollback publishes old parameters at a NEW
+  revision. A batch of up to `MaxRules` configurations updates atomically per scope.
+- Updates do not read, rescale, reset or shorten the lifetime of TAT. Admission
+  reads current configuration and debt under the same atomic boundary. Outstanding
+  debt exceeding a newly reduced burst is retained until natural recovery.
+- Redis uses one persistent P3 configuration key and one D3 debt key per managed
+  quota, all explicit and in the same slot. `AllowManaged` is one script roundtrip,
+  not a client-side GET followed by a write. PostgreSQL uses a separate policies
+  table and the existing scope transaction lock. No distributed-lock key is needed.
+- `Rate=0` requires positive Period and Burst. Fresh admission returns `ErrPaused`
+  / `NotCharged` without a debit or receipt. Missing configuration returns
+  `ErrPolicyMissing`, never unlimited admission. Cost above current burst is
+  `ErrInvalid`. There is no managed blocking Wait API or SDK polling goroutine;
+  applications own publication, retry scheduling and configuration-source polling.
+- `AllowManagedOnce(ctx, id, retention, charges...)` retains ordinary allow/deny
+  decisions. Its fingerprint binds ordered names/costs and retention, NOT policy
+  versions. Same-attempt retries replay the original result even after updates or
+  pause; `Lookup` reads either API's receipt. Changed costs or reuse across static
+  and managed APIs produce `ErrConflict`. Replay never authorizes executing twice.
+- `Prune` may reclaim expired debt and receipts, but never configuration/revisions.
+  Plan configuration cardinality accordingly; deleting a config loses its version
+  fence. All dynamic updates must use the SDK/version-check script, not raw SET.
+- Static `Allow`/`Wait`/`Bind` continue to use Revision=0 rules. Once a backend
+  configuration exists, fresh static admission for that name fails closed with
+  `ErrPolicyMismatch`; old static receipts remain recoverable. A managed policy
+  cannot be passed to these static APIs. Use name/cost admission instead.
+- For PostgreSQL, run explicit `Migrate` to add the policies table BEFORE upgraded
+  request binaries serve traffic, including static traffic. Deploy protocol-capable
+  binaries everywhere BEFORE enabling managed policies. Unmodified old writers
+  cannot be mixed with managed quotas. Policy updates and admissions
+  serialize normally; slow Lua scripts would still block other Redis commands.
+- Transport/commit errors may leave publication uncertain. No automatic retry is
+  performed; explicitly retry the SAME revision/policy to converge. Optional
+  `PolicyDriver` and `ManagedDriver` extensions leave the base Driver interface
+  unchanged; missing extensions return `ErrUnsupported` without mutation.
+
+Runnable SDK example: [managed admission](driver/redis/examples/managed/main.go).
 
 ## Blocking admission
 
@@ -325,8 +398,9 @@ and assembly; `Bind` emits no event. Do not label metrics with error text or use
 - GCRA is a rate/burst envelope, not an exact fixed/sliding-minute counter. Model
   provider limits explicitly. Known input tokens do not enforce output TPM;
   character, byte and SSE chunk counts are not token counts.
-- Effective interval and burst identify a policy. Changing active state returns
-  `ErrPolicyMismatch`. This is a deployment safeguard, not configuration storage.
+- Effective interval and burst identify a static (Revision=0) policy. Changing
+  active static state returns `ErrPolicyMismatch`. Managed policies additionally
+  require the persistent revision installed explicitly through `UpdatePolicies`.
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.
