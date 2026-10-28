@@ -38,8 +38,8 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 `...Charge`，每次必须为全部已绑定额度各提供一次正数消耗。绑定时应包含全部适用额度；Charge
 会按绑定顺序整理。捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
 绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前本地返回
-`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储不变，等待
-仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
+`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待
+通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
 
 ## 事务与故障契约

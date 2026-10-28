@@ -32,7 +32,7 @@ func TestRedisMSETCommitFaultBoundaries(t *testing.T) {
 			case "before":
 				injected = strings.Replace(source, "local committed = redis.pcall", "error('injected before commit')\n    local committed = redis.pcall", 1)
 			case "encoding":
-				injected = strings.Replace(source, "local complete = 'C1|'", "local complete = error('injected encoding failure') .. 'C1|'", 1)
+				injected = strings.Replace(source, "local complete = fingerprint", "local complete = error('injected encoding failure') .. fingerprint", 1)
 			case "after":
 				injected = strings.Replace(source, "return response", "error('injected after commit')", 1)
 			}
@@ -84,7 +84,7 @@ func TestRedisMSETOutOfMemoryNoPartialWrite(t *testing.T) {
 	}
 }
 
-func TestRedisLegacyUpgradePreservesDebtAndRecords(t *testing.T) {
+func TestRedisPlainQuotaPreservesDebtAndRemovesNativeTTL(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	now, err := c.Time(ctx).Result()
@@ -92,40 +92,52 @@ func TestRedisLegacyUpgradePreservesDebtAndRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	const step = int64(time.Hour / time.Microsecond)
-	r := rule("legacy", 3, 2)
-	if err := c.Set(ctx, l.key(r.Name), fmt.Sprintf("%d:%d:3", now.UnixMicro()+2*step, step), 3*time.Hour).Err(); err != nil {
+	r := rule("plain", 3, 2)
+	tat := now.UnixMicro() + 2*step
+	before := fmt.Sprintf("%d:%d:3", tat, step)
+	if err := c.Set(ctx, l.key(r.Name), before, 3*time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if d, err := l.Allow(ctx, r); err != nil || d.Allowed {
-		t.Fatalf("legacy debt reset: %+v %v", d, err)
+		t.Fatalf("plain quota debt reset: %+v %v", d, err)
+	}
+	if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != before {
+		t.Fatalf("denial mutated quota: %q", raw)
 	}
 	r.Cost = 1
-	_, args, _ := l.prepare([]Rule{r})
-	args[0] = int64(60000)
-	fp := fingerprint(args)
-	complete := "C1|" + fp + `|{"names":["legacy"],"values":[1,0,0]}`
-	for _, entry := range []struct{ id, raw string }{{"complete", complete}, {"pending", "P1|" + fp}} {
-		if err := c.Set(ctx, l.attemptKey(entry.id), entry.raw, time.Minute).Err(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if receipt, err := l.AllowOnce(ctx, "complete", time.Minute, r); err != nil || !receipt.Replayed {
-		t.Fatalf("legacy replay: %+v %v", receipt, err)
-	}
-	if _, err := l.AllowOnce(ctx, "pending", time.Minute, r); !errors.Is(err, ErrOutcomeUnknown) {
-		t.Fatalf("legacy pending: %v", err)
-	}
-	if _, found, err := l.Lookup(ctx, "pending"); found || !errors.Is(err, ErrOutcomeUnknown) {
-		t.Fatalf("legacy pending lookup: %t %v", found, err)
-	}
 	requireAllowed(t, l, r)
-	if raw := c.Get(ctx, l.key(r.Name)).Val(); !strings.HasPrefix(raw, "Q2|") {
-		t.Fatalf("not upgraded: %q", raw)
+	want := fmt.Sprintf("%d:%d:3", tat+step, step)
+	if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != want {
+		t.Fatalf("quota=%q want exact plain format %q", raw, want)
 	}
 	if ttl := c.PTTL(ctx, l.key(r.Name)).Val(); ttl != -1 {
 		t.Fatalf("MSET retained native expiry: %s", ttl)
 	}
 	requireDenied(t, l, r)
+}
+
+func TestRedisTaggedReceiptsRejectedBeforeCommit(t *testing.T) {
+	l, c := integration(t)
+	ctx := context.Background()
+	rules := []Rule{rule("q", 3, 1), rule("side", 3, 1)}
+	_, args, _ := l.prepare(rules)
+	args[0] = int64(60000)
+	fp := fingerprint(args)
+	body := fp + `|{"names":["q","side"],"values":[1,0,0,0]}`
+	for _, raw := range []string{"P1|" + fp, "C1|" + body, "E2|1|C1|" + body, "E2|9007199254740991|C1|" + body} {
+		if err := c.Set(ctx, l.attemptKey("id"), raw, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.AllowOnce(ctx, "id", time.Minute, rules...); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+			t.Fatalf("admit %q: %v", raw, err)
+		}
+		if _, found, err := l.Lookup(ctx, "id"); found || !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+			t.Fatalf("lookup %q: %t %v", raw, found, err)
+		}
+		if c.Exists(ctx, l.key("q"), l.key("side")).Val() != 0 || c.Get(ctx, l.attemptKey("id")).Val() != raw {
+			t.Fatal("malformed record caused mutation")
+		}
+	}
 }
 
 func TestRedisLogicalReceiptExpiryAndMalformedEnvelopes(t *testing.T) {
@@ -137,7 +149,8 @@ func TestRedisLogicalReceiptExpiryAndMalformedEnvelopes(t *testing.T) {
 		t.Fatal(original, err)
 	}
 	raw := c.Get(ctx, l.attemptKey("id")).Val()
-	if !strings.HasPrefix(raw, "E2|") || c.PTTL(ctx, l.attemptKey("id")).Val() != -1 {
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) != 3 || len(parts[1]) != 64 || c.PTTL(ctx, l.attemptKey("id")).Val() != -1 {
 		t.Fatalf("expected persistent envelope: %q", raw)
 	}
 	if r, err := l.AllowOnce(ctx, "id", time.Minute, rules...); err != nil || !r.Replayed {
@@ -146,8 +159,7 @@ func TestRedisLogicalReceiptExpiryAndMalformedEnvelopes(t *testing.T) {
 	if c.Get(ctx, l.attemptKey("id")).Val() != raw {
 		t.Fatal("replay extended logical retention")
 	}
-	parts := strings.SplitN(raw, "|", 3)
-	raw = "E2|1|" + parts[2]
+	raw = "1|" + parts[1] + "|" + parts[2]
 	if err := c.Set(ctx, l.attemptKey("id"), raw, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +169,11 @@ func TestRedisLogicalReceiptExpiryAndMalformedEnvelopes(t *testing.T) {
 	if c.Get(ctx, l.attemptKey("id")).Val() != raw {
 		t.Fatal("lookup mutated expired receipt")
 	}
-	for _, bad := range []string{"E2|0|C1|bad", "E2|9007199254740992|C1|bad", "E2|x|C1|bad", "E2|1|P1|" + strings.Repeat("a", 64), "E2|1|C1|bad"} {
+	if r, err := l.AllowOnce(ctx, "id", time.Minute, rules...); err != nil || r.Replayed || !r.Allowed {
+		t.Fatalf("expired receipt did not permit fresh admission: %+v %v", r, err)
+	}
+	before := c.Get(ctx, l.key("q")).Val()
+	for _, bad := range []string{"0|" + parts[1] + "|" + parts[2], "9007199254740992|" + parts[1] + "|" + parts[2], "x|" + parts[1] + "|" + parts[2], "1|bad|{}", "1|" + parts[1] + "|{}", "1|" + parts[1] + `|{"names":["q"],"values":[1,1,0]}`, "1|" + parts[1] + `|{"names":["q"],"values":[1,0]}`, "1|" + parts[1] + `|{"names":["q"],"values":[1.0,0,0]}`, "1|" + parts[1] + `|{"names":["q"],"values":[1e0,0,0]}`} {
 		if err := c.Set(ctx, l.attemptKey("bad"), bad, 0).Err(); err != nil {
 			t.Fatal(err)
 		}
@@ -166,6 +182,9 @@ func TestRedisLogicalReceiptExpiryAndMalformedEnvelopes(t *testing.T) {
 		}
 		if _, err := l.AllowOnce(ctx, "bad", time.Minute, rules...); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 			t.Fatalf("malformed replay: %v", err)
+		}
+		if c.Get(ctx, l.key("q")).Val() != before || c.Get(ctx, l.attemptKey("bad")).Val() != bad {
+			t.Fatal("malformed expired record caused mutation")
 		}
 	}
 }

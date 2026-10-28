@@ -44,7 +44,7 @@ go get github.com/tr1v3r/pacelock@dev github.com/tr1v3r/pacelock/driver/redis@de
 
 默认 `@latest` 当前选中旧版 API，并不包含本页展示的全部 API。请在应用的 `go.mod` 中保留解析得到的伪版本以便复现构建；`@dev` 会随开发推进，不代表稳定发布。
 
-构造函数现在接受 `pacelock.Driver`，属于 pre-v1 破坏性变更。
+构造函数接受 `pacelock.Driver`。
 下例需导入 `redisdriver "github.com/tr1v3r/pacelock/driver/redis"`。
 
 ```go
@@ -121,7 +121,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 ### 现有底层 API
 
-`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 与绑定 API 同时提供。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
 [持久化示例](driver/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
@@ -191,7 +191,7 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 - ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。绑定接口按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
-- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](driver/redis/README.zh-CN.md)。
+- Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果。损坏的结果记录返回 `ErrState` / `Unknown`，不会视为缺失或授权重新准入。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](driver/redis/README.zh-CN.md)。
 - `found=false` **不能证明未扣减**。原命令可能仍在执行，记录也可能已经过期或丢失。过期、淘汰、删除和故障切换丢数据都会终止去重保障，不应在此之后复用旧 ID。
 - 准入去重不等于上游执行去重。业务尝试需要单独协调；每次真正的新模型调用都需要新的准入 ID。
 
@@ -199,13 +199,13 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 
 ## 错误与观测
 
-使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrOutcomeUnknown`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
+使用 `errors.Is` 判断 `ErrInvalid`、`ErrPolicyMismatch`、`ErrState`、`ErrConflict`、`ErrBackend`，以及包装的 context/传输错误。准入错误提供 `*pacelock.Error`，包含 `Op` 和 `Outcome`：
 
 | 结果 | 含义 | 业务处理 |
 |---|---|---|
 | `Allowed=false`、无错误 | 额度不足；没有扣减额度 | 拒绝或调度新尝试 |
 | `NotCharged` 错误 | 确定本次调用未扣减 | 修正参数/策略或处理取消 |
-| `Unknown` 错误 | 可能已经扣减；旧协议可能部分写入 | 查询仍保留的 ID，执行明确的恢复策略 |
+| `Unknown` 错误 | 可能已经扣减，尚无法确认 | 查询仍保留的 ID，执行明确的恢复策略 |
 | `Lookup` 未找到 | 没有找到仍保留的完整结果 | 保留对先前执行结果的不确定性 |
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
@@ -220,7 +220,7 @@ decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
 - SDK 脚本命令通过 `NoRetry` 禁止不确定重放，无需禁用客户端重试；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。
-- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。新 Redis 协议使用单命令提交，崩溃和故障切换持久性仍取决于部署；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
+- 使用独立的键、主节点路由、TLS/认证和 Redis `noeviction`。Redis 协议使用单命令提交，崩溃和故障切换持久性仍取决于部署；时钟跳变、淘汰和故障切换丢数据可能削弱限流及去重。
 
 参见[运维与故障恢复](docs/operations.md)、[设计及扩展提案](docs/design.md)和[兼容性说明](docs/compatibility.md)。
 
@@ -251,5 +251,4 @@ CI 还会启用 `-race`、随机排序，将并发测试额外重复执行三次
 
 MIT 许可证。
 
-核心、两个运行时 Driver、可选的 pgx 示例及集成测试模块统一要求 Go 1.26+
-（pgx/text 依赖原要求 1.25，go-redis v9.23 将下限抬至 1.26）。生产应用应使用仍在维护的 Go 版本。
+核心、两个运行时 Driver、可选的 pgx 示例及集成测试模块统一要求 Go 1.26+。生产应用应使用仍在维护的 Go 版本。

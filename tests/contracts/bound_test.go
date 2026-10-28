@@ -54,7 +54,7 @@ func boundBackends(t *testing.T) []backend {
 func TestBoundDriverContract(t *testing.T) {
 	for _, backend := range boundBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
-			t.Run("atomic copied policies and compatibility", func(t *testing.T) { testBoundAtomic(t, backend) })
+			t.Run("atomic copied policies and shared Rule state", func(t *testing.T) { testBoundAtomic(t, backend) })
 			t.Run("idempotency and recovery", func(t *testing.T) { testBoundIdempotency(t, backend) })
 			t.Run("local policy mismatch is uncharged", func(t *testing.T) { testBoundChargePolicyMismatch(t, backend) })
 			t.Run("equivalent effective policies", func(t *testing.T) { testBoundEquivalentPolicies(t, backend) })

@@ -115,21 +115,41 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 	if _, err := l.Allow(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	r.Policy.Burst = 4
-	if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrPolicyMismatch) {
-		t.Fatalf("err=%v", err)
+	before := c.Get(ctx, l.key(r.Name)).Val()
+	for _, field := range []string{"step", "burst"} {
+		t.Run(field, func(t *testing.T) {
+			changed := r
+			if field == "step" {
+				changed.Policy.Period = 2 * time.Hour
+			} else {
+				changed.Policy.Burst = 4
+			}
+			if _, err := l.Allow(ctx, rule("fresh", 1, 1), changed); !errors.Is(err, ErrPolicyMismatch) || OutcomeOf(err) != NotCharged {
+				t.Fatalf("err=%v", err)
+			}
+			if c.Exists(ctx, l.key("fresh")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != before {
+				t.Fatal("policy error mutated quota state")
+			}
+		})
 	}
-	if c.Exists(ctx, l.key("fresh")).Val() != 0 {
-		t.Fatal("policy error partially wrote")
-	}
-	if err := c.Set(ctx, l.key("existing"), "broken", time.Minute).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) {
-		t.Fatalf("err=%v", err)
-	}
-	if c.Exists(ctx, l.key("fresh")).Val() != 0 {
-		t.Fatal("state error partially wrote")
+	for _, raw := range []string{"broken", "Q2|1:1:1", "Q2|" + before} {
+		t.Run(raw, func(t *testing.T) {
+			if err := c.Set(ctx, l.key(r.Name), raw, 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
+				t.Fatalf("err=%v", err)
+			}
+			if c.Exists(ctx, l.key("fresh")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != raw {
+				t.Fatal("state error mutated quota state")
+			}
+			if _, err := l.AllowOnce(ctx, "invalid-quota", time.Minute, rule("fresh-once", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
+				t.Fatalf("AllowOnce state error: %v", err)
+			}
+			if c.Exists(ctx, l.key("fresh-once"), l.attemptKey("invalid-quota")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != raw {
+				t.Fatal("AllowOnce state error wrote a quota or receipt")
+			}
+		})
 	}
 }
 

@@ -86,10 +86,11 @@ func (a Admission) Validate() error {
 }
 
 // Fingerprint binds ordered names, effective intervals, bursts, costs and
-// retention to the Redis v1-compatible argument encoding. Call Validate first.
+// retention to a JSON array: [retention_ms, step_us, burst, cost, name, ...].
+// Call Validate first.
 // Scope and ID identify the record and are not part of this fingerprint.
 func (a Admission) Fingerprint() string {
-	args := []any{a.Retention.Milliseconds(), ""}
+	args := []any{a.Retention.Milliseconds()}
 	for _, r := range a.Rules {
 		step, _ := r.Interval()
 		args = append(args, step.Microseconds(), r.Policy.Burst, r.Cost, r.Name)

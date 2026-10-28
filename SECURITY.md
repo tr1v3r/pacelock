@@ -37,7 +37,8 @@ administrative privileges belong only to isolated test/operations tooling.
 
 Test the exact ACL in staging: script key permissions and commands invoked inside
 scripts are both checked. One final MSET commits all new quota/receipt changes;
-legacy Pending remains uncertain and must be preserved. Keep noeviction, schedule
+malformed receipts return `ErrState` / `Unknown`, never missing or a new admission.
+Keep noeviction, schedule
 bounded cleanup, and monitor memory and maintenance lag. Quota names in retained result records
 are plaintext; do not put secrets or unnecessary personal data in them. Redis key
 hashing is namespace isolation, not encryption, access control or anonymization.
