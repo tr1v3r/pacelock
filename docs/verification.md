@@ -1,7 +1,10 @@
 > Historical verification below predates the Redis MSET/logical-expiry protocol.
 > The current Redis suite replaces partial-write/Pending creation with atomic-commit
-> ACL/OOM, logical-expiry, migration and bounded cleanup tests. New protocol results
-> are recorded in [the MSET local record](validation/redis-mset-local.md); do not interpret old native-TTL figures as new benchmarks.
+> ACL/OOM, logical-expiry, state validation and bounded cleanup tests. The historical
+> [MSET local record](validation/redis-mset-local.md) predates removal of the Q2 quota
+> prefix and receipt compatibility readers; neither report validates the current
+> key prefix, quota/receipt encoding or fingerprint. Pending tests listed below
+> belong only to the archived implementation, not the current suite.
 
 # Verification record — 2026-10-23
 

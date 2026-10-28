@@ -208,7 +208,7 @@
       "col": 2,
       "type": "database",
       "label": "GET / 校验全部 quota",
-      "sublabel": "Q2 到期重开；活跃策略须匹配",
+      "sublabel": "到期重开；活跃策略须匹配",
       "sources": [
         {
           "path": "drivers/redis/internal/engine/gcra.lua",
@@ -228,7 +228,7 @@
       "col": 1,
       "type": "backend",
       "label": "逐维计算 GCRA",
-      "sublabel": "候选 Q2 仅在 writes 内存中",
+      "sublabel": "候选值仅在 writes 内存中",
       "sources": [
         {
           "path": "drivers/redis/internal/engine/gcra.lua",
@@ -274,7 +274,7 @@
       "col": 1,
       "type": "backend",
       "label": "预先编码 receipt / 响应",
-      "sublabel": "有 ID：放行和拒绝均加入 E2",
+      "sublabel": "有 ID：放行和拒绝均保存结果",
       "sources": [
         {
           "path": "drivers/redis/internal/engine/gcra.lua",
@@ -521,7 +521,7 @@
       "dot": "emerald",
       "title": "Lua 内存计算与唯一提交边界",
       "items": [
-        "tat=max(now, active TAT)；nexttat=tat+cost×step；wait=max(0,nexttat−burst×step−now)。遍历全部 quota，任何状态 / 策略错误都终止；即使前一维不足，也不会跳过后续验证。候选值为 Q2|TAT:step:burst。",
+        "tat=max(now, active TAT)；nexttat=tat+cost×step；wait=max(0,nexttat−burst×step−now)。遍历全部 quota，任何状态 / 策略错误都终止；即使前一维不足，也不会跳过后续验证。候选值为 TAT:step:burst，不带版本前缀。",
         "普通允许：MSET 全部 quota；普通拒绝：零 mutation；幂等允许：同一次 MSET 写全部 quota+receipt；幂等拒绝：只 MSET denial receipt。所有编码先于提交，提交后不再执行 Redis 命令或编码。",
         "不是 MULTI/EXEC，也不是逐 quota SET。Lua 运行不可交错，但任意脚本错误不自动回滚；此实现靠唯一最终 MSET 避开 quota / receipt 部分提交。"
       ]
@@ -530,16 +530,16 @@
       "dot": "violet",
       "title": "重放与逻辑到期：不是 TTL 续命",
       "items": [
-        "有效且匹配的完整 receipt 在读取 quota 前直接返回原放行 / 拒绝，不重算 wait、不续 retention。新记录为 E2|now+retention_ms×1000|C1|fingerprint|Decision；指纹绑定有序名称、有效策略、cost、retention。",
-        "新 Q2 的 TAT<=now 视为逻辑到期，可从 now 开始使用新策略；新 E2 的 expiry<=now 视为未命中。新 MSET 格式无物理 TTL，读取过期记录不删除；不要套用 PG Evaluate 的毫秒取整 ExpiresAt。旧格式读取与原生 TTL 兼容仍保留。"
+        "有效且匹配的完整 receipt 在读取 quota 前直接返回原放行 / 拒绝，不重算 wait、不续 retention。记录为 expires_us|fingerprint|decision_json；指纹绑定有序名称、有效策略、cost、retention。",
+        "quota 在 TAT<=now 时逻辑到期，可使用新策略；有效 receipt 的 expires_us<=now 视为未命中。MSET 清除原生 TTL，读取过期记录不删除；不要套用 PG Evaluate 的毫秒取整 ExpiresAt。只支持当前格式，不保留版本兼容分支。"
       ]
     },
     {
       "dot": "amber",
       "title": "错误与未画出的维护旁路",
       "items": [
-        "只有真正 Redis error 的精确 SDK token 可证明部分错误未扣：PACE_POLICY / PACE_STATE / PACE_CONFLICT / PACE_COMMIT → NotCharged。PACE_RECORD、旧 P1 的 PACE_PENDING → Unknown；其他传输 / 服务端错误与派发后取消保守为 Unknown。错误时忽略返回值。",
-        "图中 receipt 节点的坏记录 / 旧 pending 走 Unknown，不把它们误当未命中。Lookup 只读原保留结果；查不到不能证明没扣。Prune 由调用方显式调度，SCAN 候选后第二段 Lua 重查到期并 DEL，无后台 worker，不在本次 Admit 内同步执行。依据：engine/errors.go:26–49、lookup.lua:1–10、prune.go:13–19、73–119。"
+        "只有真正 Redis error 的精确 SDK token 可证明部分错误未扣：PACE_POLICY / PACE_STATE / PACE_CONFLICT / PACE_COMMIT → NotCharged。PACE_RECORD → ErrState / Unknown；其他传输 / 服务端错误与派发后取消保守为 Unknown。错误时忽略返回值。",
+        "坏 receipt 返回 ErrState / Unknown，不能当作未命中。Lookup 只读保留结果，查不到不能证明没扣。Prune 由调用方调度；SCAN 后 Lua 按键角色解析（:attempt: 为 receipt，其余为 quota），全部校验后 DEL 过期状态。格式损坏或角色不符则整批报错、不删除。无后台 worker，不在 Admit 内清理。"
       ]
     }
   ]

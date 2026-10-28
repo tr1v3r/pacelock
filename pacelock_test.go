@@ -2,7 +2,9 @@ package pacelock
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"testing"
@@ -133,6 +135,10 @@ func TestFingerprintAndRounding(t *testing.T) {
 		t.Fatal(step, err)
 	}
 	fp := a.Fingerprint()
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte(`[60000,1000000,5,1,"q",333334,4,2,"tokens"]`)))
+	if fp != want {
+		t.Fatalf("fingerprint encoding: got %s want %s", fp, want)
+	}
 	a.Rules[0].Policy.Rate = 60
 	a.Rules[0].Policy.Period = time.Minute
 	if fp != a.Fingerprint() {
@@ -222,7 +228,8 @@ func TestWaitStopsOnEveryError(t *testing.T) {
 		&Error{Outcome: NotCharged, Err: ErrPolicyMismatch},
 		&Error{Outcome: NotCharged, Err: ErrBackend},
 		&Error{Outcome: Unknown, Err: context.Canceled},
-		&Error{Outcome: Unknown, Err: ErrOutcomeUnknown},
+		&Error{Outcome: Unknown, Err: ErrBackend},
+		&Error{Outcome: Unknown, Err: ErrState},
 	} {
 		t.Run(backendErr.Error(), func(t *testing.T) {
 			d := &waitDriver{}

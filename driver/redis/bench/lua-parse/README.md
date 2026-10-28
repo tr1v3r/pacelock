@@ -1,8 +1,9 @@
-# Redis Lua scalar vs Q2 experiment
+# Redis Lua scalar vs tuple benchmark
 
-This is an isolated experiment, not a proposed production protocol migration.
-The scalar prototype drops cross-client policy-conflict detection and legacy
-state compatibility; it is not contract-equivalent to Pacelock's Q2 protocol.
+The runnable harness measures the **current** unversioned `tat:interval:burst`
+quota representation against an experimental scalar TAT. It loads this checkout's
+actual Lua. The scalar prototype removes policy-conflict detection, so it is not
+a contract-equivalent production alternative.
 
 Run from the Redis driver module against an **isolated, disposable Redis**:
 
@@ -12,67 +13,74 @@ go run ./bench/lua-parse -addr 127.0.0.1:PORT -iterations 200000 > results-200k.
 ```
 
 The address must be explicit. Do not run against production or concurrently:
-this harness overwrites/deletes fixed `bench:{lua-parse}:*` keys and relies on
-exclusive EVALSHA statistics. It needs SCRIPT LOAD, EVALSHA, INFO, TIME, GET,
-MSET and DEL permissions. Start Redis with `--save '' --appendonly no` to match
-this run; do not change persistence settings on an existing service.
+the harness overwrites/deletes fixed `bench:{lua-parse}:*` keys and requires exclusive
+EVALSHA statistics. It needs SCRIPT LOAD, EVALSHA, INFO, TIME, GET, MSET and DEL.
+Start the disposable Redis with `--save '' --appendonly no`; do not change an
+existing service's persistence settings.
 
 ## Method
 
-- Uses go-redis and the checkout's actual `protocol.lua` and `gcra.lua`.
-- Three warmup rounds, then 15 rounds with deterministic randomized case order.
-- Measures Redis `cmdstat_evalsha.usec` deltas, not client/network latency.
-- Micro cases repeat 50,000 operations per script across 64 valid active TATs;
-  all iterations contribute to a checked integer checksum. Fixture setup,
-  loop/indexing, function-call and checksum overhead are included; setup is
-  amortized and the common loop baseline is reported without subtraction.
-- `scalar_parse`: `tonumber`; `q2_parse`: Q2 prefix/body extraction, pattern
-  matching, and all three numeric conversions.
-- Reader cases additionally validate bounds and allocate a state table; the Q2
-  reader also checks the stored interval and burst against the current policy.
-  Scalar validation is intentionally not identical for malformed input.
-- Full cases run the actual Allow script with 1, 4, or 32 existing active quota
-  keys. The scalar variant replaces the reader/encoder and removes policy
-  comparison, while retaining GET, GCRA, MSET and response construction.
-  These results measure **more than parsing**, not a parse-only speedup.
-- Each full sample pipelines 1,000 calls, verifies every allowed response and
-  checks the exact EVALSHA call-count delta. Fixture refresh is outside timing.
-- Full cases use interval=1us and burst=1,000,000,000; micro cases use
-  interval=100,000us and burst=10. They are not identical workloads.
-- Reports the median of per-round averages, not request-latency percentiles.
-  Lua GC, server scheduling, allocator behavior and VM noise remain included.
-- A second run with 200,000 iterations checks microbenchmark scaling.
+- Three excluded warmup rounds, then 15 rounds in deterministic randomized order.
+- Redis `cmdstat_evalsha.usec` deltas exclude client/network latency. Two TIME calls
+  within one script may return the same cached time and are not a valid timer.
+- Micro cases repeat 50,000 operations over 64 active TATs. Every result contributes
+  to a checked checksum. Setup, loop/indexing, function calls and checksum work are
+  included; setup is amortized and the loop baseline is reported, not subtracted.
+- `scalar_parse` uses `tonumber`; `tuple_parse` matches the three decimal fields and
+  converts each. Reader cases also check bounds and allocate state tables; the
+  tuple reader checks stored interval/burst. Malformed-input validation differs.
+- Full Allow cases use the actual script with 1, 4 or 32 active quotas. The scalar
+  variant replaces state decoding/encoding and removes policy comparison; GET,
+  GCRA, MSET and response construction remain. This measures **more than parsing**.
+- Each full sample pipelines 1,000 verified allowed calls and checks the exact
+  EVALSHA count delta. State refresh is outside timing. Full cases use interval=1us,
+  burst=1,000,000,000; micro cases use interval=100,000us, burst=10.
+- Reports medians of round averages, **not request P50/P99**. GC, allocation,
+  scheduling and VM noise remain. Only hot, valid, active, allowed paths are covered.
+- The optional 200,000-iteration run checks scaling. These are local experiments,
+  not production-throughput promises or evidence of million-QPS capacity.
 
-## Timing trap
+## Current tuple measurements (2026-10-28)
 
-An initial experiment called TIME twice in one Lua script and received the
-same cached time, producing zero micro times. That invalid run is excluded.
-The retained runs are [50,000 iterations](results-redis8-valid.json) and
-[200,000 iterations](results-redis8-200k.json); both use commandstats.
+[Raw results](results-redis8-tuple.json) record the Lua SHA-256 and current quota
+format. Apple M3 Pro / arm64, OrbStack Linux, Redis 8.10.2, RDB/AOF disabled;
+15 measured rounds, 50,000 micro iterations, 1,000 calls per full sample.
 
-No production implementation was modified.
+| Case | Scalar | Current tuple |
+|---|---:|---:|
+| Parse | 935.14 ns | 1285.60 ns |
+| Read and validate | 1128.92 ns | 1512.82 ns |
+| Allow, 1 quota | 5.788 us | 6.804 us |
+| Allow, 4 quotas | 14.455 us | 17.651 us |
+| Allow, 32 quotas | 89.831 us | 112.976 us |
 
-## Local results (2026-10-28)
+Loop baseline: 37.54 ns. These are not controlled before/after measurements
+against the historical run below; cross-run differences do not isolate tag removal.
 
-Tested production source: `2820790` (2026-10-28 checkout).
-Apple M3 Pro / arm64, OrbStack Linux container, Redis 8.10.2, RDB/AOF disabled.
-Medians of round averages from the corrected 50,000-iteration run:
+## Historical Q2 measurements (2026-10-28)
 
-| Micro case | Scalar | Q2 | Q2 overhead |
+The raw [50k](results-redis8-valid.json) and [200k](results-redis8-200k.json) datasets
+are retained evidence from production source `2820790` and harness commit `c331f56`.
+They measure the **removed Q2 format**, not the current tuple. Historical code is
+available in Git; no legacy reader or execution path is kept in the current harness.
+
+Apple M3 Pro / arm64, OrbStack Linux, Redis 8.10.2, RDB/AOF disabled. Medians of
+round averages from the corrected 50k run:
+
+| Historical micro case | Scalar | Q2 | Q2 overhead |
 |---|---:|---:|---:|
 | Parse | 851.80 ns | 1323.50 ns | 471.70 ns (+55.4%) |
 | Read and validate | 1031.16 ns | 1540.14 ns | 508.98 ns (+49.4%) |
 
-Common loop baseline: 35.18 ns. At 200,000 iterations: parse 887.40 / 1321.85 ns;
-read/validate 1053.91 / 1544.74 ns. Extra cost remains about 0.43–0.51us/quota.
+Loop baseline: 35.18 ns. The 200k run measured parse 887.40 / 1321.85 ns and
+read/validate 1053.91 / 1544.74 ns.
 
-| Full Allow server execution | Scalar | Q2 | Q2 overhead |
-|---|---:|---:|---:|
-| 1 quota | 5.319 us | 6.234 us | 0.915 us (+17.2%) |
-| 4 quotas | 13.676 us | 16.846 us | 3.170 us (+23.2%) |
-| 32 quotas | 83.663 us | 109.052 us | 25.389 us (+30.3%) |
+| Historical Allow server execution | Scalar | Q2 |
+|---|---:|---:|
+| 1 quota | 5.319 us | 6.234 us |
+| 4 quotas | 13.676 us | 16.846 us |
+| 32 quotas | 83.663 us | 109.052 us |
 
-The relative parse difference is substantial, but the absolute increment is
-about half a microsecond per quota. It can matter on CPU-bound multi-quota
-paths. These percentages are not end-to-end latency or production-throughput
-changes, and the scalar prototype is not a contract-preserving replacement.
+Do not attribute these historical differences solely to the removed prefix or
+claim them as current performance. The scalar comparison also removes policy
+checks and changes encoding/storage.

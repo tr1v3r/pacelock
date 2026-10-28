@@ -1,13 +1,4 @@
-# Compatibility and migration
-
-## Driver constructor migration
-
-This pre-v1 change replaces `pacelock.New(client, ns, domain)` with
-`redisdriver.New(client)` followed by `pacelock.New(driver, ns, domain)`.
-`NewWithOptions` now accepts Driver too. Install the selected driver module explicitly;
-core consumers do not import Redis. Redis key names and v1 readers are preserved;
-new writes use the v2 protocol described below. Moving to PostgreSQL does not transfer existing debt or IDs. See the
-[Driver contract](driver.md) and [PostgreSQL guide](../driver/postgres/README.md).
+# Compatibility and state contracts
 
 ## Supported contract
 
@@ -32,19 +23,18 @@ Redis execution, routing and error semantics. Client ownership remains with the
 caller. No background goroutines, queues, implicit retry loop or package-global
 quota configuration are introduced.
 
-The public API remains pre-v1. Admission method signatures, `Rule`/`Decision`
-layouts and errors.Is behavior remain. Redis key names are unchanged; internal
-values now use logical expiry and a single MSET commit. `NewWithOptions` is separate to avoid changing the
-function type of `New`. Typed-nil clients and nil contexts now return `ErrInvalid`.
-Check errors with `errors.Is/As`, not string matching; wrapper text has changed.
+The public API is pre-v1. Construct a Redis or PostgreSQL `Driver` explicitly,
+then pass it to `New` or `NewWithOptions`. The core has no backend dependency.
+Typed-nil clients and nil contexts return `ErrInvalid`. Check errors with
+`errors.Is/As` and accounting certainty with `OutcomeOf`, not string matching.
 
 ### Per-command retry safety (pre-v1)
 
-Concrete `*redis.Client` and `*redis.ClusterClient` instances now accept default,
+Concrete `*redis.Client` and `*redis.ClusterClient` instances accept default,
 positive and disabled (`-1`) `MaxRetries` budgets. Pacelock wraps its EVALSHA/EVAL
 commands with go-redis v9.22.0's `NoRetry` marker, preventing ambiguous replay at
 node, Cluster and ASK pipeline layers without disabling retries for other commands
-on a shared client. Existing explicit `MaxRetries: -1` settings remain valid.
+on a shared client. Explicit `MaxRetries: -1` disables retries for other commands too.
 
 Cluster supports default or positive bounded redirect budgets. `MaxRedirects: -1`
 still disables redirects; only that opt-out loses transparent MOVED/ASK recovery.
@@ -60,45 +50,38 @@ The README's explicit `@dev` installation selects that line; retain its resolved
 pseudo-version for reproducible builds. Default `@latest` currently selects an
 older API. A stable tag remains a separate, explicitly authorized release decision.
 
-## Redis state and v2 writer migration
+## Redis state
 
-Keys retain the exact existing prefix/hash tag and suffixes:
-
-```text
-pacelock:v1:{domain_digest}:quota_digest
-pacelock:v1:{domain_digest}:attempt:sha256(admission_id)
-```
-
-New values are versioned independently of the historical key prefix:
+Keys use a scope hash tag and separate quota/receipt suffixes:
 
 ```text
-Q2|TAT_microseconds:effective_interval_microseconds:Burst
-E2|expires_at_microseconds|C1|fingerprint|{"names":[...],"values":[allowed,retry_us,blocked_flags...]}
+pacelock:{domain_digest}:quota_digest
+pacelock:{domain_digest}:attempt:sha256(admission_id)
 ```
 
-Quota expiry equals TAT; complete-result expiry equals admission Redis time plus
-retention. MSET clears native TTLs, so values remain physically present until
-explicit bounded cleanup. Replays and lookups do not change either deadline.
-Fingerprints still bind ordered effective rules and retention using the v1
-fingerprint encoding; only persistence envelopes change.
+The state formats are:
 
-The new reader also accepts legacy `TAT:interval:Burst`, `C1|...` and `P1|...`.
-Legacy quotas retain their debt and active-policy check until expiry/replacement;
-new successful quota writes replace them in place. Replayed legacy receipts keep
-their original native TTL. P1 always remains Unknown and is never automatically
-refunded, deleted or completed; v2 never generates P1. Cleanup only deletes expired
-v2 values, leaving legacy TTLs and pending markers alone.
+```text
+TAT_microseconds:effective_interval_microseconds:Burst
+expires_at_microseconds|fingerprint|{"names":[...],"values":[allowed,retry_us,blocked_flags...]}
+```
 
-Before upgrade, grant MSET, prepare repeated cleanup for every scope, then stop
-and drain every old writer before starting v2 writers on the same scope/keys.
-Do not mix writer generations or rename/delete state: old scripts cannot read v2
-and arbitrary renaming creates fresh capacity. Pause operations for migration;
-reader compatibility does not authorize a mixed deployment.
+Every quota logically expires when `tat <= now`, regardless of native TTL, and
+may then use a new policy. Active quotas require matching effective interval and
+burst. Complete-result expiry equals admission Redis time plus retention.
+One MSET commits admitted quotas and the complete receipt, clearing native TTLs;
+physical removal requires explicit bounded cleanup. Replays and lookups do not
+change either deadline. Fingerprints encode ordered effective rules and retention
+as `[retention_ms,step,burst,cost,name,...]`, without an empty placeholder.
 
-Unconverted rollback is unsupported. Quiesce writers and either perform an
-explicit debt/deadline-preserving conversion or wait for all debt and retention
-windows to expire and prune state. No automatic rollback converter is included.
-Never revive expired IDs or shorten a live record's deadline to force a rollback.
+A malformed receipt returns `ErrState` / `Unknown`, never missing or permission
+for a new admission. Preserve uncertainty: do not delete or refund state to retry.
+
+Prune selects the parser by key role (`:attempt:` for receipts, otherwise quota),
+validates all candidates before deletion, and removes expired quotas and receipts
+in one DEL. Malformed or wrong-role values fail the batch without deleting any
+candidates.
+
 These are internal formats, not application APIs. See the bilingual Redis guides
 for cleanup cursor semantics, ACLs and operational limits.
 
@@ -110,12 +93,12 @@ coordinating traffic, or design an explicit debt-preserving migration outside th
 SDK. Renaming a quota/domain creates fresh capacity; deleting keys silently resets
 debt. Neither is a transparent policy update.
 
-## Failure and replay compatibility
+## Failure and replay safety
 
 `Allow` has no attempt ID and remains unsafe to replay after an ambiguous failure.
 `AllowOnce` returns the original decision while its record survives. A complete
 record is useful evidence of that admission, but says nothing about whether the
-upstream business request was executed. A pending record, missing record, lost
+upstream business request was executed. A malformed receipt, missing record, lost
 replication or expired ID is not evidence that capacity was never charged.
 
 Use separate IDs for admission transport recovery and for distinct business
@@ -124,6 +107,5 @@ SDK does not provide exactly-once execution, crash-proof quota accounting, refun
 output reservation or billing. Those are not implied by a successful release.
 
 The core, both runtime drivers, the optional pgx example and the
-integration-test modules require Go 1.26+. The pgx/text floor was 1.25; the
-go-redis v9.23 dependency raises it to 1.26. Production applications should
+integration-test modules require Go 1.26+. Production applications should
 use a maintained Go release.
