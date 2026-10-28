@@ -4,6 +4,10 @@ Scope: local, uncommitted changes on `codex/bound-policy-costs`, based on
 `705c86b5422a9f8c5671197db2edcd29007d8c55` (PR #20). These results are not CI
 results, a release certification or production throughput measurements.
 
+This historical run predates nonempty-subset bound admission. Its complete-set
+validation results describe the earlier contract, not the current API; see the
+[current policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+
 ## Environment and correctness checks
 
 - Go 1.27.1, darwin/arm64, Apple M3 Pro, 12 logical CPUs reported by Go.

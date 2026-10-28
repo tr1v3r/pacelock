@@ -34,8 +34,8 @@ func (q Quota) rule(cost int64) Rule {
 }
 
 // BoundLimiter binds an immutable, ordered quota set to a Limiter. Every admission
-// must charge all bound quotas exactly once. Charges may arrive in any order;
-// decisions and idempotency fingerprints use binding order, not charge order.
+// must charge a nonempty subset of bound quotas exactly once. Charges may arrive
+// in any order; decisions and idempotency fingerprints use binding order.
 // It is safe for concurrent use under the parent Limiter's driver contract.
 // Construct it with Limiter.Bind; nil and zero receivers return ErrInvalid.
 type BoundLimiter struct {
@@ -73,12 +73,13 @@ func (l *Limiter) Bind(quotas ...Quota) (*BoundLimiter, error) {
 	return &BoundLimiter{limiter: l, rules: rules, index: index}, nil
 }
 
-// Allow immediately checks and charges the entire bound quota set or denies
-// without charging any. Use Quota.Charge to supply each bound quota exactly once,
+// Allow immediately checks and charges a nonempty subset of bound quotas or denies
+// without charging any. Use Quota.Charge to supply each selected quota exactly once,
 // in any order, with 0 < cost <= Burst. Each charge must carry a valid policy with
-// the same effective interval and Burst as its bound quota. Missing, duplicate,
+// the same effective interval and Burst as its bound quota. Empty, duplicate,
 // unknown, mismatched or invalid charges return ErrInvalid with NotCharged before
-// dispatch. No cost is defaulted or skipped.
+// dispatch. Omitted quotas are neither checked nor charged. Separate calls are
+// independent admissions: a later denial does not roll back an earlier debit.
 // It never waits for quota recovery or queues work; backend synchronization may
 // wait until ctx expires. After dispatch an error may have an Unknown debit
 // outcome. Ignore Decision on error and inspect OutcomeOf.
@@ -97,8 +98,10 @@ func (b *BoundLimiter) Allow(ctx context.Context, charges ...Charge) (decision D
 // AllowOnce adds the same bounded deduplication and recovery contract as
 // Limiter.AllowOnce. ID and retention have the same bounds. Charges are validated
 // as in BoundLimiter.Allow, and quota names must be valid UTF-8. Reordering charges
-// does not change a retained attempt; binding order, effective policies, costs and
-// retention must still match. Retain the original binding for attempt recovery.
+// does not change a retained attempt; only selected quotas enter the fingerprint,
+// in binding order. Their effective policies, costs and retention must still match.
+// Changing the selected subset with the same retained ID returns ErrConflict.
+// Retain the original binding and selected charges for attempt recovery.
 // Both allows and denials are retained. Ignore Receipt on error and inspect OutcomeOf.
 func (b *BoundLimiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (receipt Receipt, err error) {
 	l := b.parent()
@@ -130,24 +133,23 @@ func (b *BoundLimiter) parent() *Limiter {
 	return b.limiter
 }
 
-// chargedRules validates a complete charge set and assembles a per-call copy in
-// binding order. No caller-owned slice or shared binding is mutated.
+// chargedRules validates a nonempty charge subset and assembles a per-call copy
+// of only selected rules in binding order. Caller and binding data are not mutated.
 func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Rule, error) {
 	if err := b.parent().ready(ctx); err != nil {
 		return nil, err
 	}
-	if len(charges) != len(b.rules) {
-		return nil, fmt.Errorf("%w: require one charge per bound quota", ErrInvalid)
+	if len(charges) == 0 || len(charges) > len(b.rules) {
+		return nil, fmt.Errorf("%w: require a nonempty subset of bound quotas", ErrInvalid)
 	}
-	rules := append([]Rule(nil), b.rules...)
-	seen := make([]bool, len(rules))
+	costs := make([]int64, len(b.rules))
 	for _, charge := range charges {
 		rule := charge.quota.rule(charge.cost)
 		i, ok := b.index[rule.Name]
 		if !ok {
 			return nil, fmt.Errorf("%w: unknown quota %q", ErrInvalid, rule.Name)
 		}
-		if seen[i] {
+		if costs[i] != 0 {
 			return nil, fmt.Errorf("%w: duplicate charge for quota %q", ErrInvalid, rule.Name)
 		}
 		interval, err := rule.Interval()
@@ -155,12 +157,18 @@ func (b *BoundLimiter) chargedRules(ctx context.Context, charges []Charge) ([]Ru
 			return nil, err
 		}
 		// Bind validated the immutable template, including its placeholder cost.
-		boundInterval, _ := rules[i].Interval()
-		if interval != boundInterval || rule.Policy.Burst != rules[i].Policy.Burst {
+		boundInterval, _ := b.rules[i].Interval()
+		if interval != boundInterval || rule.Policy.Burst != b.rules[i].Policy.Burst {
 			return nil, fmt.Errorf("%w: quota %q policy differs from binding", ErrInvalid, rule.Name)
 		}
-		seen[i] = true
-		rules[i].Cost = charge.cost
+		costs[i] = charge.cost
+	}
+	rules := make([]Rule, 0, len(charges))
+	for i, rule := range b.rules {
+		if costs[i] != 0 {
+			rule.Cost = costs[i]
+			rules = append(rules, rule)
+		}
 	}
 	return rules, nil
 }

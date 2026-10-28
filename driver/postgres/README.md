@@ -38,11 +38,15 @@ with `q.Charge(cost)`, a value-receiver method that captures the complete quota 
 cost in private fields without validation or I/O; do not use charge field literals.
 `Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
 charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
-still take `...Charge`, one positive cost per bound quota exactly once on every call.
-Bind all applicable quotas; charge order is normalized to binding order. Each
-captured policy must be fully valid, and its name, effective interval (rounded upward
+accept any nonempty subset of bound quotas as `...Charge`, each selected quota
+exactly once with `0 < cost <= Burst`. Omitted quotas are neither checked nor charged.
+Selected charges are normalized to binding order. Idempotency fingerprints include
+only selected names, normalized order, effective policies, costs and retention;
+changing the subset with the same retained ID returns `ErrConflict`. Reordering
+input charges does not change the fingerprint. Separate calls are not atomic together.
+Each captured policy must be fully valid, and its name, effective interval (rounded upward
 to microseconds) and burst must match the binding. Equivalent valid policy
-expressions are accepted. Invalid, incomplete or mismatched charges return local
+expressions are accepted. Empty calls, duplicate, unknown, invalid or mismatched charges return local
 `ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
 Existing Rule APIs, Driver and storage are unchanged; blocking admission still
 uses `limiter.Wait` with rules, not a bound wait method.

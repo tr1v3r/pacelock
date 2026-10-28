@@ -112,16 +112,16 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 - `limiter.Bind(quotas...)` 在本地校验并复制 1～32 个名称唯一的额度，不访问后端，也不注册或更新服务端策略。定义无效时返回包装 `ErrInvalid` 的错误。
 - `BoundLimiter` 不可变，在父 Limiter 的驱动契约下可并发复用。之后修改原始额度切片、Quota 或策略值，既不影响绑定，也不影响先前构造的 Charge。每次调用独立组装规则，不修改传入参数。
-- `bound.Allow(ctx, charges...)` 和 `bound.AllowOnce(ctx, id, retention, charges...)` 仍接收 `...Charge`。每次必须为全部已绑定额度各提供一次通过 `q.Charge(cost)` 构造的消耗，且 `0 < cost <= Burst`。遗漏、重复、未知额度、零值 Charge 或其他无效消耗均在派发前返回 `ErrInvalid`，结果为 `NotCharged`。不默认填充消耗，也不通过零消耗隐式跳过额度。
+- `bound.Allow(ctx, charges...)` 和 `bound.AllowOnce(ctx, id, retention, charges...)` 接受已绑定额度的任意非空子集，以 `...Charge` 传入。每个选中额度仅提供一次通过 `q.Charge(cost)` 构造的消耗，且 `0 < cost <= Burst`。未传入的额度既不检查也不扣减。空调用、重复、未知额度、零值 Charge 或其他无效消耗均在派发前返回 `ErrInvalid`，结果为 `NotCharged`。不默认填充消耗，也不通过零消耗隐式跳过额度。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性；必须一起通过的额度应在同一次调用中提交。
 - 每个 Charge 捕获的完整策略必须合法，其名称、有效 `Interval`（向上取整到微秒）和 `Burst` 必须与绑定一致。不同但合法的 `Rate` / `Period` 写法只要有效间隔相同即可接受。捕获策略无效或与绑定不符是本地 `ErrInvalid` / `NotCharged`，不是后端的 `ErrPolicyMismatch`。
-- `Charge` 可以任意排序。`Decision.Limited` 和幂等使用的有序规则均以绑定顺序为准。调整 Charge 顺序仍可重放；调整绑定顺序会改变已保留尝试的参数。
+- `Charge` 可以任意排序。选中额度按绑定顺序整理，用于 `Decision.Limited` 和幂等。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限。调整 Charge 顺序仍可重放；对同一仍保留的 ID 改变子集或选中额度在绑定中的相对顺序，返回 `ErrConflict`。未选中额度不影响指纹。
 - 由应用根据可信身份构造额度名称并选择策略。动态租户或模型可以按适用的额度集合创建绑定；绑定是本地操作，不需要预先注册或强制使用缓存。
 - 修改策略需创建新绑定。绑定不会迁移已有债务，也不会绕过活跃后端状态的 `ErrPolicyMismatch` 检查。已保留尝试的恢复应继续使用原绑定、消耗和保留期限。
 - `bound.Lookup` 委托父 Limiter 按 namespace/domain 查询，可以返回其他绑定或底层 API 创建的记录，不按当前绑定的额度集合过滤。
 
 ### 现有底层 API
 
-`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验集合完整性，并按绑定顺序整理消耗。
+`Rule`、`Validate`、`limiter.Allow(ctx, rules...)` 和 `limiter.AllowOnce(ctx, id, retention, rules...)` 继续兼容，绑定 API 不改变原有签名、Driver 契约、存储或协议。`Rule` 将额度名称、单次消耗与 `Quota` 共用的同一个 `Policy` 类型合在一起，两层对补给策略只描述一次。这条路径只检查传入规则，无法发现漏掉的适用额度。绑定接口复用相同的执行路径和额度状态，额外校验所选消耗与绑定是否一致，并按绑定顺序整理消耗。两种 API 都无法检测调用方漏传的适用额度。
 [持久化示例](driver/redis/examples/durable/README.zh-CN.md)中的版本化可信规则构造器继续演示底层 API。
 
 ## PostgreSQL 与 Driver 边界
@@ -188,7 +188,7 @@ if err != nil {
 decision, found, err := bound.Lookup(recoveryCtx, admissionID)
 ```
 
-- ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化返回 `ErrConflict`。绑定接口按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
+- ID 在 namespace/domain 内生效，绑定**有序的**额度名称、有效间隔、突发容量、消耗及保留期限。参数变化（包括同一仍保留的 ID 改变所选子集）返回 `ErrConflict`。绑定接口只包含选中额度，并按绑定顺序整理 Charge，底层接口保留传入的 Rule 顺序。`AllowOnce` 要求额度名称为有效 UTF-8；ID 长度为 1～256 字节。
 - 保留期限必须为 1 毫秒到 24 小时之间的整毫秒，覆盖业务恢复窗口。重放和查询不延长期限。
 - 允许和拒绝都会保存。保留期内被拒绝的 ID 始终重放拒绝；稍后发起真正的新尝试需要新 ID。重放的 `RetryAfter` 是原始等待时长，不是倒计时或最新容量估计。
 - Redis 在完成全部校验和编码后，最后一次 MSET 提交额度及完整结果，新操作不再生成 Pending。旧 Pending 仍返回 `ErrOutcomeUnknown`，不能自动删除或退款。Redis 使用逻辑过期，应用需为每个作用域安排有界物理清理，详见[Redis 协议与清理指南](driver/redis/README.zh-CN.md)。

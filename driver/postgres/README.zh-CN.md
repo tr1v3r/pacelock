@@ -35,9 +35,12 @@ decision, err := bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))
 公共 `Bind` 接口在本地校验并复制固定额度。通过值接收者方法 `q.Charge(cost)` 将完整额度和消耗
 捕获到私有字段，不校验、不做 I/O；不要使用 Charge 字段字面量。`Quota.Name` / `Policy` 仍公开，
 之后修改 Quota 不影响已有 Charge 或绑定，变更策略需新建 binding。`Allow` / `AllowOnce` 仍接收
-`...Charge`，每次必须为全部已绑定额度各提供一次正数消耗。绑定时应包含全部适用额度；Charge
-会按绑定顺序整理。捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
-绑定一致；合法且有效策略相同的不同写法可接受。无效、不完整或不匹配的 Charge 在准入前本地返回
+`...Charge`，每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`。
+未传入额度既不检查也不扣减。选中 Charge 按绑定顺序整理，幂等指纹只包含选中额度的名称、
+整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集返回 `ErrConflict`，
+调整传入 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
+绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 Charge 在准入前本地返回
 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。旧 Rule API、Driver 和存储不变，等待
 仍通过 `limiter.Wait` 传入规则，不提供绑定等待方法。
 详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。

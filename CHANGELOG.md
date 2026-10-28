@@ -4,6 +4,10 @@
 
 ### Breaking changes
 
+- Bound admission no longer rejects omitted bound quotas: `Allow` and `AllowOnce`
+  accept any nonempty subset. Callers that relied on complete-set enforcement
+  must validate required quotas themselves or submit them together explicitly.
+  Full-set calls retain their existing ordering and idempotency fingerprints.
 - `New` and `NewWithOptions` now accept an atomic `Driver` rather than a Redis
   client. Construct the independent Redis or PostgreSQL driver explicitly.
 - `Rule` now embeds the shared `Policy` type as `Rule{Name, Policy, Cost}` instead
@@ -25,9 +29,14 @@
   Upgrade requires drained old writers and scheduled cleanup; unconverted rollback
   and mixed writers are unsupported. Runtime admission now needs MSET permission.
 - `Policy`, `Quota`, `Charge` and `Limiter.Bind` separate fixed policies from
-  complete per-attempt charge sets across all drivers. `BoundLimiter` provides
-  `Allow`, `AllowOnce` and scope-wide `Lookup`; charge order is normalized to
-  binding order. This unreleased PR's API now constructs charges through the
+  per-attempt charges across all drivers. `BoundLimiter` provides `Allow`,
+  `AllowOnce` and scope-wide `Lookup`. Admission accepts any nonempty subset of
+  bound quotas; omitted quotas are neither checked nor charged. Empty calls,
+  duplicate, unknown or invalid charges remain invalid. Selected charges are
+  normalized to binding order; idempotency fingerprints include only selected
+  names, normalized order, effective policies, costs and retention. Changing the
+  subset with the same retained ID conflicts. Separate calls are not atomic
+  together. Construct charges through the
   value-receiver `Quota.Charge(cost)`, capturing a quota snapshot and cost in private
   fields without validation or I/O. Bound admission validates the complete captured
   policy and requires matching names, effective microsecond-rounded intervals and
