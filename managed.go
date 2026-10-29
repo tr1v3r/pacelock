@@ -16,6 +16,12 @@ type Charge struct {
 	Cost int64
 }
 
+// Use constructs a Charge for a named quota and cost without binding a policy.
+// It does not validate inputs; Allow and Wait validate charges before dispatch.
+func Use(name string, cost int64) Charge {
+	return Charge{Name: name, Cost: cost}
+}
+
 // Admission requests an atomic charge using backend-owned policies.
 // Drivers must not retain or mutate the caller's Charges slice.
 type Admission struct {

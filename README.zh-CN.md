@@ -69,8 +69,10 @@ tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
 }}
 // 控制面先发布；数据面只传名称与本次消耗。
 if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
-charges := []pacelock.Charge{{Name: rpm.Name, Cost: 1}, {Name: tokens.Name, Cost: 1500}}
-decision, err := limiter.Allow(ctx, charges...)
+decision, err := limiter.Allow(ctx,
+    pacelock.Use(rpm.Name, 1),
+    pacelock.Use(tokens.Name, 1500),
+)
 if err != nil {
     // 忽略 decision。OutcomeOf(err) 为 NotCharged 或 Unknown。
     // 业务明确选择故障策略，不盲目重试。
@@ -81,6 +83,9 @@ if !decision.Allowed {
     // RetryAfter 不会预留未来容量。
 }
 ```
+
+`pacelock.Use(name, cost)` 是 `pacelock.Charge{Name: name, Cost: cost}` 的简写，
+可用于 `Allow` 和 `Wait`。每次调用可传不同的 cost；辅助函数不绑定策略，校验仍在准入时执行。
 
 `Allow` 为本次尝试消耗容量，**不具备幂等性**。准入后业务失败不会退还容量。对于 Redis Driver，Limiter 不拥有或关闭 Redis 客户端；构造函数不建立连接、不修改客户端配置。客户端必须通过 go-redis 构造函数初始化，不支持零值客户端结构体。对这些已初始化的具体 `*redis.Client` / `*redis.ClusterClient`，`redisdriver.New` 支持默认、正数及禁用（`-1`）的 `MaxRetries` 配置；不支持的负数预算在本地返回 `ErrInvalid`。请先配置客户端再传入，不要在之后修改其 options。
 
