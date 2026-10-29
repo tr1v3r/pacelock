@@ -133,19 +133,17 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 		return uncharged(err)
 	}
 
-	policies := make([]pacelock.QuotaState, len(a.Charges))
-	states := make([]pacelock.QuotaState, len(a.Charges))
+	ids := make([]string, len(a.Charges))
 	for i, charge := range a.Charges {
-		name := charge.Name
-		policies[i], err = loadPolicy(ctx, tx, scope, name)
-		if err != nil {
-			return uncharged(err)
-		}
-		s := &states[i]
-		err = tx.QueryRowContext(ctx, `SELECT tat_us,interval_us,burst,expires_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, scope, itemID(name)).Scan(&s.TAT, &s.Interval, &s.Burst, &s.ExpiresAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return uncharged(err)
-		}
+		ids[i] = itemID(charge.Name)
+	}
+	policies, err := loadBatch(ctx, tx, scope, ids, true)
+	if err != nil {
+		return uncharged(err)
+	}
+	states, err := loadBatch(ctx, tx, scope, ids, false)
+	if err != nil {
+		return uncharged(err)
 	}
 
 	decision, next, err := pacelock.EvaluateManaged(now, a.Charges, policies, states)
@@ -153,11 +151,8 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 		return uncharged(err)
 	}
 	if decision.Allowed {
-		for i, s := range next {
-			err = storeQuota(ctx, tx, scope, a.Charges[i].Name, s)
-			if err != nil {
-				return uncharged(err)
-			}
+		if err = storeBatch(ctx, tx, scope, ids, next, false); err != nil {
+			return uncharged(err)
 		}
 	}
 
@@ -167,18 +162,87 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 	return decision, nil
 }
 
-func storeQuota(ctx context.Context, tx *sql.Tx, scope, name string, s pacelock.QuotaState) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO pacelock_quotas(scope_id,quota_id,tat_us,interval_us,burst,expires_us) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(scope_id,quota_id) DO UPDATE SET tat_us=EXCLUDED.tat_us,interval_us=EXCLUDED.interval_us,burst=EXCLUDED.burst,expires_us=EXCLUDED.expires_us`, scope, itemID(name), s.TAT, s.Interval, s.Burst, s.ExpiresAt)
-	return err
+// placeholders only interpolates locally generated parameter numbers, never data.
+func placeholders(first, count int) string {
+	var b strings.Builder
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "$%d", first+i)
+	}
+	return b.String()
 }
 
-func loadPolicy(ctx context.Context, tx *sql.Tx, scope, name string) (pacelock.QuotaState, error) {
-	var s pacelock.QuotaState
-	err := tx.QueryRowContext(ctx, `SELECT interval_us,burst,revision FROM pacelock_policies WHERE scope_id=$1 AND quota_id=$2`, scope, itemID(name)).Scan(&s.Interval, &s.Burst, &s.Revision)
-	if errors.Is(err, sql.ErrNoRows) {
-		return pacelock.QuotaState{}, nil
+// loadBatch restores request order explicitly: PostgreSQL need not return rows in
+// IN-list order. Absent rows remain zero states for the core's missing semantics.
+// The domain lock protects both tables, including rows not yet present.
+func loadBatch(ctx context.Context, tx *sql.Tx, scope string, ids []string, policy bool) ([]pacelock.QuotaState, error) {
+	table, columns := "pacelock_quotas", "tat_us,interval_us,burst,expires_us"
+	if policy {
+		table, columns = "pacelock_policies", "interval_us,burst,revision"
 	}
-	return s, err
+	args := make([]any, 1, len(ids)+1)
+	args[0] = scope
+	positions := make(map[string]int, len(ids))
+	for i, id := range ids {
+		args = append(args, id)
+		positions[id] = i
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT quota_id,"+columns+" FROM "+table+" WHERE scope_id=$1 AND quota_id IN ("+placeholders(2, len(ids))+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make([]pacelock.QuotaState, len(ids))
+	for rows.Next() {
+		var id string
+		var s pacelock.QuotaState
+		if policy {
+			err = rows.Scan(&id, &s.Interval, &s.Burst, &s.Revision)
+		} else {
+			err = rows.Scan(&id, &s.TAT, &s.Interval, &s.Burst, &s.ExpiresAt)
+		}
+		if err != nil {
+			return nil, err
+		}
+		i, ok := positions[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: unexpected quota row", pacelock.ErrState)
+		}
+		states[i] = s
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return states, rows.Close()
+}
+
+// storeBatch uses scalar database/sql arguments, not transport-specific arrays.
+// Validation of every quota finishes before the single atomic upsert is issued.
+func storeBatch(ctx context.Context, tx *sql.Tx, scope string, ids []string, states []pacelock.QuotaState, policy bool) error {
+	table, columns := "pacelock_quotas", "tat_us,interval_us,burst,expires_us"
+	if policy {
+		table, columns = "pacelock_policies", "interval_us,burst,revision"
+	}
+	var values []string
+	var args []any
+	for i, s := range states {
+		first := len(args) + 1
+		args = append(args, scope, ids[i])
+		if policy {
+			args = append(args, s.Interval, s.Burst, s.Revision)
+		} else {
+			args = append(args, s.TAT, s.Interval, s.Burst, s.ExpiresAt)
+		}
+		values = append(values, "("+placeholders(first, len(args)-first+1)+")")
+	}
+	var assignments []string
+	for _, column := range strings.Split(columns, ",") {
+		assignments = append(assignments, column+"=EXCLUDED."+column)
+	}
+	_, err := tx.ExecContext(ctx, "INSERT INTO "+table+"(scope_id,quota_id,"+columns+") VALUES"+strings.Join(values, ",")+" ON CONFLICT(scope_id,quota_id) DO UPDATE SET "+strings.Join(assignments, ","), args...)
+	return err
 }
 
 // UpdateQuotas atomically installs managed configuration under the admission
@@ -209,12 +273,13 @@ func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaBatch) error 
 		return uncharged(err)
 	}
 
-	states := make([]pacelock.QuotaState, len(u.Quotas))
+	ids := make([]string, len(u.Quotas))
 	for i, q := range u.Quotas {
-		states[i], err = loadPolicy(ctx, tx, scope, q.Name)
-		if err != nil {
-			return uncharged(err)
-		}
+		ids[i] = itemID(q.Name)
+	}
+	states, err := loadBatch(ctx, tx, scope, ids, true)
+	if err != nil {
+		return uncharged(err)
 	}
 
 	next, err := pacelock.ApplyQuotas(now, u.Quotas, states)
@@ -222,21 +287,22 @@ func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaBatch) error 
 		return uncharged(err)
 	}
 
-	changed := false
+	var changedIDs []string
+	var changed []pacelock.QuotaState
 	for i, s := range next {
-		if s == states[i] {
-			continue
-		}
-		changed = true
-		_, err = tx.ExecContext(ctx, `INSERT INTO pacelock_policies(scope_id,quota_id,interval_us,burst,revision) VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope_id,quota_id) DO UPDATE SET interval_us=EXCLUDED.interval_us,burst=EXCLUDED.burst,revision=EXCLUDED.revision`, scope, itemID(u.Quotas[i].Name), s.Interval, s.Burst, s.Revision)
-		if err != nil {
-			return uncharged(err)
+		if s != states[i] {
+			changedIDs = append(changedIDs, ids[i])
+			changed = append(changed, s)
 		}
 	}
 	// An identical retry is read-only, so rollback avoids commit ambiguity.
-	if !changed {
+	if len(changed) == 0 {
 		return nil
 	}
+	if err = storeBatch(ctx, tx, scope, changedIDs, changed, true); err != nil {
+		return uncharged(err)
+	}
+
 	if err = tx.Commit(); err != nil {
 		return fail("update_quotas", pacelock.Unknown, err)
 	}

@@ -106,6 +106,20 @@ the core EvaluateManaged transition; Redis's equivalents run inside Lua.
 Managed admission validates original debt fields, then applies current configuration
 in memory. Debt rows store interval/burst for integrity checks, not policy authority.
 
+Admission batches policy and debt reads into two SELECTs and, only when all quotas
+allow, writes debt with one multi-row upsert. Rows are mapped back to request order
+by quota ID; missing policies fail closed and missing debt starts empty. The limit
+remains `MaxRules = 32`. Including guard insertion, locking and time sampling,
+allowed admission uses six SQL statements and denial five, plus BEGIN/COMMIT,
+independent of quota count. Denial performs no policy/debt writes (the permanent
+guard may still be inserted). SQL size and parameter count still grow with quotas.
+`UpdateQuotas` similarly uses one policy SELECT and at most one changed-row upsert
+(five statements when changed, four when identical, plus transaction boundaries).
+Identical revisions are not rewritten and an entirely identical update rolls back
+its read-only transaction instead of committing. All parameters are scalar
+`database/sql` arguments; no array codecs, transport batching API or new dependency
+is required. Batching reduces round trips, not domain serialization or lock waits.
+
 Before Commit is sent, failures roll back and are NotCharged. Every Commit error
 is conservatively Unknown: quota may already have been debited. There is no
 receipt lookup, replay or automatic transaction retry. Retrying is a fresh admission
