@@ -150,11 +150,11 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 func TestDynamicWaitRejectsInvalidDriverResults(t *testing.T) {
 	for _, result := range []Decision{
 		{},
-		Decision{Allowed: true, RetryAfter: time.Second},
-		Decision{RetryAfter: -time.Second, Limited: []string{"q"}},
-		Decision{RetryAfter: MaxHorizon + time.Second, Limited: []string{"q"}},
-		Decision{RetryAfter: time.Second, Limited: []string{"other"}},
-		Decision{RetryAfter: time.Second, Limited: []string{"tokens", "q"}},
+		{Allowed: true, RetryAfter: time.Second},
+		{RetryAfter: -time.Second, Limited: []string{"q"}},
+		{RetryAfter: MaxHorizon + time.Second, Limited: []string{"q"}},
+		{RetryAfter: time.Second, Limited: []string{"other"}},
+		{RetryAfter: time.Second, Limited: []string{"tokens", "q"}},
 	} {
 		d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Decision, error) { return result, nil }}
 		l, _ := New(d, "app", "domain")
