@@ -91,19 +91,19 @@ func (q Quota) rule(cost int64) Rule {
 // Implementations serialize updates with admission and preserve absolute TAT.
 // Revisions are permanent fences, not expiring debt. No automatic retries occur.
 type QuotaDriver interface {
-	UpdateQuotas(context.Context, QuotaUpdate) error
+	UpdateQuotas(context.Context, QuotaBatch) error
 }
 
-// QuotaUpdate installs an ordered batch of managed quota configurations in one atomic scope.
+// QuotaBatch is an ordered batch of managed quota configurations in one atomic scope.
 // Revisions must increase; retrying an identical revision/effective policy is safe.
 // Same revision with different policy or a lower revision is ErrPolicyMismatch.
-type QuotaUpdate struct {
+type QuotaBatch struct {
 	Scope
 	Quotas []Quota
 }
 
-// Validate checks the update without accessing backend state.
-func (u QuotaUpdate) Validate() error {
+// Validate checks the batch without accessing backend state.
+func (u QuotaBatch) Validate() error {
 	if err := u.Scope.Validate(); err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...Quota) error {
 	if err := core.ready(ctx); err != nil {
 		return failure(op, NotCharged, err)
 	}
-	u := QuotaUpdate{Scope: core.scope, Quotas: append([]Quota(nil), quotas...)}
+	u := QuotaBatch{Scope: core.scope, Quotas: append([]Quota(nil), quotas...)}
 	if err := u.Validate(); err != nil {
 		return failure(op, NotCharged, err)
 	}
@@ -154,7 +154,7 @@ func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...Quota) error {
 // must be zero. Drivers serialize this with admission and persist configurations
 // separately from debt. This function neither reads nor modifies debt.
 func ApplyPolicies(now int64, quotas []Quota, states []QuotaState) ([]QuotaState, error) {
-	if err := (QuotaUpdate{Scope: Scope{Namespace: "validate", Domain: "validate"}, Quotas: quotas}).Validate(); err != nil {
+	if err := (QuotaBatch{Scope: Scope{Namespace: "validate", Domain: "validate"}, Quotas: quotas}).Validate(); err != nil {
 		return nil, err
 	}
 	if len(states) != len(quotas) {

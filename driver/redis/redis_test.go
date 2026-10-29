@@ -21,7 +21,7 @@ func TestUpdateQuotasPublicValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := pacelock.QuotaUpdate{Scope: pacelock.Scope{Namespace: "test", Domain: "q"}, Quotas: []pacelock.Quota{{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: time.Second, Burst: 1, Revision: 1}}}}
+	request := pacelock.QuotaBatch{Scope: pacelock.Scope{Namespace: "test", Domain: "q"}, Quotas: []pacelock.Quota{{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: time.Second, Burst: 1, Revision: 1}}}}
 	for _, current := range []*Driver{nil, {}, driver} {
 		if err := current.UpdateQuotas(nil, request); !errors.Is(err, pacelock.ErrInvalid) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 			t.Fatal(err)

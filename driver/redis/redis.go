@@ -58,7 +58,7 @@ func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (paceloc
 // UpdateQuotas atomically changes managed policies while preserving all debt.
 // Unknown failures may have committed; explicitly retrying the same revision and
 // effective policy is idempotent. The transport never retries ambiguous commands.
-func (d *Driver) UpdateQuotas(ctx context.Context, request pacelock.QuotaUpdate) error {
+func (d *Driver) UpdateQuotas(ctx context.Context, request pacelock.QuotaBatch) error {
 	if err := request.Validate(); err != nil {
 		return inputError("update_quotas", err)
 	}
@@ -300,7 +300,7 @@ func (l *limiter) UpdateQuotas(ctx context.Context, quotas ...pacelock.Quota) er
 		return failure(op, NotCharged, err)
 	}
 	// Scope was already validated by construction; validate the quota contract here.
-	request := pacelock.QuotaUpdate{Scope: pacelock.Scope{Namespace: "validated", Domain: "validated"}, Quotas: quotas}
+	request := pacelock.QuotaBatch{Scope: pacelock.Scope{Namespace: "validated", Domain: "validated"}, Quotas: quotas}
 	if err := request.Validate(); err != nil {
 		return failure(op, NotCharged, err)
 	}

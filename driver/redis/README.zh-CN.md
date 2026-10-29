@@ -48,7 +48,7 @@ Lua 读取本次涉及的额度与策略，计算 GCRA，提前编码全部值�
 
 全部准入均由后端托管策略。通过正数、单调递增的 revision 和
 `limiter.UpdateQuotas(ctx, quotas...)` 发布配置，也可调用驱动的
-`UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`。
+`UpdateQuotas(ctx, pacelock.QuotaBatch{Scope: scope, Quotas: quotas})`。
 每批更新与准入原子串行，最后仅执行一次 MSET，复用 NoRetry 传输。
 额度配置变更不会补充容量、重置或重标定债务；更新精确保留原始 TAT，即使债务超过缩小后的容量也不重置。
 同 revision、同有效 interval/burst 可幂等重试；较低 revision 或同 revision 不同策略
