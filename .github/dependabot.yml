@@ -1,12 +1,20 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /driver/redis
+      - /driver/postgres
+      - /tests/contracts
+      - /examples/postgres
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Development happens on dev; main only tracks releases.
+    target-branch: dev
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    target-branch: dev

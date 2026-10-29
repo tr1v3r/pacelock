@@ -1,3 +1,4 @@
 /.worktrees/
-/coverage.out
+**/coverage.out
 .DS_Store
+/examples/postgres/postgres

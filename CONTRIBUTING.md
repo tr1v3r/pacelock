@@ -13,23 +13,24 @@ concurrency ownership outside the core. Additional runtime dependencies require
 an explicit justification; instrumentation uses a callback, not a telemetry SDK.
 
 For correctness changes, add tests that exercise externally visible invariants:
-no debit on denial, no replay debit, bounded retention and uncertain outcomes on
+no debit on denial, no automatic replay of uncertain mutations, preserved debt
+and policy revision fences, bounded cleanup, and uncertain outcomes on
 transport/runtime failures. A fake Redis alone is not adequate Lua verification.
 Use deterministic seeds for model tests and preserve useful fuzz regressions.
 
 ## Required checks
 
 ```sh
-gofmt -w *.go examples/*/*.go
+gofmt -w .
 go mod verify
-go test ./...
-go vet ./...
+sh scripts/check.sh
 docker compose up -d --wait
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
-  go test -race -count=1 -cover ./...
-go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .
-go test -run '^$' -fuzz FuzzRecord -fuzztime 20s .
+PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
+PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
+PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
+(cd driver/redis && go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 docker compose down
 ```
@@ -42,7 +43,8 @@ expected backends via `PACELOCK_REQUIRED_REDIS_BACKENDS`. See
 Integration tests create and delete only their own namespaced keys. The cold-cache
 contention test runs `SCRIPT FLUSH` on every test master (affecting the server-wide
 script cache); use dedicated disposable fixtures, never a shared Redis service. ACL fault
-tests also create/delete a temporary Redis user. Use disposable test services,
+tests also create/delete a temporary Redis user. The MSET OOM test temporarily
+lowers maxmemory and restores it afterward; use only disposable fixtures. Use disposable test services,
 never production. The Cluster fixture has three masters and no replicas; it
 validates routing/atomicity, not failover availability or durability.
 
@@ -54,10 +56,12 @@ executed code, not proof of correctness or a production SLA.
 
 - Review `CHANGELOG.md`, both READMEs, API docs and compatibility notes.
 - Confirm tests, minimum Go/Redis versions, Cluster, fuzz and security checks.
-- Review quota state and admission record migration; never reset debt silently.
+- Review exact D1/P1 parsing and fail-closed behavior for unknown/malformed state.
+  Prune only valid recovered D1 debt; never delete policy or unknown keys.
 - Check examples compile and execute against disposable Redis.
 - Review module dependency/license changes and `go mod verify`.
-- Publish measured limitations, remaining deployment checks and migration steps.
+- Publish measured limitations and remaining deployment checks. No upgrade,
+  migration or historical storage compatibility is guaranteed.
 - Obtain explicit authorization for version/tag/release, then verify resulting CI.
 - Use semver and describe any pre-v1 breaking change; no stable API guarantee
   before an explicitly approved v1 release. Never rewrite a published tag.

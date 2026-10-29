@@ -2,44 +2,50 @@
 
 ## Unreleased
 
-### Added
+### Dynamic-only admission
 
-- `AllowOnce` and `Lookup` for bounded idempotent admission and recovery, including
-  conflict detection, cached rejection, immutable retention and pending markers
-  protecting against repeat debit after interrupted writes.
-- `Receipt`, `Error`, `OutcomeOf`, `ErrConflict`, `ErrOutcomeUnknown`, `ErrBackend`.
-- `Validate`, `NewWithOptions` and optional synchronous `Observer` events.
-- Redis Cluster, randomized token-bucket model, fuzz, malformed-state, lost-response
-  and real ACL partial-write tests; runnable recovery example and benchmarks.
-- Docker Compose fixtures, expanded CI, dependency/security checks and operating,
-  compatibility, security, contribution and verification documents.
-- Constructor retry-policy, Cluster post-execution lost-reply and minimum-ACL
-  regression tests.
+- Add `Use(name, cost)` as shorthand for constructing a `Charge` for `Allow` and
+  `Wait`, without policy binding or changes to admission validation.
 
-### Fixed
+- `New` / `NewWithOptions` construct the sole dynamic `Limiter`, exposing
+  `Allow(ctx, ...Charge) (Decision, error)`, `Wait(ctx, ...Charge) error` and
+  `UpdateQuotas`. Publish positive-revision quotas before requests.
+- `Driver.Admit(ctx, Admission) (Decision, error)` receives Scope + Charges.
+  `Rule`, `Validate` and `Evaluate` remain offline math helpers, not admission APIs.
+- Admission is non-idempotent: no retained results, request identity, replay or
+  uncertain-result recovery. Do not blindly retry Unknown; a mutation may have
+  committed. No billing, refunds, business execution, queue or worker ownership.
+- Backend policies are authoritative. Handle stale publication errors explicitly;
+  restoring earlier parameters requires a higher revision. Updates preserve debt.
+- Wait copies charges once, reads current backend policies per attempt, retries
+  only valid capacity denials after RetryAfter and stops on every error. Preserve
+  in-flight accounting certainty and confirmed success during cancellation; emit
+  one observation for the complete Wait call.
 
-- Reject typed-nil clients, nil contexts and uninitialized limiters without panic.
-- Validate complete script response invariants and stored policy bounds.
-- Distinguish pre-write state errors from ambiguous transport/runtime failures.
-- Assert model-test persistence and TTL from an atomic snapshot in the same script
-  as admission; remove the missing-state exemption that could hide omitted writes.
-- Mark concrete go-redis script commands with `NoRetry` to prevent ambiguous
-  replay at node, Cluster and ASK pipeline layers while retaining safe redirects.
-  Constructors do not perform network I/O or mutate client options.
-- Align development installation instructions with `@dev`, classify `ErrState`
-  recovery by `OutcomeOf`, and document Cluster's precise `+cluster|slots` ACL
-  requirement and the distinction between quota writes and retained denials.
+### Exact Redis storage contract
 
-### Compatibility
+- Accept only exact `D1|tat` debt and `P1|interval:burst:revision` policy formats.
+  Marker `1` identifies the first dynamic storage format, independently of the
+  positive, monotonically increasing `Policy.Revision`.
+- Unknown, malformed or wrong-role stored formats fail closed before mutation.
+  Equivalent same-revision policy publications remain read-only successes.
+- Prune deletes only valid recovered D1 debt, never policy or unknown keys.
+  Permanent policy revision fences and debt-preserving updates remain required.
+- No upgrade, migration, mixed-version or historical storage compatibility is
+  guaranteed. Historical experiments retain their original data and source IDs;
+  they are not current implementation validation or compatibility promises.
 
-- Existing `New`, `Allow`, `Rule`, `Decision` and quota state/key encoding remain.
-- Concrete go-redis clients accept default, positive and disabled (`-1`)
-  `MaxRetries` budgets. Other commands on a shared client keep their retry policy.
-  Default/positive Cluster redirect budgets allow bounded MOVED/ASK recovery;
-  explicit `MaxRedirects: -1` still disables it. Unsupported negative budgets are
-  rejected. Custom Scripters, hooks, node factories and proxies must preserve the
-  no-ambiguous-replay contract. Requires go-redis v9.22.0.
-- Admission error strings changed; callers must use `errors.Is`/`errors.As`.
-- `Allow` is still non-idempotent. New admission records do not retroactively
-  deduplicate old calls. There is no automatic refund or output-token reservation.
-- No tagged version or stability promise is created by this change.
+### Maintenance and validation
+
+- Remove duplicate Redis engine observation plumbing; validate driver decisions
+  against the dispatched charge snapshot without allocating synthetic rules.
+- Keep rollback, commit-loss, weighted multidimensional atomicity, contention,
+  cancellation, state validation, cleanup and conservative Unknown coverage.
+- Standard-library core, independent Redis/PostgreSQL modules, explicit PostgreSQL
+  setup via `Migrate`, single-MSET Redis commit and application-scheduled cleanup.
+- Per-command Redis NoRetry prevents ambiguous replay while preserving bounded
+  MOVED/ASK redirects. Constructors perform no I/O or client option mutation.
+- Keep current bilingual documentation, examples, security and contribution guidance
+  aligned with the [current contract](docs/compatibility.md).
+
+No stable release, cross-backend failover or upstream exactly-once guarantee is introduced.

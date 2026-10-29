@@ -1,0 +1,546 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Pacelock · Redis Lua 单次原子准入",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/workflows/redis.html",
+    "repository": {
+      "url": "https://github.com/tr1v3r/pacelock",
+      "revision": "6a8d58fc558fb8896ac9b8919c62f1bd7f3f8109",
+      "link_mode": "web"
+    }
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "① Go 编排 → 脚本入口"
+    },
+    {
+      "id": "read",
+      "label": "② Lua 读取 / 纯计算"
+    },
+    {
+      "id": "error",
+      "label": "③ 已知未扣错误出口",
+      "variant": "exception"
+    },
+    {
+      "id": "commit",
+      "label": "④ Lua 提交 → Go 解码"
+    },
+    {
+      "id": "uncertain",
+      "label": "⑤ 结果不明出口",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "validate",
+    "keys",
+    "script",
+    "clock",
+    "receipt"
+  ],
+  "nodes": [
+    {
+      "id": "validate",
+      "lane": "entry",
+      "col": 0,
+      "type": "security",
+      "label": "Driver.Admit 校验",
+      "sublabel": "请求 / context；选择普通或幂等",
+      "sources": [
+        {
+          "path": "drivers/redis/redis.go",
+          "line": 36,
+          "end_line": 55
+        },
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 128,
+          "end_line": 134
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 30,
+          "end_line": 47
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "lane": "entry",
+      "col": 1,
+      "type": "backend",
+      "label": "同 scope 编排 KEYS / ARGV",
+      "sublabel": "共享 hash tag；规则与可选 receipt",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 69,
+          "end_line": 77
+        },
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 155,
+          "end_line": 176
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 49,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "script",
+      "lane": "entry",
+      "col": 2,
+      "type": "backend",
+      "label": "EVALSHA 执行整段脚本",
+      "sublabel": "仅 NOSCRIPT 回落 EVAL",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 93,
+          "end_line": 107
+        },
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 135,
+          "end_line": 137
+        },
+        {
+          "path": "drivers/redis/internal/engine/hardening_test.go",
+          "line": 140,
+          "end_line": 146
+        }
+      ]
+    },
+    {
+      "id": "clock",
+      "lane": "entry",
+      "col": 3,
+      "type": "database",
+      "icon": "clock",
+      "label": "Lua：一次 TIME",
+      "sublabel": "后端微秒时间；整次准入共用",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/protocol.lua",
+          "line": 4,
+          "end_line": 9
+        },
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 1,
+          "end_line": 4
+        }
+      ]
+    },
+    {
+      "id": "receipt",
+      "lane": "read",
+      "col": 3,
+      "type": "database",
+      "icon": "decision",
+      "label": "有效 receipt？",
+      "sublabel": "有 ID 才 GET；先于全部 quota",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 9,
+          "end_line": 29
+        },
+        {
+          "path": "drivers/redis/internal/engine/protocol.lua",
+          "line": 20,
+          "end_line": 37
+        }
+      ]
+    },
+    {
+      "id": "replay",
+      "lane": "read",
+      "col": 4,
+      "type": "backend",
+      "label": "直接返回原结果",
+      "sublabel": "replay=1；无 quota 读取或写入",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 19,
+          "end_line": 29
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 64,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "conflict",
+      "lane": "error",
+      "col": 4,
+      "type": "security",
+      "icon": "failure",
+      "label": "PACE_CONFLICT",
+      "sublabel": "ErrConflict / NotCharged",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 19,
+          "end_line": 22
+        },
+        {
+          "path": "drivers/redis/internal/engine/errors.go",
+          "line": 26,
+          "end_line": 49
+        }
+      ]
+    },
+    {
+      "id": "readQuota",
+      "lane": "read",
+      "col": 2,
+      "type": "database",
+      "label": "GET / 校验全部 quota",
+      "sublabel": "到期重开；活跃策略须匹配",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 33,
+          "end_line": 53
+        },
+        {
+          "path": "drivers/redis/internal/engine/protocol.lua",
+          "line": 10,
+          "end_line": 18
+        }
+      ]
+    },
+    {
+      "id": "calculate",
+      "lane": "read",
+      "col": 1,
+      "type": "backend",
+      "label": "逐维计算 GCRA",
+      "sublabel": "候选值仅在 writes 内存中",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 54,
+          "end_line": 64
+        }
+      ]
+    },
+    {
+      "id": "allowed",
+      "lane": "read",
+      "col": 0,
+      "type": "backend",
+      "icon": "decision",
+      "label": "全部 wait = 0？",
+      "sublabel": "RetryAfter 取最大；收集全部受限项",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 54,
+          "end_line": 65
+        }
+      ]
+    },
+    {
+      "id": "clear",
+      "lane": "commit",
+      "col": 0,
+      "type": "backend",
+      "label": "清空候选 quota writes",
+      "sublabel": "仅清内存；不删除 Redis 债务",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 65,
+          "end_line": 65
+        }
+      ]
+    },
+    {
+      "id": "assemble",
+      "lane": "commit",
+      "col": 1,
+      "type": "backend",
+      "label": "预先编码 receipt / 响应",
+      "sublabel": "有 ID：放行和拒绝均保存结果",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 66,
+          "end_line": 74
+        }
+      ]
+    },
+    {
+      "id": "mset",
+      "lane": "commit",
+      "col": 2,
+      "type": "database",
+      "label": "非空 writes：一次 MSET",
+      "sublabel": "唯一 mutation；为空直接跳过",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 75,
+          "end_line": 82
+        }
+      ]
+    },
+    {
+      "id": "decode",
+      "lane": "commit",
+      "col": 3,
+      "type": "security",
+      "label": "Go 解码并验证",
+      "sublabel": "Decision / fp / names / replay",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/pacelock.go",
+          "line": 139,
+          "end_line": 147
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 57,
+          "end_line": 73
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 140,
+          "end_line": 170
+        }
+      ]
+    },
+    {
+      "id": "done",
+      "lane": "commit",
+      "col": 4,
+      "type": "backend",
+      "icon": "success",
+      "label": "返回 Decision / Receipt",
+      "sublabel": "Allowed / RetryAfter / Limited",
+      "sources": [
+        {
+          "path": "drivers/redis/redis.go",
+          "line": 49,
+          "end_line": 55
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 64,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "notCharged",
+      "lane": "error",
+      "col": 2,
+      "type": "security",
+      "icon": "failure",
+      "label": "确定未扣：NotCharged",
+      "sublabel": "本地校验 / POLICY / STATE / COMMIT",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/errors.go",
+          "line": 26,
+          "end_line": 49
+        },
+        {
+          "path": "drivers/redis/redis.go",
+          "line": 41,
+          "end_line": 48
+        }
+      ]
+    },
+    {
+      "id": "unknown",
+      "lane": "uncertain",
+      "col": 3,
+      "type": "backend",
+      "icon": "failure",
+      "label": "Unknown；不盲重放",
+      "sublabel": "丢回复 / 超时 / 解码 / RECORD 等",
+      "sources": [
+        {
+          "path": "drivers/redis/internal/engine/errors.go",
+          "line": 26,
+          "end_line": 49
+        },
+        {
+          "path": "drivers/redis/internal/engine/idempotency.go",
+          "line": 57,
+          "end_line": 73
+        },
+        {
+          "path": "drivers/redis/internal/engine/transport.go",
+          "line": 35,
+          "end_line": 58
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "validate",
+      "to": "keys",
+      "label": "通过",
+      "role": "main"
+    },
+    {
+      "from": "keys",
+      "to": "script",
+      "role": "main"
+    },
+    {
+      "from": "script",
+      "to": "clock",
+      "label": "进入脚本",
+      "role": "main"
+    },
+    {
+      "from": "clock",
+      "to": "receipt",
+      "role": "main"
+    },
+    {
+      "from": "receipt",
+      "to": "readQuota",
+      "label": "无 ID / 未命中 / 过期",
+      "role": "main"
+    },
+    {
+      "from": "receipt",
+      "to": "replay",
+      "label": "有效且参数相同",
+      "role": "branch"
+    },
+    {
+      "from": "receipt",
+      "to": "conflict",
+      "label": "有效但参数不同",
+      "role": "error"
+    },
+    {
+      "from": "readQuota",
+      "to": "calculate",
+      "role": "main"
+    },
+    {
+      "from": "calculate",
+      "to": "allowed",
+      "role": "main"
+    },
+    {
+      "from": "allowed",
+      "to": "assemble",
+      "label": "全通过：保留 writes",
+      "role": "main"
+    },
+    {
+      "from": "allowed",
+      "to": "clear",
+      "label": "任一不足",
+      "role": "branch"
+    },
+    {
+      "from": "clear",
+      "to": "assemble",
+      "role": "branch"
+    },
+    {
+      "from": "assemble",
+      "to": "mset",
+      "role": "main"
+    },
+    {
+      "from": "mset",
+      "to": "decode",
+      "label": "返回响应",
+      "role": "main"
+    },
+    {
+      "from": "replay",
+      "to": "decode",
+      "role": "branch"
+    },
+    {
+      "from": "decode",
+      "to": "done",
+      "label": "合法",
+      "role": "main"
+    },
+    {
+      "from": "readQuota",
+      "to": "notCharged",
+      "label": "POLICY / STATE",
+      "role": "error"
+    },
+    {
+      "from": "mset",
+      "to": "notCharged",
+      "label": "PACE_COMMIT",
+      "role": "error"
+    },
+    {
+      "from": "decode",
+      "to": "unknown",
+      "label": "畸形响应",
+      "role": "error"
+    },
+    {
+      "from": "script",
+      "to": "unknown",
+      "label": "派发后结果不明",
+      "role": "error",
+      "toSide": "right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Cluster 与传输：同槽脚本，不是每 quota 一次调用",
+      "items": [
+        "namespace/domain 的 SHA256 形成共享 {hash-tag}，quota 名与 ID 各哈希成后缀；同 scope 的所有 KEYS 落在同一 Cluster slot。ARGV 携带 retention、fingerprint 和有序 step/burst/cost/name。",
+        "go-redis Script.Run 先 EVALSHA，仅明确 NOSCRIPT 时回落 EVAL。内建 Client / ClusterClient 对这些命令使用 NoRetry，保留有界 MOVED / ASK 路由；网络结果不明不自动重放。自定义 Scripter 也必须遵守契约。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Lua 内存计算与唯一提交边界",
+      "items": [
+        "tat=max(now, active TAT)；nexttat=tat+cost×step；wait=max(0,nexttat−burst×step−now)。遍历全部 quota，任何状态 / 策略错误都终止；即使前一维不足，也不会跳过后续验证。候选值为 TAT:step:burst，不带版本前缀。",
+        "普通允许：MSET 全部 quota；普通拒绝：零 mutation；幂等允许：同一次 MSET 写全部 quota+receipt；幂等拒绝：只 MSET denial receipt。所有编码先于提交，提交后不再执行 Redis 命令或编码。",
+        "不是 MULTI/EXEC，也不是逐 quota SET。Lua 运行不可交错，但任意脚本错误不自动回滚；此实现靠唯一最终 MSET 避开 quota / receipt 部分提交。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "重放与逻辑到期：不是 TTL 续命",
+      "items": [
+        "有效且匹配的完整 receipt 在读取 quota 前直接返回原放行 / 拒绝，不重算 wait、不续 retention。记录为 expires_us|fingerprint|decision_json；指纹绑定有序名称、有效策略、cost、retention。",
+        "quota 在 TAT<=now 时逻辑到期，可使用新策略；有效 receipt 的 expires_us<=now 视为未命中。MSET 清除原生 TTL，读取过期记录不删除；不要套用 PG Evaluate 的毫秒取整 ExpiresAt。只支持当前格式，不保留版本兼容分支。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "错误与未画出的维护旁路",
+      "items": [
+        "只有真正 Redis error 的精确 SDK token 可证明部分错误未扣：PACE_POLICY / PACE_STATE / PACE_CONFLICT / PACE_COMMIT → NotCharged。PACE_RECORD → ErrState / Unknown；其他传输 / 服务端错误与派发后取消保守为 Unknown。错误时忽略返回值。",
+        "坏 receipt 返回 ErrState / Unknown，不能当作未命中。Lookup 只读保留结果，查不到不能证明没扣。Prune 由调用方调度；SCAN 后 Lua 按键角色解析（:attempt: 为 receipt，其余为 quota），全部校验后 DEL 过期状态。格式损坏或角色不符则整批报错、不删除。无后台 worker，不在 Admit 内清理。"
+      ]
+    }
+  ]
+}

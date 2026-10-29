@@ -1,0 +1,3 @@
+# Review the editable JSON rather than the bundled generated viewer.
+# Preserve generator bytes, including whitespace-only template lines.
+*.html linguist-generated=true whitespace=-blank-at-eol

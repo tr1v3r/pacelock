@@ -1,0 +1,442 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Pacelock · 一次具体的限流调用",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/workflows/admission.html",
+    "repository": {
+      "url": "https://github.com/tr1v3r/pacelock",
+      "revision": "6a8d58fc558fb8896ac9b8919c62f1bd7f3f8109",
+      "link_mode": "web"
+    }
+  },
+  "lanes": [
+    {
+      "id": "local",
+      "label": "① 应用构造 / 本地校验"
+    },
+    {
+      "id": "backend",
+      "label": "② 派发 Driver / 检查返回"
+    },
+    {
+      "id": "result",
+      "label": "③ 应用分流"
+    },
+    {
+      "id": "error",
+      "label": "④ 错误：忽略返回值",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "bind",
+    "charge",
+    "call",
+    "normalize",
+    "request",
+    "dispatch"
+  ],
+  "nodes": [
+    {
+      "id": "bind",
+      "lane": "local",
+      "col": 0,
+      "type": "backend",
+      "label": "Bind 固定额度",
+      "sublabel": "本地验证并复制策略",
+      "sources": [
+        {
+          "path": "bound.go",
+          "line": 61,
+          "end_line": 84
+        }
+      ]
+    },
+    {
+      "id": "charge",
+      "lane": "local",
+      "col": 1,
+      "type": "backend",
+      "label": "q.Charge(cost)",
+      "sublabel": "捕获快照；不校验、不扣额",
+      "sources": [
+        {
+          "path": "bound.go",
+          "line": 28,
+          "end_line": 41
+        }
+      ]
+    },
+    {
+      "id": "call",
+      "lane": "local",
+      "col": 2,
+      "type": "backend",
+      "label": "Allow / AllowOnce",
+      "sublabel": "后者带 ID 与 retention",
+      "sources": [
+        {
+          "path": "bound.go",
+          "line": 96,
+          "end_line": 105
+        },
+        {
+          "path": "bound.go",
+          "line": 114,
+          "end_line": 125
+        }
+      ]
+    },
+    {
+      "id": "normalize",
+      "lane": "local",
+      "col": 3,
+      "type": "security",
+      "label": "校验完整 Charge 集",
+      "sublabel": "名称 / 策略 / cost；绑定顺序",
+      "sources": [
+        {
+          "path": "bound.go",
+          "line": 144,
+          "end_line": 176
+        }
+      ]
+    },
+    {
+      "id": "request",
+      "lane": "local",
+      "col": 4,
+      "type": "security",
+      "label": "校验 Admission",
+      "sublabel": "scope / rules / ID / retention",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 223,
+          "end_line": 230
+        },
+        {
+          "path": "driver.go",
+          "line": 60,
+          "end_line": 85
+        }
+      ]
+    },
+    {
+      "id": "dispatch",
+      "lane": "backend",
+      "col": 4,
+      "type": "database",
+      "label": "Driver 原子准入",
+      "sublabel": "保留结果重放，或评估并提交",
+      "sources": [
+        {
+          "path": "driver.go",
+          "line": 12,
+          "end_line": 26
+        },
+        {
+          "path": "drivers/postgres/postgres.go",
+          "line": 139,
+          "end_line": 193
+        },
+        {
+          "path": "drivers/redis/internal/engine/gcra.lua",
+          "line": 9,
+          "end_line": 82
+        }
+      ]
+    },
+    {
+      "id": "validateReply",
+      "lane": "backend",
+      "col": 3,
+      "type": "security",
+      "label": "校验 Driver 返回",
+      "sublabel": "Decision 结构 / 非法重放",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 230,
+          "end_line": 240
+        },
+        {
+          "path": "pacelock.go",
+          "line": 272,
+          "end_line": 303
+        }
+      ]
+    },
+    {
+      "id": "isReplay",
+      "lane": "backend",
+      "col": 2,
+      "type": "backend",
+      "icon": "decision",
+      "label": "Replayed？",
+      "sublabel": "仅 AllowOnce 可合法重放",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 101,
+          "end_line": 107
+        },
+        {
+          "path": "pacelock.go",
+          "line": 237,
+          "end_line": 239
+        }
+      ]
+    },
+    {
+      "id": "allowed",
+      "lane": "backend",
+      "col": 1,
+      "type": "backend",
+      "icon": "decision",
+      "label": "Allowed？",
+      "sublabel": "检查新决策是否放行",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 90,
+          "end_line": 98
+        },
+        {
+          "path": "driver.go",
+          "line": 12,
+          "end_line": 18
+        }
+      ]
+    },
+    {
+      "id": "admitted",
+      "lane": "result",
+      "col": 1,
+      "type": "backend",
+      "icon": "success",
+      "label": "新放行：额度已扣",
+      "sublabel": "应用执行后续业务；失败不退额",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 1,
+          "end_line": 5
+        },
+        {
+          "path": "pacelock.go",
+          "line": 165,
+          "end_line": 167
+        }
+      ]
+    },
+    {
+      "id": "denied",
+      "lane": "result",
+      "col": 0,
+      "type": "backend",
+      "label": "拒绝：所有额度零扣",
+      "sublabel": "Limited + 最大 RetryAfter",
+      "sources": [
+        {
+          "path": "gcra.go",
+          "line": 59,
+          "end_line": 71
+        },
+        {
+          "path": "pacelock.go",
+          "line": 90,
+          "end_line": 98
+        }
+      ]
+    },
+    {
+      "id": "replayed",
+      "lane": "result",
+      "col": 2,
+      "type": "backend",
+      "label": "返回原放行 / 拒绝",
+      "sublabel": "不再扣额；不能据此重复执行业务",
+      "sources": [
+        {
+          "path": "pacelock.go",
+          "line": 94,
+          "end_line": 107
+        },
+        {
+          "path": "bound.go",
+          "line": 108,
+          "end_line": 113
+        }
+      ]
+    },
+    {
+      "id": "localError",
+      "lane": "error",
+      "col": 4,
+      "type": "security",
+      "icon": "failure",
+      "label": "派发前：NotCharged",
+      "sublabel": "无 Driver I/O；无额度扣减",
+      "sources": [
+        {
+          "path": "bound.go",
+          "line": 100,
+          "end_line": 104
+        },
+        {
+          "path": "pacelock.go",
+          "line": 223,
+          "end_line": 229
+        }
+      ]
+    },
+    {
+      "id": "driverError",
+      "lane": "error",
+      "col": 3,
+      "type": "backend",
+      "icon": "failure",
+      "label": "检查 OutcomeOf(err)",
+      "sublabel": "NotCharged 或 Unknown",
+      "sources": [
+        {
+          "path": "errors.go",
+          "line": 35,
+          "end_line": 53
+        },
+        {
+          "path": "pacelock.go",
+          "line": 230,
+          "end_line": 238
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "bind",
+      "to": "charge",
+      "role": "main"
+    },
+    {
+      "from": "charge",
+      "to": "call",
+      "role": "main"
+    },
+    {
+      "from": "call",
+      "to": "normalize",
+      "role": "main"
+    },
+    {
+      "from": "normalize",
+      "to": "request",
+      "label": "合法",
+      "role": "main"
+    },
+    {
+      "from": "request",
+      "to": "dispatch",
+      "label": "派发",
+      "role": "main"
+    },
+    {
+      "from": "dispatch",
+      "to": "validateReply",
+      "label": "成功返回",
+      "role": "main"
+    },
+    {
+      "from": "validateReply",
+      "to": "isReplay",
+      "label": "合法",
+      "role": "main"
+    },
+    {
+      "from": "isReplay",
+      "to": "allowed",
+      "label": "否",
+      "role": "main"
+    },
+    {
+      "from": "isReplay",
+      "to": "replayed",
+      "label": "是",
+      "role": "branch"
+    },
+    {
+      "from": "allowed",
+      "to": "admitted",
+      "label": "是",
+      "role": "main"
+    },
+    {
+      "from": "allowed",
+      "to": "denied",
+      "label": "否",
+      "role": "branch"
+    },
+    {
+      "from": "normalize",
+      "to": "localError",
+      "label": "无效",
+      "role": "error"
+    },
+    {
+      "from": "request",
+      "to": "localError",
+      "label": "无效 / 已取消",
+      "role": "error"
+    },
+    {
+      "from": "dispatch",
+      "to": "driverError",
+      "label": "Driver 错误",
+      "role": "error"
+    },
+    {
+      "from": "validateReply",
+      "to": "driverError",
+      "label": "异常返回：Unknown",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "具体调用：两维一起放行或一起拒绝",
+      "items": [
+        "示例取自 README：rpm=60/min、Burst=10，本次 rpm.Charge(1)；tokens=60000/min、Burst=12000，本次 tokens.Charge(1500)。bound.Allow(ctx, rpm.Charge(1), tokens.Charge(1500))。这是输入示例，不是实测结果。",
+        "Bind 只验证本地政策，不注册后端；每次须提供全部已绑定额度各一次，0<cost<=Burst。Charge 可乱序，但绑定顺序决定有序规则；遗漏、重复、未知、零值或策略不匹配均在派发前失败。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "幂等分支：保留的是准入结果，不是业务完成记录",
+      "items": [
+        "AllowOnce(ctx, id, retention, charges...) 保留放行和拒绝；retention 为 1ms～24h 的整毫秒。相同 ID 恢复须保持原绑定顺序、有效策略、cost 与 retention；相同记录不续期，原 RetryAfter 不倒计时。",
+        "正常拒绝不扣 quota，但 AllowOnce 可写拒绝 receipt。重放放行不授权再次执行业务；新业务尝试用新 ID。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "错误与恢复",
+      "items": [
+        "错误时忽略 Decision / Receipt。NotCharged 只证明本次调用没扣；Unknown 不能排除已提交，不能盲重试普通 Allow。",
+        "可用原 ID 与原参数恢复 AllowOnce，或用 Lookup 读保留结果；Lookup 不扣额、不续期，未命中不能证明没扣。后端时间、活跃政策检查、同步与持久化都由 Driver 负责，展开见 PG / Redis 图。"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "范围：即时绑定调用；阻塞入口另有规则",
+      "items": [
+        "BoundLimiter 没有 Wait。底层 Limiter.Wait(ctx, rules...) 仅在普通拒绝后按 RetryAfter 用当前 goroutine 的 timer 再尝试；任何后端错误即停，context 约束等待。不建队列、不做预留、不保证公平。",
+        "本图不把业务执行、计费、退款或后台维护算进限流器；应用自行决定拒绝响应和故障策略。依据：pacelock.go:165–202、243–269；README.zh-CN.md:63–85。"
+      ]
+    }
+  ]
+}

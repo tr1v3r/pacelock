@@ -1,4 +1,27 @@
+> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance, validation or a historical storage compatibility guarantee. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+
 # Local fixture observations
+
+## Dynamic facade cleanup (2026-10-29)
+
+[Facade allocation cleanup](admission-cleanup-local.md): before/after samples
+show one fewer allocation per Allow call after removing synthetic rules. This is
+a fake-driver microbenchmark, not backend throughput evidence.
+
+## Dynamic debt-format experiment (2026-10-29)
+
+[Dynamic D3 vs numeric debt comparison](dynamic-debt-format-local.md): report,
+raw 21-round samples and a pinned-source reproduction script. Measured on
+`bcc67d5`, before the dynamic-only/cost-only refactor; not a current-version
+capacity claim. Full dynamic admission saved about 2–4% of Redis server time.
+
+## Earlier native-TTL/Pending observations
+
+Historical native-TTL/Pending protocol measurements, not benchmarks of the new
+MSET/logical-expiry protocol. Current physical memory drain requires scheduled cleanup.
+The [MSET verification record](redis-mset-local.md) is also archived: it predates
+the current key prefix, quota/receipt encoding and fingerprint. Neither report
+validates the current implementation.
 
 These are measurements of the development implementation based on
 `27e91ca7dd916b8bc63c35b68266a9ba535236a8` (Go 1.24.13, macOS/arm64, Apple M3 Pro,
@@ -19,7 +42,7 @@ at measurement time. Reproduce with the source shipped alongside this record.
   the controlled promotion; all ten unreplicated records were missing after stale
   promotion, allowing ten additional admissions. OOM produced ten Unknown errors.
 
-Do not turn these figures into a throughput promise. Phase end stops scheduling and drains pending calls; any request errors are
+Do not turn these figures into a throughput promise. Phase end stops scheduling and drains in-flight calls; any request errors are
 included in totals. The records preserve error counts, latency
 sampling method, record counts, memory and CPU observations. See
 [deployment validation](../deployment-validation.md) for reproduction and the

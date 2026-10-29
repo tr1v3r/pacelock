@@ -1,3 +1,13 @@
+> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../README.md).
+
+> Historical verification below predates the Redis MSET/logical-expiry protocol.
+> The current Redis suite replaces partial-write/Pending creation with atomic-commit
+> ACL/OOM, logical-expiry, state validation and bounded cleanup tests. The historical
+> [MSET local record](validation/redis-mset-local.md) predates removal of the Q2 quota
+> prefix and receipt compatibility readers; neither report validates the current
+> key prefix, quota/receipt encoding or fingerprint. Pending tests listed below
+> belong only to the archived implementation, not the current suite.
+
 # Verification record — 2026-10-23
 
 Scope: commercial hardening of the known-cost admission core on
