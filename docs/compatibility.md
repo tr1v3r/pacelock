@@ -1,50 +1,16 @@
-# Compatibility and migration
+# Compatibility and current contract
 
-## Dynamic-default API migration (breaking pre-v1)
+## Current API
 
-- `New` / `NewWithOptions` construct dynamic `Limiter`; publish versioned `Quota`
-  values with `UpdateQuotas` before name/cost admission.
-- The sole `Limiter` exposes `Allow(ctx, ...Charge) (Decision, error)`,
-  `Wait(ctx, ...Charge) error` and `UpdateQuotas`. Charges select a nonempty set;
-  omitted quotas are not checked or charged. Limited names follow charge order.
-- Removed static APIs: `StaticLimiter`, `NewStatic`, `NewStaticWithOptions`,
-  `StaticDriver`, `StaticAdmission`, `ValidateStatic` and backend static paths.
-- Removed: `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`, admission
-  `ID`/`Retention`/`Fingerprint`, and `Event.Replayed`. There are no compatibility
-  aliases or retained-result recovery methods. Every admission can consume again.
-- `Driver.Admit(ctx, Admission) (Decision, error)` is unchanged; `Admission` has
-  only `Scope` + `Charges`. Remove static/lookup implementations and receipt/replay
-  processing. `QuotaDriver.UpdateQuotas` publishes configuration explicitly.
-- Earlier renames still apply: `AllowManaged` → `Allow`, `NamedCharge` → `Charge`,
-  `UpdatePolicies` → `UpdateQuotas`, `PolicyDriver` → `QuotaDriver`,
-  `PolicyUpdate` → `QuotaUpdate`. Replace `Bind` / `BindStatic` and rule-taking
-  limiter methods with explicit publication and dynamic name/cost admission. `Rule`, `Policy`, `Validate`,
-  `Evaluate`, `EvaluateManaged` and `ApplyPolicies` remain pure-helper vocabulary.
-- Dynamic Wait is preserved: snapshot charges once, resolve the latest backend
-  policy on every attempt, retry only confirmed capacity denials after RetryAfter.
-  Every error stops, including Unknown and transport errors classified NotCharged.
-  Cancellation between attempts is NotCharged; in-flight certainty and confirmed
-  success are preserved. One event covers the whole call. No queue, worker, fairness,
-  capacity reservation, refund or configuration watcher is added.
+`New` / `NewWithOptions` construct the dynamic `Limiter`. Publish revisioned
+`Quota` values with `UpdateQuotas`, then call `Allow` or `Wait` with named positive
+`Charge` costs. `Driver.Admit` receives only `Scope` and `Charges`; optional
+`QuotaDriver` publishes configuration. Pure math helpers do not admit requests.
 
-**Do not blindly retry Unknown.** A mutation may already have committed, and there
-is no SDK recovery API to determine its result. Admission is not business execution
-coordination, exactly-once delivery, billing or a refund ledger.
-
-### Existing installations and legacy receipts
-
-The API removal does not reset quota debt or automatically drop legacy receipt
-storage. PostgreSQL `Migrate` preserves existing legacy admissions tables/rows;
-new installations need no receipt table. Old Redis attempt keys may remain and
-must not be assumed to disappear through current quota maintenance. Retire old
-writers first, back up as required, and explicitly plan operator-owned cleanup
-of obsolete receipt storage without deleting active debt or permanent policy fences.
-Do not run old receipt-writing clients alongside new clients expecting deduplication.
-
-For PostgreSQL: **Migrate → upgrade all binaries → activate configuration**. Run
-Migrate before upgraded binaries serve traffic. Retire old static writers or stop
-their static path before installing policies; old writers can bypass configuration.
-Upgrade maintenance processes too. Mixed activation and unconverted rollback are unsupported.
+Admission is non-idempotent, with no retained results or recovery API. `Wait` retries
+only valid capacity denials; every error stops. **Do not blindly retry Unknown.**
+There are no upgrade, migration, mixed-version or historical storage compatibility
+guarantees. Historical verification documents are archives, not current contracts.
 
 ## Supported contract
 
@@ -99,27 +65,16 @@ older API. A stable tag remains a separate, explicitly authorized release decisi
 ## Redis state
 
 Keys use scope hash tags so jointly admitted quotas share one Cluster slot.
-All new debt writes use `D1|tat`; new policies and higher-revision updates use
-`P1|interval:burst:revision`. D1/P1 name the first dynamic storage format; marker
-`1` is not `Policy.Revision`, which remains positive and monotonically increasing.
-Strict read-only compatibility accepts D3 debt, P3 policies and the old
-`tat:interval:burst` debt tuple. Reads do not rewrite values. An equivalent
-same-revision update still performs no write, leaving P3 unchanged; the next
-allowed admission writes D1 debt without resetting the existing TAT.
-These are internal formats, not application APIs; see the
+The only accepted debt format is `D1|tat`; the only accepted policy format is
+`P1|interval:burst:revision`, with exact field counts and validated decimal fields.
+Marker `1` identifies the first dynamic format, not `Policy.Revision`.
+Unknown, malformed or wrong-role stored formats fail closed before mutation.
+These encodings are internal, not application APIs; see the
 [Redis guide](../driver/redis/README.md).
 
-**Stop old binaries before marker migration**, including readers, writers and
-maintenance processes. An old D3/P3-only reader cannot read new D1/P1 values.
-Do not mix old/new writers: upgrade every process before resuming traffic or
-policy publication. Do not reset, rename or delete keys to migrate; permanent
-revision fences and old receipt data must remain intact. Idle time and pruning
-do not make an unconverted rollback safe.
-
-Debt logically expires at `tat <= now`, independently of physical cleanup. A
-single MSET commits admitted quota debt. Current admission does not read or write
-legacy attempt records. Prune must preserve permanent configuration and revision
-fences; follow the driver's current cleanup contract rather than old receipt-era tools.
+Debt logically expires at `tat <= now`. Prune deletes only valid, fully recovered
+D1 debt, never policy keys or unknown keys. Configuration and revision fences persist.
+Applications must not reset, rename or delete active quota state to obtain capacity.
 
 ## Policy changes
 
@@ -130,13 +85,10 @@ Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening
 `Rate=0` pauses; resume or roll back parameters at a higher revision. Missing policy fails closed,
 with `ErrPolicyMissing`.
 
-Configuration can remain in code, while execution is backend-authoritative. This
-supports rolling pods using the same quota names and compatible storage readers
-(not mixed old/new marker binaries): older pods' charges use the
-latest backend policy. Stale publication still fails; explicitly handle or surface
-`ErrPolicyMismatch` rather than swallowing all update errors. Rollback publishes
-old parameters at a higher revision. Renaming quotas or deleting state creates
-fresh capacity, not a transparent update.
+Configuration can remain in code, while execution is backend-authoritative.
+Every request uses the latest published policy. Explicitly handle stale publication
+errors; restoring earlier parameters requires a higher revision. Renaming quotas
+or deleting state creates fresh capacity, not a policy update.
 
 ## Failure and retry safety
 

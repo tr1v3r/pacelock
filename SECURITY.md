@@ -43,14 +43,13 @@ atomic MSET and preserve debt. Missing/paused policies or malformed policy/debt
 state fail closed; absent debt is valid for a new quota. An uncertain mutation is
 not automatically retried. Keep noeviction,
 schedule bounded cleanup, and monitor memory and maintenance lag. Cleanup can
-remove recovered debt, including legacy tuple debt, but preserves policy fences.
+remove only valid recovered D1 debt, never policy keys or unknown keys. Unknown,
+malformed or wrong-role stored formats fail closed before mutation.
 
-There is no retained-result or lookup API. Existing legacy Redis attempt keys and
-PostgreSQL admission tables/rows are neither read nor validated by admission, and
-normal cleanup leaves them untouched. Legacy receipts may contain plaintext quota
-names; assess access, backups and explicit operator cleanup after retiring old
-consumers. Do not put secrets or unnecessary personal data in quota names. Redis
-key hashing is namespace isolation, not encryption, access control or anonymization.
+There is no retained-result or lookup API. Do not put secrets or unnecessary
+personal data in quota names, error logs or diagnostic captures. Redis key hashing
+is namespace isolation, not encryption, access control or anonymization. Restrict
+access to backend data and backups. Do not use broad prefix deletion for cleanup.
 
 The SDK cannot enforce a rule the caller omits, prevent untrusted callers from
 choosing another domain, or compensate for external key deletion/eviction,

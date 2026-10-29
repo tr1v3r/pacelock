@@ -160,15 +160,15 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 }
 
-func TestRedisManagedLegacyTupleDebt(t *testing.T) {
+func TestRedisManagedDebtSurvivesPauseAndResume(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
-	r := rule("legacy", 2, 1)
+	r := rule("debt", 2, 1)
 	now, err := c.Time(ctx).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
-	debt := fmt.Sprintf("%d:3600000000:2", now.UnixMicro()+int64(time.Hour/time.Microsecond))
+	debt := fmt.Sprintf("D1|%d", now.UnixMicro()+int64(time.Hour/time.Microsecond))
 	if err := c.Set(ctx, l.key(r.Name), debt, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRedisManagedLegacyTupleDebt(t *testing.T) {
 		t.Fatal(e)
 	}
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
-		t.Fatal("legacy debt touched")
+		t.Fatal("active debt touched")
 	}
 	req := managedRequest(r.Name, 1)
 	if _, e := l.Admit(ctx, req); !errors.Is(e, pacelock.ErrPaused) {
@@ -191,7 +191,7 @@ func TestRedisManagedLegacyTupleDebt(t *testing.T) {
 		t.Fatal(e)
 	}
 	if d, e := l.Admit(ctx, req); e != nil || d.Allowed {
-		t.Fatalf("legacy debt reset: %+v %v", d, e)
+		t.Fatalf("active debt reset: %+v %v", d, e)
 	}
 }
 

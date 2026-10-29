@@ -88,7 +88,7 @@ func TestRedisPlainQuotaPreservesDebtAndRemovesNativeTTL(t *testing.T) {
 	r := rule("plain", 3, 2)
 	publishRules(t, l, r)
 	tat := now.UnixMicro() + 2*step
-	before := fmt.Sprintf("%d:%d:3", tat, step)
+	before := fmt.Sprintf("D1|%d", tat)
 	if err := c.Set(ctx, l.key(r.Name), before, 3*time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}

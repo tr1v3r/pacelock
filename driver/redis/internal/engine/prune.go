@@ -56,8 +56,8 @@ var pruneScript = redis.NewScript(protocolSource + pruneSource)
 // Prune performs at most one SCAN page and checks at most limit candidate values,
 // with 1 <= limit <= MaxPruneKeys. SCAN COUNT is only a discovery-work hint;
 // overflow is buffered in the cursor. This is not a hard Redis latency bound.
-// Active debt and legacy attempt receipts are preserved; recovered legacy tuple
-// debt is prunable. Malformed candidates abort the batch without deleting any keys.
+// Active debt, permanent policy fences, and keys outside the owned key grammar
+// are preserved. Malformed candidates abort the batch without deleting any keys.
 // The caller owns scheduling; no worker is started.
 func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := l.ready(ctx); err != nil {

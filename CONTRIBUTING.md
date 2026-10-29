@@ -56,11 +56,12 @@ executed code, not proof of correctness or a production SLA.
 
 - Review `CHANGELOG.md`, both READMEs, API docs and compatibility notes.
 - Confirm tests, minimum Go/Redis versions, Cluster, fuzz and security checks.
-- Review debt/policy migration and preservation of legacy receipt storage; never
-  reset debt silently or delete legacy records automatically.
+- Review exact D1/P1 parsing and fail-closed behavior for unknown/malformed state.
+  Prune only valid recovered D1 debt; never delete policy or unknown keys.
 - Check examples compile and execute against disposable Redis.
 - Review module dependency/license changes and `go mod verify`.
-- Publish measured limitations, remaining deployment checks and migration steps.
+- Publish measured limitations and remaining deployment checks. No upgrade,
+  migration or historical storage compatibility is guaranteed.
 - Obtain explicit authorization for version/tag/release, then verify resulting CI.
 - Use semver and describe any pre-v1 breaking change; no stable API guarantee
   before an explicitly approved v1 release. Never rewrite a published tag.

@@ -27,10 +27,9 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 导入 `"github.com/tr1v3r/pacelock/driver/postgres"` 与核心包。使用 pgx 时，
 应用注册 `_ "github.com/jackc/pgx/v5/stdlib"`，调用 `sql.Open("pgx", dsn)`，
 并固定传输驱动版本。构造函数不联网、不迁移、不关闭 db。
-在初始化阶段显式使用具备迁移权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
-并增加独立的 `pacelock_policies` 配置表。已有额度/债务表结构不变，保留全部债务。
-新安装不创建准入记录表；已有部署的旧记录表不会被自动删除，也不再读取、写入或清理。
-不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
+在初始化阶段显式使用具备建表权限的角色调用 Migrate，按 schema.sql 创建当前有日志表，
+包括独立的 `pacelock_policies` 配置表。仅支持当前表结构，不保证升级或历史结构兼容。
+所有调用者须使用可信、稳定且一致的 search_path、schema 与主库，
 不能传入读副本连接池。
 
 先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})`
@@ -78,10 +77,7 @@ _ = decision
 更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。
 显式重试相同版本可处理不确定性，但该版本也可能已被更新版本取代。不做隐藏重试，派发前取消不修改状态。
 
-在接收流量前，于受控初始化阶段运行 `Migrate`，避免并发迁移；DDL 会持有表锁。
-旧版仅支持静态准入的 PostgreSQL 二进制不能与已激活的动态策略同时服务：它们不检查
-独立配置表，可能绕过托管限额。已有债务（包括间隔/Burst 元组等价的旧静态债务）
-仍可读取，不会被重置。
+在接收流量前，于受控初始化阶段运行 `Migrate`，避免并发初始化；DDL 会持有表锁。
 
 ## 事务与故障契约
 
@@ -103,7 +99,7 @@ PostgreSQL 使用核心 EvaluateManaged 转换；Redis 的等价计算在 Lua �
 - 使用有日志表、fsync 和合适的 synchronous_commit/复制策略。异步提交或切换至落后副本
   可能丢失债务。PG 也不能消除墙上时钟跳变。
 - 过期债务会被逻辑忽略，但托管策略身份永久保留。应用可调度 `driver.Prune(ctx, scope, limit)`，
-  每次最多删除 limit 条过期债务（包括旧债务，1～10000）。
+  每次最多删除 limit 条过期债务（1～10000）。
   过期时间与 TAT 都必须不晚于数据库时间，避免删除仍有效的债务。
   它使用同一 domain 锁，绝不触碰策略表，需规划持久化策略基数。
   domain 锁行故意保留，需规划 domain 基数；不要独立删除锁行或活跃状态。

@@ -41,14 +41,14 @@ func testContentionPolicyUpdates(t *testing.T, f *contentionFixture) {
 	requireDenied(t, l, r)
 }
 
-func TestRedisAdmissionIgnoresLegacyAttempts(t *testing.T) {
+func TestRedisAdmissionIgnoresUnknownKeys(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("q", 2, 1)
 	publishRules(t, l, r)
-	key := l.prefix + "attempt:" + strings.Repeat("a", 64)
-	const legacy = "malformed legacy receipt"
-	if err := c.Set(ctx, key, legacy, 0).Err(); err != nil {
+	key := l.prefix + "unknown:" + strings.Repeat("a", 64)
+	const unrelated = "malformed unknown value"
+	if err := c.Set(ctx, key, unrelated, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 	for _, allowed := range []bool{true, true, false} {
@@ -57,8 +57,8 @@ func TestRedisAdmissionIgnoresLegacyAttempts(t *testing.T) {
 			t.Fatalf("%+v %v", d, err)
 		}
 	}
-	if got := c.Get(ctx, key).Val(); got != legacy {
-		t.Fatalf("legacy attempt changed: %q", got)
+	if got := c.Get(ctx, key).Val(); got != unrelated {
+		t.Fatalf("unknown key changed: %q", got)
 	}
 }
 

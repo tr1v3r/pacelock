@@ -2,7 +2,7 @@
 
 `pacelock.New(driver, namespace, domain)` constructs the default dynamic `*Limiter`.
 Both Redis and PostgreSQL implement the same admission contract.
-Dynamic admission is the default; see the breaking pre-v1 [migration](compatibility.md).
+See the [current API and storage contract](compatibility.md).
 
 ## Ownership and persistence boundary
 
@@ -70,29 +70,22 @@ A PostgreSQL Commit error is `Unknown`: the database may have committed before t
 reply was lost. Never retry an uncertain admission automatically. `Unknown` cannot
 be resolved through this SDK; callers must apply an explicit failure policy.
 
-The pre-v1 removal deletes `AllowOnce`, `Lookup`, receipt types, admission identity
-fields/fingerprints and replay events. Legacy receipt storage is not automatically
-dropped. See [migration and cleanup](compatibility.md).
+There is no upgrade, migration or historical storage compatibility guarantee.
 
 ## Backend modules
 
 - `driver/redis`: go-redis transport, single-command MSET commit, logical expiry,
   bounded cursor cleanup and guarded command replay/Cluster redirects. Keys use
-  `pacelock:{scope_hash}:`; new debt writes use `D1|tat`, new policy writes use
-  `P1|interval:burst:revision`. D3/P3 and legacy `tat:interval:burst` debt have strict
-  read-only compatibility; debt expires at `tat <= now`. Marker `1` is not the
-  positive monotonic policy revision. Same-revision equivalent updates leave P3
-  unchanged; higher revisions/new policies write P1, next allowed debt writes D1.
-  Stop all old binaries before marker migration: D3/P3-only readers cannot read
-  D1/P1. No mixed old/new writers or reset/deletion migration; preserve permanent
-  fences and receipts. See [Redis migration](compatibility.md#redis-state).
+  `pacelock:{scope_hash}:`; only exact `D1|tat` debt and
+  `P1|interval:burst:revision` policies are accepted. Unknown, malformed or wrong-role
+  stored formats fail closed before mutation. Debt expires at `tat <= now`.
+  Marker `1` is independent of the positive monotonic policy revision. Prune deletes
+  only valid recovered D1 debt, never policy or unknown keys.
 - `driver/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
-  maintenance; no worker starts automatically. Run `Migrate` before upgraded binaries
-  serve traffic. See its deployment guide.
+  maintenance; no worker starts automatically. Run `Migrate` during setup before
+  serving traffic. Only the current schema is supported. See its deployment guide.
 
-Before installing policies, retire old static writers or stop their static path,
-and upgrade maintenance processes. Preserve debt and legacy receipt storage.
 Updates preserve absolute TAT without rescaling or reset; `Rate=0` pauses and a
 higher revision resumes. Dynamic Wait rechecks policy on each attempt, but does not
 wait through policy errors or perform automatic configuration-source polling.

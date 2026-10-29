@@ -25,7 +25,7 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 		for _, policy := range []string{"same", "step", "burst"} {
 			t.Run(fmt.Sprintf("tat_offset=%d/policy=%s", offset, policy), func(t *testing.T) {
 				r := Rule{Name: "boundary", Policy: Policy{Rate: 1, Period: 7 * time.Microsecond, Burst: 3}, Cost: 1}
-				before := fmt.Sprintf("%d:7:3", now+offset)
+				before := fmt.Sprintf("D1|%d", now+offset)
 				if policy == "step" {
 					r.Policy.Period = 11 * time.Microsecond
 				} else if policy == "burst" {
@@ -139,7 +139,7 @@ return {decision, states, expiries, writes}
 				step, burst, cost, used = tinySteps[iteration], 1, 1, 0
 			}
 			rules[i] = Rule{Name: fmt.Sprintf("q%d", i), Policy: Policy{Rate: 1, Period: time.Duration(step) * time.Microsecond, Burst: burst}, Cost: cost}
-			before[i] = fmt.Sprintf("%d:%d:%d", now+used, step, burst)
+			before[i] = fmt.Sprintf("D1|%d", now+used)
 			if err := c.Set(ctx, l.key(rules[i].Name), before[i], 0).Err(); err != nil {
 				t.Fatal(err)
 			}

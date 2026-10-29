@@ -6,10 +6,8 @@ Core Driver contracts are documented [separately](driver.md).
 ## Before production traffic
 
 Default admission is dynamic: publish trusted `Quota` policies with positive
-revisions before sending `Charge{Name, Cost}` requests. Upgrade every writer and
-maintenance process before activation; run PostgreSQL `Migrate` before upgraded
-binaries handle traffic. Retire old static writers or stop their static path before
-installing policies. `Limiter.Wait(ctx, charges...)` uses the latest
+revisions before sending `Charge{Name, Cost}` requests. Run PostgreSQL `Migrate`
+during setup before serving traffic; only the current schema is supported. `Limiter.Wait(ctx, charges...)` uses the latest
 backend policies atomically on each attempt, retrying only ordinary capacity denials
 after advisory `RetryAfter`; every error stops waiting. Updates do not proactively
 wake sleepers, so a relaxed policy may not be used until the previous delay expires.
@@ -94,7 +92,7 @@ Bound label cardinality; never label with tenant IDs, quota names
 or raw errors. Wrap the observer in application code if panic recovery is needed.
 
 `ErrInvalid` is an input problem (including costs above the current backend burst). `ErrPolicyMismatch` suggests inconsistent
-rollout or uncoordinated policy migration. `ErrState` suggests corrupted/wrong-type
+publication or uncoordinated policy revisions. `ErrState` suggests corrupted/wrong-type
 state, invalid replies or an unsupported clock jump: inspect, alert and preserve
 state. Always check `OutcomeOf(err)`: `ErrState` alone does not establish that no
 debit happened. The typed outcome distinguishes detected pre-write checks from
@@ -112,8 +110,9 @@ ambiguous post-dispatch/reply failures. `ErrBackend` preserves the original erro
 
 There is no result-recovery API after an uncertain mutation. Do not blindly retry
 `Unknown`, reset debt, or infer that a later `NotCharged` outcome resolved it.
-Legacy receipt storage is not automatically removed during upgrades; coordinate
-explicit cleanup after retiring old writers. See [migration](compatibility.md).
+Only exact D1/P1 Redis formats are accepted; unknown or malformed formats fail
+closed before mutation. Prune deletes only valid recovered D1 debt, never policy
+or unknown keys. See the [current contract](compatibility.md).
 
 ## Durability and clock behavior
 

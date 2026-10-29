@@ -83,7 +83,7 @@ func TestRedisMalformedStates(t *testing.T) {
 	ctx := context.Background()
 	r := rule("bad", 1, 1)
 	publishRules(t, l, r, rule("fresh", 1, 1))
-	for _, state := range []string{"broken", "1:0:1", "1:1:0", "9007199254740992:1:1", "1:86400000001:1"} {
+	for _, state := range []string{"broken", "D1|-1", "D1|0:1", "D1|9007199254740992", "D1|1.5", "D1|1e3"} {
 		if err := c.Set(ctx, l.key("bad"), state, time.Minute).Err(); err != nil {
 			t.Fatal(err)
 		}

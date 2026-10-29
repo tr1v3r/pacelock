@@ -28,12 +28,10 @@ Import `"github.com/tr1v3r/pacelock/driver/postgres"` and the core package. For 
 register `_ "github.com/jackc/pgx/v5/stdlib"` in the application and use
 `sql.Open("pgx", dsn)`. Pin the transport version in the application. Constructors do
 not connect, migrate or close db. Run Migrate explicitly during setup with a
-migration-capable role. It creates the fixed logged tables from schema.sql and
-adds a separate `pacelock_policies` configuration table. The existing quota/debt
-schema remains unchanged, retaining all debt. New installs do not create admission
-receipt tables; legacy deployed receipt tables are left untouched, never dropped
-automatically, and are no longer read, written or pruned. Incompatible
-schemas are not supported. Use a trusted, stable search_path and
+setup-capable role. It creates the current fixed logged tables from schema.sql,
+including the separate `pacelock_policies` configuration table. Only the current
+schema is supported; no upgrade or historical schema compatibility is guaranteed.
+Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
 Publish positive-revision policies with `UpdateQuotas`, then call
@@ -96,10 +94,7 @@ revisions explicitly to resolve uncertainty; a newer update may supersede them.
 There are no hidden retries. Cancellation before dispatch causes no mutation.
 
 Run `Migrate` during controlled setup before serving traffic, with no concurrent
-migration runners; DDL takes table locks. Legacy static-only PostgreSQL binaries
-must not serve alongside active dynamic policies: they do not check the separate
-configuration table and can bypass managed limits. Existing debt, including legacy
-static debt with equivalent interval/burst tuples, remains readable and is not reset.
+setup runners; DDL takes table locks.
 
 ## Transactions and failure contract
 
@@ -126,7 +121,7 @@ and can debit again. Application-owned business idempotency is outside the limit
   Wall-clock jumps are not eliminated by PostgreSQL.
 - Expired debt is logically ignored, but managed policy identity persists forever.
   Schedule `driver.Prune(ctx, scope, limit)` externally to remove at most limit
-  expired debt rows (including legacy debt) per call (1..10000).
+  expired debt rows per call (1..10000).
   Both expiry and TAT must be at or before database time, preserving active debt.
   It takes the same domain lock and never touches the policy table.
   Account for persistent policy cardinality. Domain guard rows are
