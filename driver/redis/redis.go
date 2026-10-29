@@ -236,6 +236,7 @@ func (l *limiter) Admit(ctx context.Context, request pacelock.Admission) (decisi
 	if err := request.Validate(); err != nil {
 		return Decision{}, failure(op, NotCharged, err)
 	}
+
 	n := len(request.Charges)
 	keys := make([]string, 2*n)
 	names := make([]string, n)
@@ -246,6 +247,7 @@ func (l *limiter) Admit(ctx context.Context, request pacelock.Admission) (decisi
 		names[i] = c.Name
 		args = append(args, c.Cost)
 	}
+
 	cmd := admissionScript.Run(ctx, l.client, keys, args...)
 	if err := cmd.Err(); err != nil {
 		return Decision{}, scriptFailure(op, err)
@@ -276,6 +278,7 @@ func decodeDecision(values []int64, names []string) (Decision, error) {
 			d.Limited = append(d.Limited, names[i])
 		}
 	}
+
 	if (d.Allowed && (d.RetryAfter != 0 || len(d.Limited) != 0)) || (!d.Allowed && (d.RetryAfter == 0 || len(d.Limited) == 0)) {
 		return Decision{}, fmt.Errorf("%w: inconsistent script response", ErrState)
 	}

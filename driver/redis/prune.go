@@ -69,8 +69,10 @@ func (l *limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (Pru
 	if cursor.done {
 		return PruneResult{Cursor: cursor}, nil
 	}
+
 	next := cursor
 	next.scope = l.prefix
+	// Discovery: at most one SCAN page, buffering overflow into pending.
 	if len(next.pending) == 0 {
 		position := next.position
 		if position == "" {
@@ -104,6 +106,8 @@ func (l *limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (Pru
 			}
 		}
 	}
+
+	// Consumption: take at most limit buffered candidates for this step.
 	n := len(next.pending)
 	if n > limit {
 		n = limit
@@ -115,6 +119,7 @@ func (l *limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (Pru
 	if n == 0 {
 		return result, nil
 	}
+
 	cmd := pruneScript.Run(ctx, l.client, candidates)
 	if err := cmd.Err(); err != nil {
 		return PruneResult{}, scriptFailure("prune", err)

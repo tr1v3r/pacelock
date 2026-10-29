@@ -102,6 +102,7 @@ func EvaluateManaged(now int64, charges []Charge, policies, debts []QuotaState) 
 	if err := validateBackendTime(now); err != nil {
 		return Decision{}, nil, err
 	}
+
 	rules := make([]Rule, len(charges))
 	states := make([]QuotaState, len(charges))
 	for i, c := range charges {
