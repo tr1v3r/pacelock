@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -30,7 +30,7 @@ func TestRedisManagedLostReplyNoRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.AddHook(&armReplyLoss{loss: loss, command: "evalsha"})
-	broken := &Limiter{client: safeScripter(c), prefix: l.prefix}
+	broken := &limiter{client: safeScripter(c), prefix: l.prefix}
 	req := managedRequest("q", 1)
 	if _, err := broken.Admit(ctx, req); !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
 		t.Fatalf("lost reply: %v", err)
@@ -67,7 +67,7 @@ func TestRedisUpdateLostReplyNoRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			l, err := New(c, "update-lost", fmt.Sprint(time.Now().UnixNano()))
+			l, err := newLimiter(c, "update-lost", fmt.Sprint(time.Now().UnixNano()))
 			if err != nil {
 				t.Fatal(err)
 			}

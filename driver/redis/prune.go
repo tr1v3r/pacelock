@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -59,7 +59,7 @@ var pruneScript = redis.NewScript(protocolSource + pruneSource)
 // Active debt, permanent policy fences, and keys outside the owned key grammar
 // are preserved. Malformed candidates abort the batch without deleting any keys.
 // The caller owns scheduling; no worker is started.
-func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
+func (l *limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := l.ready(ctx); err != nil {
 		return PruneResult{}, failure("prune", NotCharged, err)
 	}
@@ -128,7 +128,7 @@ func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (Pru
 }
 
 // ownedKey recognizes only SDK-generated quota and policy keys in this scope.
-func (l *Limiter) ownedKey(key string) bool {
+func (l *limiter) ownedKey(key string) bool {
 	suffix, ok := strings.CutPrefix(key, l.prefix)
 	if !ok {
 		return false

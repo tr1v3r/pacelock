@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -67,7 +67,7 @@ func TestRedisClusterLostReply(t *testing.T) {
 					},
 				})
 				defer client.Close()
-				l, err := New(client, "pacelock-transport-test", fmt.Sprintf("%d-%d", time.Now().UnixNano(), burst))
+				l, err := newLimiter(client, "pacelock-transport-test", fmt.Sprintf("%d-%d", time.Now().UnixNano(), burst))
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func integration(t *testing.T) (*Limiter, *redis.Client) {
+func integration(t *testing.T) (*limiter, *redis.Client) {
 	t.Helper()
 	addr := os.Getenv("PACELOCK_REDIS_ADDR")
 	if addr == "" {
@@ -26,7 +26,7 @@ func integration(t *testing.T) (*Limiter, *redis.Client) {
 		c.Close()
 		t.Fatal(err)
 	}
-	l, err := New(c, "pacelock-test", fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano()))
+	l, err := newLimiter(c, "pacelock-test", fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRedisConcurrentInstances(t *testing.T) {
 	l, c := integration(t)
 	second := redis.NewClient(&redis.Options{Addr: c.Options().Addr, MaxRetries: -1})
 	defer second.Close()
-	l2 := &Limiter{client: second, prefix: l.prefix}
+	l2 := &limiter{client: second, prefix: l.prefix}
 	publishRules(t, l, rule("shared", 20, 2))
 	var accepted atomic.Int64
 	var wg sync.WaitGroup
@@ -167,7 +167,7 @@ func TestRedisIndependentDomainsAndCanceledCall(t *testing.T) {
 	if _, err := l.admitRules(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	other, _ := New(c, "another-app", l.prefix)
+	other, _ := newLimiter(c, "another-app", l.prefix)
 	t.Cleanup(func() { c.Del(ctx, other.key(r.Name), other.policyKey(r.Name)) })
 	publishRules(t, other, r)
 	if d, err := other.admitRules(ctx, r); err != nil || !d.Allowed {

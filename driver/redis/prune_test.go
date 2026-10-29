@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -185,7 +185,7 @@ func TestRedisPruneLostReplyIsSafeToRepeat(t *testing.T) {
 	}
 	cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{key}}
 	wrapped := &lostResponse{Scripter: c}
-	broken := &Limiter{client: wrapped, prefix: l.prefix}
+	broken := &limiter{client: wrapped, prefix: l.prefix}
 	if _, err := broken.Prune(ctx, cursor, 1); !errors.Is(err, io.ErrUnexpectedEOF) || wrapped.calls != 1 {
 		t.Fatalf("lost cleanup reply: %v", err)
 	}
@@ -215,7 +215,7 @@ func (s *pageScripter) EvalSha(ctx context.Context, _ string, keys []string, _ .
 
 func TestPruneBoundsAndScanOverflow(t *testing.T) {
 	s := &pageScripter{}
-	l, _ := New(s, "test", "prune")
+	l, _ := newLimiter(s, "test", "prune")
 	keys := []interface{}{}
 	for i := 0; i < 5; i++ {
 		keys = append(keys, l.key(fmt.Sprint(i)))
@@ -239,7 +239,7 @@ func TestPruneBoundsAndScanOverflow(t *testing.T) {
 		t.Fatalf("overflow lost keys: total=%d calls=%v", total, s.keys)
 	}
 	calls := len(s.keys)
-	for _, current := range []*Limiter{nil, {}, l} {
+	for _, current := range []*limiter{nil, {}, l} {
 		if _, err := current.Prune(nil, PruneCursor{}, 1); !errors.Is(err, ErrInvalid) {
 			t.Fatal(err)
 		}
@@ -265,14 +265,14 @@ func TestPruneBoundsAndScanOverflow(t *testing.T) {
 func TestPruneMalformedReplies(t *testing.T) {
 	for _, reply := range []interface{}{nil, []interface{}{}, []interface{}{"-1", []interface{}{}}, []interface{}{"0", "bad"}, []interface{}{"0", []interface{}{1}}} {
 		s := &pageScripter{replies: []interface{}{reply}}
-		l, _ := New(s, "test", "malformed")
+		l, _ := newLimiter(s, "test", "malformed")
 		if _, err := l.Prune(context.Background(), PruneCursor{}, 1); !errors.Is(err, ErrState) {
 			t.Fatalf("reply=%v err=%v", reply, err)
 		}
 	}
 	for _, reply := range []interface{}{int64(-1), int64(2), "bad"} {
 		s := &pageScripter{replies: []interface{}{reply}}
-		l, _ := New(s, "test", "delete")
+		l, _ := newLimiter(s, "test", "delete")
 		if _, err := l.Prune(context.Background(), PruneCursor{scope: l.prefix, position: "0", pending: []string{l.key("q")}}, 1); !errors.Is(err, ErrState) {
 			t.Fatal(err)
 		}

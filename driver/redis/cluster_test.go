@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func TestRedisCluster(t *testing.T) {
 	}()
 	seen := make(map[string]bool)
 	for i := 0; i < 256 && len(seen) < 3; i++ {
-		l, err := New(c, "pacelock-test", fmt.Sprintf("%s-%d", prefix, i))
+		l, err := newLimiter(c, "pacelock-test", fmt.Sprintf("%s-%d", prefix, i))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,10 +75,10 @@ func TestRedisCluster(t *testing.T) {
 		t.Fatalf("test did not exercise multiple masters: %v", seen)
 	}
 	// Different clients competing on one slot must still debit one admission.
-	l, _ := New(c, "pacelock-test", prefix+"-concurrent")
+	l, _ := newLimiter(c, "pacelock-test", prefix+"-concurrent")
 	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1})
 	defer other.Close()
-	l2 := &Limiter{client: other, prefix: l.prefix}
+	l2 := &limiter{client: other, prefix: l.prefix}
 	keys = append(keys, l.key("q"), l.policyKey("q"))
 	publishRules(t, l, rule("q", 1, 1))
 	var first atomic.Int64

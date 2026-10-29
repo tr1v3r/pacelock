@@ -244,7 +244,7 @@ PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
 PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
-(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
+(cd driver/redis && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
 docker compose down
 ```
 
