@@ -28,11 +28,12 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 应用注册 `_ "github.com/jackc/pgx/v5/stdlib"`，调用 `sql.Open("pgx", dsn)`，
 并固定传输驱动版本。构造函数不联网、不迁移、不关闭 db。
 在初始化阶段显式使用具备迁移权限的角色调用 Migrate；它按 schema.sql 创建固定的有日志表，
-并增加独立的 `pacelock_policies` 配置表。已有额度/债务表与准入记录表结构不变，保留全部债务与记录。
+并增加独立的 `pacelock_policies` 配置表。已有额度/债务表结构不变，保留全部债务。
+新安装不创建准入记录表；已有部署的旧记录表不会被自动删除，也不再读取、写入或清理。
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})`、`AllowOnce` 或 `Wait(ctx, charges...)` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；动态与静态 Limiter 均提供 `Wait(ctx, charges...) error`。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `Wait(ctx, charges...)` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `Wait` 均传公开的 `Charge{Name, Cost}`。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；动态与静态 Limiter 均提供 `Wait(ctx, charges...) error`。
 
 ## 默认动态策略
 
@@ -49,11 +50,7 @@ err = limiter.UpdateQuotas(ctx, pacelock.Quota{
 if err != nil { return err }
 // 数据面：相同调用会自动使用以后发布的新版本。
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
-// 或保留决策：ID 指纹包含名称与消耗，不包含策略版本。
-receipt, err := limiter.AllowOnce(ctx, "operation-id", time.Minute,
-    pacelock.Charge{Name: "requests", Cost: 1})
 _ = decision
-_ = receipt
 ```
 
 发布正的单调递增版本（最大 9007199254740991）。更新与准入使用同一 scope 锁，
@@ -65,22 +62,19 @@ _ = receipt
 任何策略缺失时，托管准入关闭放行并返回 `ErrPolicyMissing` / `NotCharged`。
 消耗超过当前 Burst 返回 `ErrInvalid`，不是可以等待恢复的容量拒绝。
 托管策略的 `Rate: 0` 表示暂停（Period、Burst 仍须为正），先于超 Burst 检查返回
-`ErrPaused` / `NotCharged`，不扣减、不写准入记录。以更高版本和正速率恢复。
+`ErrPaused` / `NotCharged`，不扣减。以更高版本和正速率恢复。
 
 `Limiter.Wait(ctx, charges...)` 在派发前只复制一次 Charge，每次普通尝试原子读取后端
 最新策略，不快照策略。仅在有效容量拒绝后按建议的 `RetryAfter` 重试；任何错误都停止，
 包括暂停、策略缺失、新 Burst 小于 Cost、传输错误（即使为 `NotCharged`）、`Unknown`、
 不支持的能力及无效 Driver 结果。两次尝试间取消为 `NotCharged`；调用期间保留不确定性，
-已确认成功不因并发取消变为失败。每次尝试使用空 ID、零保留期，不写回执、不自动调用
-`Lookup`。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
+已确认成功不因并发取消变为失败。每次尝试均为独立准入。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
 唤醒休眠者，旧 RetryAfter 可能延迟使用放宽后的策略。休眠不持有事务、锁或连接，
 不增加队列、worker、后台 goroutine、公平性或退款。请设置 context deadline；配置源
 轮询与发布仍由调用者负责。详见[阻塞等待准入](../../README.zh-CN.md#阻塞等待准入)。
 
-已有保留记录在当前策略检查**之前**重放，不因暂停或更新改变。托管请求的名称/消耗不变时，
-跨版本重试仍重放原决策。静态与托管请求复用同一 ID 会冲突。历史允许记录重放不代表可以再次执行上游。
-静态构造函数在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
-`ErrPolicyMismatch`，但旧静态记录仍先于该防绕过检查重放。
+静态构造函数在本地拒绝托管 Revision；对已配置额度发起静态准入返回
+`ErrPolicyMismatch`，不存在绕过该检查的历史结果。每次调用都是新的额度决策。
 
 更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。
 显式重试相同版本可处理不确定性，但该版本也可能已被更新版本取代。不做隐藏重试，派发前取消不修改状态。
@@ -93,8 +87,7 @@ _ = receipt
 
 每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
 且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
-幂等指纹只包含选中名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID
-改变子集返回 `ErrConflict`，调整 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+多次独立调用合起来不具备原子性。
 空调用、重复或未知名称、无效消耗在准入前本地返回 `ErrInvalid` / `NotCharged`。
 策略在构造时校验并复制，不由 Charge 携带；策略变更需新建 `StaticLimiter`，不能绕过
 后端活跃策略或债务检查。`static.Wait(ctx, charges...)` 快照 Charge，仅重试普通额度拒绝，
@@ -105,25 +98,25 @@ _ = receipt
 ## 事务与故障契约
 
 每次准入使用 Read Committed，通过 INSERT ON CONFLICT 建立永久 domain 锁行，
-再用 SELECT FOR UPDATE 锁定它，覆盖额度或准入记录尚不存在的情况。
-获得锁后用 clock_timestamp 采样一次后端时间，全部额度与允许/拒绝记录在同一事务提交。
+再用 SELECT FOR UPDATE 锁定它，覆盖额度尚不存在的情况。
+获得锁后用 clock_timestamp 采样一次后端时间，全部额度在同一事务提交。
 PostgreSQL 使用核心 Evaluate / EvaluateManaged 转换；Redis 的等价计算在 Lua 内执行。
 托管准入先独立校验原债务字段，再在内存中应用当前配置。债务行的间隔/Burst 仅用于完整性校验，
 不是权威策略。
 
 发送 Commit 前的错误回滚并标记 NotCharged；任何 Commit 错误都保守标记 Unknown，
-使用新 context 按仍保留的 ID 查询恢复。不自动重试事务。Lookup 不加 domain 锁，
-不等待进行中的准入，因此未找到不代表没有扣减。重放和查询不延长保留期。
-上游业务执行仍需应用协调。
+额度可能已经扣减。不提供记录查询、重放或自动事务重试；重试是新的准入，可能再次扣减。
+业务幂等由应用负责，不属于限流器职责。
 
 ## 部署边界与清理
 
 - 一个 domain 是一个串行点，可能等待行锁或连接池。配置 context 截止时间、服务端语句/
   锁超时以及有界连接池；不要在事务中调用供应商或等待 RetryAfter。
 - 使用有日志表、fsync 和合适的 synchronous_commit/复制策略。异步提交或切换至落后副本
-  可能丢失债务与准入记录。PG 也不能消除墙上时钟跳变。
+  可能丢失债务。PG 也不能消除墙上时钟跳变。
 - 过期债务会被逻辑忽略，但托管策略身份永久保留。应用可调度 `driver.Prune(ctx, scope, limit)`，
-  每次最多删除 limit 条过期债务（静态或托管）与 limit 条过期准入记录（1～10000）。
+  每次最多删除 limit 条过期债务（静态或托管，1～10000）。
+  过期时间与 TAT 都必须不晚于数据库时间，避免删除仍有效的债务。
   它使用同一 domain 锁，绝不触碰策略表，需规划持久化策略基数。
   domain 锁行故意保留，需规划 domain 基数；不要独立删除锁行或活跃状态。
   额度频繁更新，需要关注 vacuum。
@@ -131,14 +124,11 @@ PostgreSQL 使用核心 Evaluate / EvaluateManaged 转换；Redis 的等价计�
   计费、队列或吞吐/SLO 保证；需要在目标部署验证延迟与热点 domain。
 
 使用根目录 Compose 和 `scripts/check.sh` 验证。`tests/contracts` 覆盖共用行为、
-真实 PG 回滚、提交响应丢失恢复、等锁取消、锁后取时和清理。
+真实 PG 回滚、提交响应丢失的计账语义、等锁取消、锁后取时和清理。
 详见 [Driver 契约](../../docs/driver.md)。
 
 [可运行的 pgx 示例](../../examples/postgres/main.go)：在仓库根目录执行
 `(cd examples/postgres && go run .)`，连接 Compose 的 PostgreSQL 测试实例。
-
-保留期从采样的后端决策时间起算，SQL 执行和提交延迟会消耗一部分窗口；
-配置时需覆盖派发与恢复所需时间。
 
 核心、两个运行时 Driver、可选的 pgx 示例和集成测试模块统一要求 Go 1.26+。
 生产应用应使用仍在维护的 Go 分支及其最新修补版。

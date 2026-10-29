@@ -3,7 +3,6 @@ package pacelock
 import (
 	"context"
 	"fmt"
-	"time"
 )
 
 // Quota associates an independent quota name with its policy. Static quotas have
@@ -21,7 +20,7 @@ func (q Quota) rule(cost int64) Rule {
 
 // StaticLimiter admits charges using an immutable, ordered set of caller-owned
 // quota policies. Every admission must charge a nonempty subset exactly once.
-// Charges may arrive in any order; decisions and fingerprints use quota order.
+// Charges may arrive in any order; decisions use quota order.
 // It is safe for concurrent use with a concurrency-safe Driver. Construct with
 // NewStatic or NewStaticWithOptions; nil and zero receivers return ErrInvalid.
 // It does not own the driver, connect, close it or start background goroutines.
@@ -46,7 +45,7 @@ func NewStatic(driver Driver, namespace, domain string, quotas ...Quota) (*Stati
 // NewStaticWithOptions constructs a static limiter with synchronous observation.
 // Like NewStatic it copies policies and performs no backend access. A driver
 // without StaticDriver can be constructed, but admission returns ErrUnsupported
-// with NotCharged; Lookup remains available through Driver.
+// with NotCharged.
 func NewStaticWithOptions(driver Driver, namespace, domain string, options Options, quotas ...Quota) (*StaticLimiter, error) {
 	core, err := newLimiterCore(driver, namespace, domain, options)
 	if err != nil {
@@ -80,36 +79,12 @@ func NewStaticWithOptions(driver Driver, namespace, domain string, options Optio
 func (s *StaticLimiter) Allow(ctx context.Context, charges ...Charge) (decision Decision, err error) {
 	core := s.engine()
 	finish := core.observe(ctx, "allow_static", len(charges))
-	defer func() { finish(decision, false, err) }()
+	defer func() { finish(decision, err) }()
 	rules, err := s.chargedRules(ctx, charges)
 	if err != nil {
 		return Decision{}, failure("allow_static", NotCharged, err)
 	}
-	receipt, err := core.admitStatic(ctx, "", 0, rules)
-	return receipt.Decision, err
-}
-
-// AllowOnce retains both allow and deny results for an ID. Retention is whole
-// milliseconds in [1ms,24h]; replay never extends it. Persist the attempt ID before
-// dispatch. Each genuinely new business attempt needs a new ID. Replay never
-// authorizes executing upstream work twice. Names must be valid UTF-8.
-// Charges are validated as in Allow and normalized to construction order; only
-// selected quotas enter the fingerprint. Their effective policies, order, costs
-// and retention must still match. Changing a retained ID's subset is ErrConflict.
-// Retain the original limiter and charges for recovery. Ignore Receipt on error
-// and inspect OutcomeOf. Retained denials cannot be polled with one ID to wait.
-func (s *StaticLimiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (receipt Receipt, err error) {
-	core := s.engine()
-	finish := core.observe(ctx, "allow_static_once", len(charges))
-	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
-	rules, err := s.chargedRules(ctx, charges)
-	if err != nil {
-		return Receipt{}, failure("allow_static_once", NotCharged, err)
-	}
-	if id == "" {
-		return Receipt{}, failure("allow_static_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
-	}
-	return core.admitStatic(ctx, id, retention, rules)
+	return core.admitStatic(ctx, rules)
 }
 
 // Wait blocks until all selected charges are atomically accepted or an error
@@ -120,31 +95,23 @@ func (s *StaticLimiter) AllowOnce(ctx context.Context, id string, retention time
 // Every backend error stops waiting, including NotCharged errors; Unknown must
 // not be blindly retried. Cancellation between attempts is NotCharged, while
 // cancellation during dispatch preserves the driver's accounting outcome.
-// Wait uses an empty ID and the calling goroutine. It creates no queue,
+// Wait uses the calling goroutine. It creates no queue,
 // reservation or background goroutine and guarantees no fairness. Contention
-// can delay admission indefinitely; use a deadline to bound waiting. Wait is
-// neither idempotent nor recoverable with Lookup. It emits one observer event.
+// can delay admission indefinitely; use a deadline to bound waiting.
+// It emits one observer event.
 func (s *StaticLimiter) Wait(ctx context.Context, charges ...Charge) (err error) {
 	core := s.engine()
 	finish := core.observe(ctx, "wait_static", len(charges))
 	var decision Decision
-	defer func() { finish(decision, false, err) }()
+	defer func() { finish(decision, err) }()
 	rules, err := s.chargedRules(ctx, charges)
 	if err != nil {
 		return failure("wait_static", NotCharged, err)
 	}
-	decision, err = waitAdmission(ctx, "wait_static", func() (Receipt, error) {
-		return core.admitStatic(ctx, "", 0, rules)
+	decision, err = waitAdmission(ctx, "wait_static", func() (Decision, error) {
+		return core.admitStatic(ctx, rules)
 	})
 	return err
-}
-
-// Lookup queries a retained result in the limiter's namespace/domain, including
-// results created by other static or dynamic limiters. It does not filter by this
-// quota set, debit quotas or extend retention. A missing result does not prove
-// no debit. Use Decision only when err is nil and found is true.
-func (s *StaticLimiter) Lookup(ctx context.Context, id string) (Decision, bool, error) {
-	return s.engine().lookup(ctx, id)
 }
 
 func (s *StaticLimiter) engine() *limiterCore {

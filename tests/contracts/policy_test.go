@@ -54,36 +54,14 @@ func TestDefaultDynamicFailClosed(t *testing.T) {
 			l := limiter(t, b, 0, freshDomain())
 			c := managedCharge()
 			mustAllow(t, l, rule(c.Name, 3, 1))
-			for _, once := range []bool{false, true} {
-				op := "allow"
-				var err error
-				if once {
-					op = "allow_once"
-					_, err = l.AllowOnce(ctx, "missing-policy", time.Minute, c)
-				} else {
-					_, err = l.Allow(ctx, c)
-				}
-				var detail *pacelock.Error
-				if !errors.Is(err, pacelock.ErrPolicyMissing) || pacelock.OutcomeOf(err) != pacelock.NotCharged || !errors.As(err, &detail) || detail.Op != op {
-					t.Fatalf("default admission fell back to static: %v", err)
-				}
+			if _, err := l.Allow(ctx, c); !errors.Is(err, pacelock.ErrPolicyMissing) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				t.Fatalf("default admission fell back to static: %v", err)
 			}
-			if _, found, err := l.Lookup(ctx, "missing-policy"); err != nil || found {
-				t.Fatalf("missing policy retained a receipt: %t %v", found, err)
-			}
-			// Both failed default calls left the legacy static remainder untouched.
+			// The failed default call left the legacy static remainder untouched.
 			mustAllow(t, l, rule(c.Name, 3, 2))
 			updateQuota(t, l, dynamicQuota(1, 0, 3))
-			for _, once := range []bool{false, true} {
-				var err error
-				if once {
-					_, err = l.allowRulesOnce(ctx, "static-bypass", time.Minute, rule(c.Name, 3, 1))
-				} else {
-					_, err = l.allowRules(ctx, rule(c.Name, 3, 1))
-				}
-				if !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
-					t.Fatalf("static bypass: %v", err)
-				}
+			if _, err := l.allowRules(ctx, rule(c.Name, 3, 1)); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				t.Fatalf("static bypass: %v", err)
 			}
 		})
 	}
@@ -101,9 +79,9 @@ func TestDynamicPolicies(t *testing.T) {
 				t.Fatal("unpublished", err)
 			}
 			updateQuota(t, l, dynamicQuota(1, 1, 2))
-			receipt, err := l.AllowOnce(ctx, "attempt", time.Minute, c)
-			if err != nil || !receipt.Allowed {
-				t.Fatal(receipt, err)
+			admitted, err := l.Allow(ctx, c)
+			if err != nil || !admitted.Allowed {
+				t.Fatal(admitted, err)
 			}
 			// Same caller charge, no refresh: faster policy must not forgive old one-minute debt.
 			updateQuota(t, l, dynamicQuota(2, 2, 1))
@@ -114,22 +92,6 @@ func TestDynamicPolicies(t *testing.T) {
 			updateQuota(t, l, dynamicQuota(3, 0, 1))
 			if _, err = peer.Allow(ctx, c); !errors.Is(err, pacelock.ErrPaused) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 				t.Fatal("pause", err)
-			}
-			// Same ID/charge replays even though policy changed; no client revision needed.
-			receipt, err = peer.AllowOnce(ctx, "attempt", time.Minute, c)
-			if err != nil || !receipt.Replayed || !receipt.Allowed {
-				t.Fatal(receipt, err)
-			}
-			changed := c
-			changed.Cost++
-			if _, err = peer.AllowOnce(ctx, "attempt", time.Minute, changed); !errors.Is(err, pacelock.ErrConflict) {
-				t.Fatal(err)
-			}
-			if _, err = peer.AllowOnce(ctx, "paused-attempt", time.Minute, c); !errors.Is(err, pacelock.ErrPaused) {
-				t.Fatal(err)
-			}
-			if _, found, err := l.Lookup(ctx, "paused-attempt"); err != nil || found {
-				t.Fatal("paused error persisted", found, err)
 			}
 			if err = l.UpdateQuotas(ctx, dynamicQuota(1, 1, 2)); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("stale update", err)
@@ -206,27 +168,20 @@ func TestDynamicDebtExpiryDoesNotDeletePolicy(t *testing.T) {
 	}
 }
 
-func TestDynamicStaticUpgradeAndReplay(t *testing.T) {
+func TestDynamicStaticUpgrade(t *testing.T) {
 	for _, b := range backends(t) {
 		t.Run(b.name, func(t *testing.T) {
 			ctx := context.Background()
 			l := limiter(t, b, 0, freshDomain())
 			c := managedCharge()
 			r := pacelock.Rule{Name: c.Name, Cost: 1, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: 1}}
-			saved, err := l.allowRulesOnce(ctx, "static-id", time.Minute, r)
+			saved, err := l.allowRules(ctx, r)
 			if err != nil || !saved.Allowed {
 				t.Fatal(saved, err)
 			}
 			updateQuota(t, l, dynamicQuota(1, 1, 1))
 			if d, err := l.Allow(ctx, c); err != nil || d.Allowed {
 				t.Fatal("upgrade forgot debt", d, err)
-			}
-			saved, err = l.allowRulesOnce(ctx, "static-id", time.Minute, r)
-			if err != nil || !saved.Replayed || !saved.Allowed {
-				t.Fatal(saved, err)
-			}
-			if _, err = l.AllowOnce(ctx, "static-id", time.Minute, c); !errors.Is(err, pacelock.ErrConflict) {
-				t.Fatal("cross API id", err)
 			}
 			if _, err = l.allowRules(ctx, r); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("static bypass", err)
@@ -235,7 +190,7 @@ func TestDynamicStaticUpgradeAndReplay(t *testing.T) {
 	}
 }
 
-func TestDynamicAtomicAdmissionAndRetainedDenial(t *testing.T) {
+func TestDynamicAtomicAdmission(t *testing.T) {
 	for _, b := range backends(t) {
 		t.Run(b.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -251,20 +206,14 @@ func TestDynamicAtomicAdmissionAndRetainedDenial(t *testing.T) {
 			if d, err := l.Allow(ctx, c); err != nil || !d.Allowed {
 				t.Fatal(d, err)
 			}
-			deny, err := l.AllowOnce(ctx, "denied", time.Minute, c, o)
+			deny, err := l.Allow(ctx, c, o)
 			if err != nil || deny.Allowed {
 				t.Fatal(deny, err)
 			}
 			if d, err := l.Allow(ctx, o); err != nil || !d.Allowed {
 				t.Fatal("partial debit", d, err)
 			}
-			q.Policy.Revision = 2
-			q.Policy.Burst = 100
-			updateQuota(t, l, q)
-			replay, err := l.AllowOnce(ctx, "denied", time.Minute, c, o)
-			if err != nil || !replay.Replayed || replay.Allowed || replay.RetryAfter != deny.RetryAfter {
-				t.Fatal(replay, err)
-			}
+
 		})
 	}
 }

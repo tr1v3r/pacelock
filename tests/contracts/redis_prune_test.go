@@ -31,13 +31,10 @@ func TestRedisPublicPruneCycle(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if r, err := limiter.AllowOnce(ctx, "id", 20*time.Millisecond, pacelock.Charge{Name: quota.Name, Cost: 1}); err != nil || !r.Allowed {
+	if r, err := limiter.Allow(ctx, pacelock.Charge{Name: quota.Name, Cost: 1}); err != nil || !r.Allowed {
 		t.Fatal(r, err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	if _, found, err := limiter.Lookup(ctx, "id"); err != nil || found {
-		t.Fatal(found, err)
-	}
 	cursor := redisdriver.PruneCursor{}
 	var deleted int64
 	for steps := 0; !cursor.Done(); steps++ {
@@ -54,7 +51,7 @@ func TestRedisPublicPruneCycle(t *testing.T) {
 		deleted += r.Deleted
 		cursor = r.Cursor
 	}
-	if deleted != 2 {
-		t.Fatalf("deleted %d, want quota and receipt", deleted)
+	if deleted != 1 {
+		t.Fatalf("deleted %d, want expired quota", deleted)
 	}
 }

@@ -17,10 +17,10 @@ type dynamicWaitDriver struct {
 	pacelock.Driver
 	admissions []pacelock.Admission
 	before     func(int)
-	after      func(int, pacelock.Receipt, error) (pacelock.Receipt, error)
+	after      func(int, pacelock.Decision, error) (pacelock.Decision, error)
 }
 
-func (d *dynamicWaitDriver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Receipt, error) {
+func (d *dynamicWaitDriver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Decision, error) {
 	snapshot := a
 	snapshot.Charges = append([]pacelock.Charge(nil), a.Charges...)
 	d.admissions = append(d.admissions, snapshot)
@@ -49,8 +49,8 @@ func newDynamicWaitLimiter(t *testing.T, l *contractLimiter, d *dynamicWaitDrive
 func checkDynamicWaitCall(t *testing.T, d *dynamicWaitDriver, events []pacelock.Event, charges []pacelock.Charge, err error) {
 	t.Helper()
 	for i, a := range d.admissions {
-		if a.ID != "" || a.Retention != 0 || !reflect.DeepEqual(a.Charges, charges) {
-			t.Fatalf("attempt %d changed snapshot or retained a receipt: %+v", i+1, a)
+		if !reflect.DeepEqual(a.Charges, charges) {
+			t.Fatalf("attempt %d changed snapshot: %+v", i+1, a)
 		}
 	}
 	if len(events) != 1 {
@@ -65,7 +65,7 @@ func checkDynamicWaitCall(t *testing.T, d *dynamicWaitDriver, events []pacelock.
 			t.Fatalf("Wait error operation: %v", err)
 		}
 	}
-	if event.Operation != "wait" || event.RuleCount != len(charges) || event.Result != result || event.Replayed || event.Err != err {
+	if event.Operation != "wait" || event.RuleCount != len(charges) || event.Result != result || event.Err != err {
 		t.Fatalf("whole-call observer event: %+v, err=%v", event, err)
 	}
 }
@@ -162,7 +162,7 @@ func TestDynamicWaitDriverContract(t *testing.T) {
 						t.Fatal("policy update bypassed the previous RetryAfter")
 					}
 				}
-				d.after = func(attempt int, r pacelock.Receipt, err error) (pacelock.Receipt, error) {
+				d.after = func(attempt int, r pacelock.Decision, err error) (pacelock.Decision, error) {
 					if attempt == 1 {
 						if err != nil || r.Allowed {
 							t.Fatalf("expected first real denial: %+v %v", r, err)
@@ -210,7 +210,7 @@ func TestDynamicWaitDriverContract(t *testing.T) {
 					allowDynamic(t, l, quotaCharge(blocked, 2))
 					want := pacelock.ErrPaused
 					d := &dynamicWaitDriver{Driver: b.driver[1]}
-					d.after = func(attempt int, r pacelock.Receipt, err error) (pacelock.Receipt, error) {
+					d.after = func(attempt int, r pacelock.Decision, err error) (pacelock.Decision, error) {
 						if attempt == 1 {
 							if err != nil || r.Allowed {
 								t.Fatalf("expected first real denial: %+v %v", r, err)
@@ -279,7 +279,7 @@ func TestDynamicWaitCancellationAccounting(t *testing.T) {
 							t.Fatal("terminal outcome must not dispatch another admission")
 						}
 					}
-					d.after = func(_ int, r pacelock.Receipt, err error) (pacelock.Receipt, error) {
+					d.after = func(_ int, r pacelock.Decision, err error) (pacelock.Decision, error) {
 						if err != nil || r.Allowed == (mode == "confirmed denial") {
 							t.Fatalf("unexpected real backend outcome: %+v %v", r, err)
 						}
@@ -287,7 +287,7 @@ func TestDynamicWaitCancellationAccounting(t *testing.T) {
 							cancel()
 						}
 						if mode == "lost debit reply" || mode == "uncanceled lost debit reply" {
-							return pacelock.Receipt{}, lost
+							return pacelock.Decision{}, lost
 						}
 						return r, err
 					}
@@ -343,7 +343,7 @@ type dynamicWaitUnchargedDriver struct {
 	cancel context.CancelFunc
 }
 
-func (d dynamicWaitUnchargedDriver) Admit(context.Context, pacelock.Admission) (pacelock.Receipt, error) {
+func (d dynamicWaitUnchargedDriver) Admit(context.Context, pacelock.Admission) (pacelock.Decision, error) {
 	d.cancel()
-	return pacelock.Receipt{}, &pacelock.Error{Op: "admit", Outcome: pacelock.NotCharged, Err: d.err}
+	return pacelock.Decision{}, &pacelock.Error{Op: "admit", Outcome: pacelock.NotCharged, Err: d.err}
 }

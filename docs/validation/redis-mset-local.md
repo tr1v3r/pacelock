@@ -1,6 +1,8 @@
+> Historical archive: the content below includes removed idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic/static admission exposes Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+
 # Redis MSET local verification — 2026-10-28
 
-> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `AllowOnce` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
+> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
 
 > Archived snapshot: these runs used Q2 quotas, E2/C1/P1 receipts and the
 > then-supported native-TTL readers. Those formats/readers are not current.

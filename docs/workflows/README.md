@@ -1,6 +1,8 @@
+> Historical archive: the content below includes removed idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic/static admission exposes Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+
 # Admission workflows
 
-> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `AllowOnce` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
+> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
 
 [简体中文](README.zh-CN.md)
 
@@ -47,7 +49,7 @@ reviewed snapshots, not automatically synchronized documentation. Re-trace the
 implementation and update the JSON references when API, accounting, storage or
 recovery contracts change; do not just replace the revision hash.
 
-The Redis diagram's labels and cards describe the current unversioned quota and
+The Redis diagram's labels and cards describe the historical unversioned quota and
 receipt formats, no Pending state, and role-aware pruning. Its pinned source links
 predate this cleanup; use the [current Redis guide](../../driver/redis/README.md)
 for the authoritative storage and error contract.

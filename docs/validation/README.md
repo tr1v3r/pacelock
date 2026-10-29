@@ -1,3 +1,5 @@
+> Historical archive: the content below includes removed idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic/static admission exposes Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+
 # Local fixture observations
 
 Historical native-TTL/Pending protocol measurements, not benchmarks of the new

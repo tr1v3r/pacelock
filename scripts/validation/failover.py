@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Isolated manual-promotion, OOM and synthetic-clock acceptance harness.
-Build examples/recovery-probe first; Docker must be available. No host clock edits.
+Exercises production admission Lua directly; Docker must be available. No host clock edits.
 """
 import argparse, json, pathlib, subprocess, time, uuid
 p = argparse.ArgumentParser()
-p.add_argument('--probe', required=True)
 p.add_argument('--image', default='redis:7-alpine')
 p.add_argument('--output', required=True)
 args = p.parse_args()
@@ -33,8 +32,17 @@ def until(fn, timeout=20):
         time.sleep(0.1)
     raise RuntimeError('fixture readiness timeout')
 
-def probe(port, domain, action):
-    return json.loads(cmd(args.probe, '-addr', f'127.0.0.1:{port}', '-domain', domain, '-action', action))
+engine = root / 'driver/redis/internal/engine'
+source = (engine / 'protocol.lua').read_text() + '\nlocal managed = false\n' + (engine / 'gcra.lua').read_text()
+
+def probe(name, domain):
+    # Each call is a fresh admission, not an idempotent recovery attempt.
+    result = {'allowed': 0, 'denied': 0, 'errors': 0}
+    for i in range(10):
+        reply = redis(name, 'EVAL', source, 1, f'{domain}:q:{i}', 86400000000, 1, 1)
+        first = reply.splitlines()[0]
+        result['allowed' if first == '1' else 'denied' if first == '0' else 'errors'] += 1
+    return result
 for loss in (False, True):
     network = run + ('-loss' if loss else '-sync')
     primary = network + '-primary'
@@ -47,7 +55,7 @@ for loss in (False, True):
         if loss:
             docker('network', 'disconnect', network, replica)
         results['redis_version'] = next((x.split(':', 1)[1] for x in redis(primary, 'INFO', 'server').splitlines() if x.startswith('redis_version:')))
-        seed = probe(17379, network, 'seed')
+        seed = probe(primary, network)
         assert seed['allowed'] == 10, seed
         if not loss:
             # A fresh WAIT connection does not cover the probe's writes.
@@ -61,25 +69,24 @@ for loss in (False, True):
         until(lambda: redis(replica, 'PING') == 'PONG')
         assert redis(replica, 'REPLICAOF', 'NO', 'ONE') == 'OK'
         until(lambda: 'role:master' in redis(replica, 'INFO', 'replication'))
-        checked = probe(17380, network, 'check')
+        checked = probe(replica, network)
         recovery = time.monotonic() - before
         if not loss:
-            assert checked['found'] == 10 and checked['allowed'] == 0, checked
+            assert checked['denied'] == 10 and checked['allowed'] == 0, checked
         else:
-            assert checked['missing'] == 10 and checked['allowed'] == 10, checked
+            assert checked['allowed'] == 10 and checked['errors'] == 0, checked
         results['scenarios']['unreplicated_loss' if loss else 'replicated_promotion'] = {'seed': seed, 'after_promotion': checked, 'manual_recovery_seconds': recovery, 'extra_admissions_after_10_confirmed': checked['allowed']}
         if not loss:
             assert redis(replica, 'CONFIG', 'SET', 'maxmemory', '1') == 'OK'
-            oom = probe(17380, network + '-oom', 'seed')
+            oom = probe(replica, network + '-oom')
             assert oom['allowed'] == 0 and oom['errors'] == 10, oom
             assert redis(replica, 'CONFIG', 'SET', 'maxmemory', '0') == 'OK'
             results['scenarios']['noeviction_oom'] = oom
-            source = (root / 'driver/redis/internal/engine/gcra.lua').read_text()
             clock = 'local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])'
             now = int(time.time() * 1000000)
 
             def evaluate(ts):
-                return redis(replica, 'EVAL', source.replace(clock, f'local now = {ts}'), 1, 'synthetic-clock', 0, '', 1000000, 1, 1, 'q')
+                return redis(replica, 'EVAL', source.replace(clock, f'local now = {ts}'), 1, 'synthetic-clock', 1000000, 1, 1)
             first = evaluate(now)
             forward = evaluate(now + 2000000)
             backward = evaluate(now - 86400000001)

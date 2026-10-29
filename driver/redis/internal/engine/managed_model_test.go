@@ -56,7 +56,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			want, next, werr := pacelock.EvaluateManaged(now, []pacelock.Charge{{Name: name, Cost: tc.cost}}, []pacelock.QuotaState{p}, []pacelock.QuotaState{debt})
-			cmd := script.Run(ctx, c, keys, int64(0), "", int64(0), int64(0), tc.cost, name)
+			cmd := script.Run(ctx, c, keys, int64(0), int64(0), tc.cost)
 			if werr != nil {
 				kind := pacelock.ErrInvalid
 				if tc.step == 0 {
@@ -99,8 +99,6 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 	}
 	a := managedRequest("first", 1)
 	a.Charges = append(a.Charges, pacelock.Charge{Name: "last", Cost: 1})
-	a.ID = "atomic"
-	a.Retention = time.Minute
 	if _, err := l.AdmitManaged(ctx, a); !errors.Is(err, pacelock.ErrState) {
 		t.Fatal(err)
 	}
@@ -109,9 +107,6 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 	}
 	if got := c.Get(ctx, l.key("last")).Val(); got != "D3|corrupt" {
 		t.Fatal(got)
-	}
-	if _, found, err := l.Lookup(ctx, a.ID); err != nil || found {
-		t.Fatal(found, err)
 	}
 }
 
@@ -127,7 +122,7 @@ func TestRedisManagedModel(t *testing.T) {
 		policies := make([]pacelock.QuotaState, n)
 		debts := make([]pacelock.QuotaState, n)
 		keys := make([]string, 2*n)
-		args := []interface{}{int64(0), ""}
+		args := []interface{}{}
 		names := make([]string, n)
 		before := make([]string, n)
 		for i := 0; i < n; i++ {
@@ -145,7 +140,7 @@ func TestRedisManagedModel(t *testing.T) {
 			names[i] = name
 			keys[i] = l.key(name)
 			keys[n+i] = l.policyKey(name)
-			args = append(args, int64(0), int64(0), cost, name)
+			args = append(args, int64(0), int64(0), cost)
 			before[i] = fmt.Sprintf("D3|%d", tat)
 			if err := c.MSet(ctx, keys[i], before[i], keys[n+i], fmt.Sprintf("P3|%d:%d:1", policies[i].Interval, burst)).Err(); err != nil {
 				t.Fatal(err)

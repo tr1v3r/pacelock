@@ -9,14 +9,14 @@ import (
 	"time"
 )
 
-// dynamicWaitDriver scripts dynamic admissions. Inherited static and Lookup
-// methods share its dispatch counter, exposing accidental extra calls.
+// dynamicWaitDriver scripts dynamic admissions. Inherited static methods
+// share its dispatch counter, exposing accidental extra calls.
 type dynamicWaitDriver struct {
 	testDriver
-	admit func(context.Context, Admission) (Receipt, error)
+	admit func(context.Context, Admission) (Decision, error)
 }
 
-func (d *dynamicWaitDriver) Admit(ctx context.Context, a Admission) (Receipt, error) {
+func (d *dynamicWaitDriver) Admit(ctx context.Context, a Admission) (Decision, error) {
 	d.calls++
 	return d.admit(ctx, a)
 }
@@ -27,8 +27,8 @@ func TestDynamicWaitSnapshotsChargesAndRetriesOnlyDenials(t *testing.T) {
 	const delay = 5 * time.Millisecond
 	var lastAttempt time.Time
 	d := &dynamicWaitDriver{}
-	d.admit = func(_ context.Context, a Admission) (Receipt, error) {
-		if !reflect.DeepEqual(a.Charges, original) || a.ID != "" || a.Retention != 0 || a.Scope != (Scope{"app", "domain"}) {
+	d.admit = func(_ context.Context, a Admission) (Decision, error) {
+		if !reflect.DeepEqual(a.Charges, original) || a.Scope != (Scope{"app", "domain"}) {
 			t.Fatalf("changed admission: %+v", a)
 		}
 		if !lastAttempt.IsZero() && time.Since(lastAttempt) < delay {
@@ -38,9 +38,9 @@ func TestDynamicWaitSnapshotsChargesAndRetriesOnlyDenials(t *testing.T) {
 		// A synchronized caller mutation after dispatch must not change retries.
 		charges[0] = Charge{Name: "other", Cost: 99}
 		if d.calls < 3 {
-			return Receipt{Decision: Decision{RetryAfter: delay, Limited: []string{"tokens"}}}, nil
+			return Decision{RetryAfter: delay, Limited: []string{"tokens"}}, nil
 		}
-		return Receipt{Decision: Decision{Allowed: true}}, nil
+		return Decision{Allowed: true}, nil
 	}
 	var events []Event
 	l, err := NewWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
@@ -54,7 +54,7 @@ func TestDynamicWaitSnapshotsChargesAndRetriesOnlyDenials(t *testing.T) {
 		t.Fatal(d.calls, events)
 	}
 	e := events[0]
-	if e.Operation != "wait" || e.Result != "allowed" || e.Replayed || e.RuleCount != 2 || e.RetryAfter != 0 || e.Err != nil || e.Duration < 2*delay {
+	if e.Operation != "wait" || e.Result != "allowed" || e.RuleCount != 2 || e.RetryAfter != 0 || e.Err != nil || e.Duration < 2*delay {
 		t.Fatal(e)
 	}
 }
@@ -119,11 +119,11 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 		t.Run(backendErr.Error(), func(t *testing.T) {
 			for _, denyFirst := range []bool{false, true} {
 				d := &dynamicWaitDriver{}
-				d.admit = func(context.Context, Admission) (Receipt, error) {
+				d.admit = func(context.Context, Admission) (Decision, error) {
 					if denyFirst && d.calls == 1 {
-						return Receipt{Decision: Decision{RetryAfter: time.Microsecond, Limited: []string{"q"}}}, nil
+						return Decision{RetryAfter: time.Microsecond, Limited: []string{"q"}}, nil
 					}
-					return Receipt{}, backendErr
+					return Decision{}, backendErr
 				}
 				var events []Event
 				l, _ := NewWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
@@ -136,7 +136,7 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 				if !errors.Is(err, backendErr) || OutcomeOf(err) != OutcomeOf(backendErr) || !errors.As(err, &typed) || typed.Op != "wait" || d.calls != wantCalls {
 					t.Fatal(denyFirst, d.calls, err)
 				}
-				if len(events) != 1 || events[0].Operation != "wait" || events[0].Result != "error" || events[0].Replayed || events[0].Err != err {
+				if len(events) != 1 || events[0].Operation != "wait" || events[0].Result != "error" || events[0].Err != err {
 					t.Fatal(events)
 				}
 				if denyFirst && events[0].RetryAfter != time.Microsecond {
@@ -148,16 +148,15 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 }
 
 func TestDynamicWaitRejectsInvalidDriverResults(t *testing.T) {
-	for _, result := range []Receipt{
+	for _, result := range []Decision{
 		{},
-		{Decision: Decision{Allowed: true}, Replayed: true},
-		{Decision: Decision{Allowed: true, RetryAfter: time.Second}},
-		{Decision: Decision{RetryAfter: -time.Second, Limited: []string{"q"}}},
-		{Decision: Decision{RetryAfter: MaxHorizon + time.Second, Limited: []string{"q"}}},
-		{Decision: Decision{RetryAfter: time.Second, Limited: []string{"other"}}},
-		{Decision: Decision{RetryAfter: time.Second, Limited: []string{"tokens", "q"}}},
+		Decision{Allowed: true, RetryAfter: time.Second},
+		Decision{RetryAfter: -time.Second, Limited: []string{"q"}},
+		Decision{RetryAfter: MaxHorizon + time.Second, Limited: []string{"q"}},
+		Decision{RetryAfter: time.Second, Limited: []string{"other"}},
+		Decision{RetryAfter: time.Second, Limited: []string{"tokens", "q"}},
 	} {
-		d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Receipt, error) { return result, nil }}
+		d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Decision, error) { return result, nil }}
 		l, _ := New(d, "app", "domain")
 		err := l.Wait(context.Background(), Charge{Name: "q", Cost: 1}, Charge{Name: "tokens", Cost: 1})
 		if !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown || d.calls != 1 {
@@ -169,9 +168,9 @@ func TestDynamicWaitRejectsInvalidDriverResults(t *testing.T) {
 func TestDynamicWaitCancellationDuringDelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Receipt, error) {
+	d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Decision, error) {
 		cancel()
-		return Receipt{Decision: Decision{RetryAfter: time.Hour, Limited: []string{"q"}}}, nil
+		return Decision{RetryAfter: time.Hour, Limited: []string{"q"}}, nil
 	}}
 	var events []Event
 	l, _ := NewWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
@@ -187,8 +186,8 @@ func TestDynamicWaitCancellationDuringDelay(t *testing.T) {
 func TestDynamicWaitDeadlineDuringDelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Receipt, error) {
-		return Receipt{Decision: Decision{RetryAfter: time.Hour, Limited: []string{"q"}}}, nil
+	d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Decision, error) {
+		return Decision{RetryAfter: time.Hour, Limited: []string{"q"}}, nil
 	}}
 	l, _ := New(d, "app", "domain")
 	if err := l.Wait(ctx, sampleCharge()); !errors.Is(err, context.DeadlineExceeded) || OutcomeOf(err) != NotCharged || d.calls > 1 {
@@ -201,12 +200,12 @@ func TestDynamicWaitPreservesDispatchOutcomeDespiteCancellation(t *testing.T) {
 		t.Run(string(outcome), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Receipt, error) {
+			d := &dynamicWaitDriver{admit: func(context.Context, Admission) (Decision, error) {
 				cancel()
 				if outcome != "" {
-					return Receipt{}, &Error{Outcome: outcome, Err: context.Canceled}
+					return Decision{}, &Error{Outcome: outcome, Err: context.Canceled}
 				}
-				return Receipt{Decision: Decision{Allowed: true}}, nil
+				return Decision{Allowed: true}, nil
 			}}
 			l, _ := New(d, "app", "domain")
 			err := l.Wait(ctx, sampleCharge())

@@ -34,7 +34,7 @@ func BenchmarkRedis(b *testing.B) {
 		b.Skip("set PACELOCK_REDIS_ADDR")
 	}
 	for _, n := range []int{1, 4, 32} {
-		for _, mode := range []string{"allow", "deny", "once", "replay", "lookup"} {
+		for _, mode := range []string{"allow", "deny"} {
 			b.Run(fmt.Sprintf("%s/rules=%d", mode, n), func(b *testing.B) {
 				c := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
 				defer c.Close()
@@ -63,34 +63,12 @@ func BenchmarkRedis(b *testing.B) {
 						b.Fatal(err)
 					}
 				}
-				if mode == "replay" || mode == "lookup" {
-					if _, err := l.AllowOnce(ctx, "replay", time.Minute, rules...); err != nil {
-						b.Fatal(err)
-					}
-				}
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					switch mode {
-					case "once", "replay":
-						id := "replay"
-						if mode == "once" {
-							id = fmt.Sprint(i)
-						}
-						d, err := l.AllowOnce(ctx, id, time.Minute, rules...)
-						if err != nil || !d.Allowed {
-							b.Fatalf("%+v %v", d, err)
-						}
-					case "lookup":
-						_, found, err := l.Lookup(ctx, "replay")
-						if err != nil || !found {
-							b.Fatalf("%v %v", found, err)
-						}
-					default:
-						d, err := l.Allow(ctx, rules...)
-						if err != nil || (mode == "allow" && !d.Allowed) || (mode == "deny" && d.Allowed) {
-							b.Fatalf("%+v %v", d, err)
-						}
+					d, err := l.Allow(ctx, rules...)
+					if err != nil || (mode == "allow" && !d.Allowed) || (mode == "deny" && d.Allowed) {
+						b.Fatalf("%+v %v", d, err)
 					}
 				}
 				b.StopTimer()

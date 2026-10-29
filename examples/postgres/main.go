@@ -49,6 +49,8 @@ func main() {
 	}
 	d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 	if err != nil {
+		// Unknown may mean the debit committed. Do not blindly retry: every call
+		// is a fresh admission and can debit again.
 		log.Printf("admission failed: outcome=%s error=%v", pacelock.OutcomeOf(err), err)
 		return
 	}

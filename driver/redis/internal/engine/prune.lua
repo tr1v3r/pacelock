@@ -10,9 +10,7 @@ for i = 1, #KEYS do
             -- Managed policies are permanent, including paused policies.
             if not policy_state(raw) then return redis.error_reply('PACE_STATE malformed cleanup policy') end
         elseif string.find(KEYS[i], ':attempt:', 1, true) then
-            local body, problem = receipt_body(raw, now)
-            if problem == 'malformed' then return redis.error_reply('PACE_STATE malformed cleanup receipt') end
-            if problem == 'expired' then expired[#expired + 1] = KEYS[i] end
+            -- Legacy retained records are outside this driver's cleanup contract.
         else
             local state = quota_state(raw, now)
             if not state then return redis.error_reply('PACE_STATE malformed cleanup quota') end

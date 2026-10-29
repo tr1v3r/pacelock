@@ -4,12 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/tr1v3r/pacelock"
 	"io"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -260,7 +258,7 @@ func TestManagedAdmissionUsesCurrentPolicyAndOriginalDebt(t *testing.T) {
 			}
 			steps = append(steps, sqlStep{kind: "commit"})
 			r, err := scripted(t, steps).Admit(context.Background(), managed(1))
-			if err != nil || r.Decision.Allowed != tc.allowed {
+			if err != nil || r.Allowed != tc.allowed {
 				t.Fatalf("got %+v %v", r, err)
 			}
 		})
@@ -281,9 +279,7 @@ func TestManagedAdmissionFailuresDoNotWrite(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := managed(tc.cost)
-			a.ID = "new"
-			a.Retention = time.Hour
-			steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions"}, policyRead(tc.p), debtRead(tc.debt), sqlStep{kind: "rollback"})
+			steps := append(lockedSteps(), policyRead(tc.p), debtRead(tc.debt), sqlStep{kind: "rollback"})
 			_, err := scripted(t, steps).Admit(context.Background(), a)
 			if !errors.Is(err, tc.want) || pacelock.OutcomeOf(err) != pacelock.NotCharged || errors.Is(err, pacelock.ErrBackend) {
 				t.Fatalf("got %v", err)
@@ -292,33 +288,24 @@ func TestManagedAdmissionFailuresDoNotWrite(t *testing.T) {
 	}
 }
 func TestAdmissionOperationNames(t *testing.T) {
-	for _, once := range []bool{false, true} {
-		for _, dynamic := range []bool{false, true} {
-			op := "allow_static"
-			if dynamic {
-				op = "allow"
-			}
-			a := pacelock.StaticAdmission{Scope: testScope}
-			m := pacelock.Admission{Scope: testScope}
-			if once {
-				op += "_once"
-				a.ID, m.ID = "attempt", "attempt"
-				a.Retention, m.Retention = time.Hour, time.Hour
-			}
-			t.Run(op, func(t *testing.T) {
-				d := scripted(t, nil)
-				var err error
-				if dynamic {
-					_, err = d.Admit(context.Background(), m)
-				} else {
-					_, err = d.AdmitStatic(context.Background(), a)
-				}
-				var detail *pacelock.Error
-				if !errors.Is(err, pacelock.ErrInvalid) || !errors.As(err, &detail) || detail.Op != op || detail.Outcome != pacelock.NotCharged {
-					t.Fatalf("got %v, want %s / NotCharged", err, op)
-				}
-			})
+	for _, dynamic := range []bool{false, true} {
+		op := "allow_static"
+		if dynamic {
+			op = "allow"
 		}
+		t.Run(op, func(t *testing.T) {
+			d := scripted(t, nil)
+			var err error
+			if dynamic {
+				_, err = d.Admit(context.Background(), pacelock.Admission{Scope: testScope})
+			} else {
+				_, err = d.AdmitStatic(context.Background(), pacelock.StaticAdmission{Scope: testScope})
+			}
+			var detail *pacelock.Error
+			if !errors.Is(err, pacelock.ErrInvalid) || !errors.As(err, &detail) || detail.Op != op || detail.Outcome != pacelock.NotCharged {
+				t.Fatalf("got %v, want %s / NotCharged", err, op)
+			}
+		})
 	}
 }
 
@@ -333,94 +320,13 @@ func TestStaticCannotBypassPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestReceiptReplayBeforeConfiguration(t *testing.T) {
-	for _, isManaged := range []bool{false, true} {
-		for _, conflict := range []bool{false, true} {
-			t.Run(fmt.Sprintf("managed=%v/conflict=%v", isManaged, conflict), func(t *testing.T) {
-				a := static()
-				a.ID = "saved"
-				a.Retention = time.Hour
-				m := managed(1)
-				m.ID = a.ID
-				m.Retention = a.Retention
-				fingerprint := a.Fingerprint()
-				if isManaged {
-					fingerprint = m.Fingerprint()
-				}
-				if conflict {
-					if isManaged {
-						fingerprint = a.Fingerprint()
-					} else {
-						fingerprint = m.Fingerprint()
-					}
-				}
-				raw, _ := json.Marshal(pacelock.Decision{Allowed: true})
-				steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions", rows: [][]driver.Value{{fingerprint, raw, testNow + 1000000}}}, sqlStep{kind: "rollback"})
-				d := scripted(t, steps)
-				var r pacelock.Receipt
-				var err error
-				if isManaged {
-					r, err = d.Admit(context.Background(), m)
-				} else {
-					r, err = d.AdmitStatic(context.Background(), a)
-				}
-				if conflict {
-					if !errors.Is(err, pacelock.ErrConflict) {
-						t.Fatal(err)
-					}
-				} else if err != nil || !r.Replayed || !r.Decision.Allowed {
-					t.Fatalf("got %+v %v", r, err)
-				}
-			})
-		}
-	}
-}
-func TestMalformedReceiptRejectedBeforeConfiguration(t *testing.T) {
-	for _, dynamic := range []bool{false, true} {
-		t.Run(fmt.Sprintf("dynamic=%t", dynamic), func(t *testing.T) {
-			a := static()
-			a.ID, a.Retention = "malformed", time.Minute
-			m := managed(1)
-			m.ID, m.Retention = a.ID, a.Retention
-			fingerprint := a.Fingerprint()
-			if dynamic {
-				fingerprint = m.Fingerprint()
-			}
-			raw := []byte(`{"Allowed":true}`)
-			steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions", rows: [][]driver.Value{{fingerprint, raw, testNow + 1000000}}}, sqlStep{kind: "rollback"})
-			d := scripted(t, steps)
-			var receipt pacelock.Receipt
-			var err error
-			if dynamic {
-				receipt, err = d.Admit(context.Background(), m)
-			} else {
-				receipt, err = d.AdmitStatic(context.Background(), a)
-			}
-			if !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown || !reflect.DeepEqual(receipt, pacelock.Receipt{}) {
-				t.Fatalf("malformed replay: %+v %v", receipt, err)
-			}
-			lookup := scripted(t, []sqlStep{{kind: "query", contains: "FROM pacelock_admissions", rows: [][]driver.Value{{raw}}}})
-			decision, found, err := lookup.Lookup(context.Background(), pacelock.LookupRequest{Scope: testScope, ID: a.ID})
-			if found || !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown || !reflect.DeepEqual(decision, pacelock.Decision{}) {
-				t.Fatalf("malformed lookup: %+v %t %v", decision, found, err)
-			}
-		})
-	}
-}
-
-func TestManagedReceiptCommitsWithDebt(t *testing.T) {
+func TestManagedAdmissionCommitAccounting(t *testing.T) {
 	for _, commitFails := range []bool{false, true} {
 		t.Run(fmt.Sprint(commitFails), func(t *testing.T) {
 			a := managed(1)
-			a.ID = "new"
-			a.Retention = time.Hour
 			p := pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 2}
 			want := pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000000}
-			steps := append(lockedSteps(), sqlStep{kind: "query", contains: "FROM pacelock_admissions"}, policyRead(p), debtRead(pacelock.QuotaState{}), debtWrite(t, want), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_admissions", check: func(args []driver.NamedValue) {
-				if args[2].Value != a.Fingerprint() || args[4].Value != testNow+a.Retention.Microseconds() {
-					t.Fatalf("receipt args: %+v", args)
-				}
-			}})
+			steps := append(lockedSteps(), policyRead(p), debtRead(pacelock.QuotaState{}), debtWrite(t, want))
 			var commitErr error
 			if commitFails {
 				commitErr = errors.New("lost commit response")
@@ -431,17 +337,39 @@ func TestManagedReceiptCommitsWithDebt(t *testing.T) {
 				if !errors.Is(err, commitErr) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 					t.Fatalf("got %v", err)
 				}
-			} else if err != nil || !r.Decision.Allowed {
+			} else if err != nil || !r.Allowed {
 				t.Fatalf("got %+v %v", r, err)
 			}
 		})
 	}
 }
 
-func TestPruneDoesNotTouchPolicies(t *testing.T) {
-	steps := append(lockedSteps(), sqlStep{kind: "exec", contains: "FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2"}, sqlStep{kind: "exec", contains: "DELETE FROM pacelock_admissions"}, sqlStep{kind: "commit"})
-	if _, err := scripted(t, steps).Prune(context.Background(), testScope, 100); err != nil {
-		t.Fatal(err)
+func TestStaticAdmissionCommitUnknown(t *testing.T) {
+	failure := errors.New("lost commit response")
+	steps := append(lockedSteps(), policyRead(pacelock.QuotaState{}), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "commit", err: failure})
+	_, err := scripted(t, steps).AdmitStatic(context.Background(), static())
+	if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestPruneOnlyRecoveredDebt(t *testing.T) {
+	for _, commitFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(commitFails), func(t *testing.T) {
+			var failure error
+			if commitFails {
+				failure = errors.New("lost commit response")
+			}
+			steps := append(lockedSteps(), sqlStep{kind: "exec", contains: "FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2 AND tat_us<=$2", check: func(args []driver.NamedValue) {
+				if args[1].Value != testNow || args[2].Value != int64(100) {
+					t.Fatalf("prune args: %+v", args)
+				}
+			}}, sqlStep{kind: "commit", err: failure})
+			count, err := scripted(t, steps).Prune(context.Background(), testScope, 100)
+			if !errors.Is(err, failure) || (commitFails && count != 0) || (!commitFails && count != 1) {
+				t.Fatalf("got %d %v", count, err)
+			}
+		})
 	}
 }
 func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
@@ -453,8 +381,8 @@ func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
 	if err := scripted(t, steps).Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(schema, "ALTER TABLE") {
-		t.Fatal("legacy quota schema must not be changed")
+	if strings.Contains(schema, "ALTER TABLE") || strings.Contains(schema, "DROP TABLE") || strings.Contains(schema, "pacelock_admissions") {
+		t.Fatal("legacy schema must not be changed; new installs must not create admission tables")
 	}
 	for _, s := range []string{"CREATE TABLE IF NOT EXISTS pacelock_policies", "interval_us >= 0", "revision >= 1 AND revision <= 9007199254740991"} {
 		if !strings.Contains(schema, s) {
@@ -463,39 +391,31 @@ func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
 	}
 }
 
-func TestDecodeDecision(t *testing.T) {
-	for _, want := range []pacelock.Decision{
-		{Allowed: true},
-		{Allowed: true, Limited: []string{}},
-		{RetryAfter: time.Second, Limited: []string{"requests", "tokens"}},
-	} {
-		raw, err := json.Marshal(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := decodeDecision(raw)
-		if err != nil || !reflect.DeepEqual(got, want) {
-			t.Fatalf("round trip %s: %+v %v", raw, got, err)
-		}
-	}
-	for _, raw := range []string{
-		`null`, `[]`, `{}`, `{"Allowed":true}`,
-		`{"allowed":true,"RetryAfter":0,"Limited":null}`,
-		`{"Allowed":true,"RetryAfter":0,"Limited":null,"extra":1}`,
-		`{"Allowed":true,"Allowed":false,"RetryAfter":1,"Limited":["q"]}`,
-		`{"Allowed":null,"RetryAfter":1,"Limited":["q"]}`,
-		`{"Allowed":true,"RetryAfter":null,"Limited":null}`,
-		`{"Allowed":false,"RetryAfter":1,"Limited":[null]}`,
-		`{"Allowed":false,"RetryAfter":0,"Limited":["q"]}`,
-		`{"Allowed":true,"RetryAfter":0,"Limited":["q"]}`,
-		`{"Allowed":false,"RetryAfter":1,"Limited":["q","q"]}`,
-		`{"Allowed":true,"RetryAfter":0,"Limited":null} {}`,
-		`{"Allowed":true,"RetryAfter":0,"Limited":null`,
-		"{\"Allowed\":false,\"RetryAfter\":1,\"Limited\":[\"\xff\"]}",
-		strings.Repeat(" ", 65537),
-	} {
-		if got, err := decodeDecision([]byte(raw)); !errors.Is(err, pacelock.ErrState) || !reflect.DeepEqual(got, pacelock.Decision{}) {
-			t.Fatalf("accepted malformed record %q: %+v %v", raw, got, err)
-		}
+func TestAdmissionWriteFailureRollsBack(t *testing.T) {
+	for _, dynamic := range []bool{false, true} {
+		t.Run(fmt.Sprint(dynamic), func(t *testing.T) {
+			failure := errors.New("second debt write failed")
+			policy := pacelock.QuotaState{}
+			if dynamic {
+				policy = pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}
+			}
+			steps := append(lockedSteps(), policyRead(policy), debtRead(pacelock.QuotaState{}), policyRead(policy), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas", err: failure}, sqlStep{kind: "rollback"})
+			d := scripted(t, steps)
+			var err error
+			if dynamic {
+				a := managed(1)
+				a.Charges = append(a.Charges, pacelock.Charge{Name: "other", Cost: 1})
+				_, err = d.Admit(context.Background(), a)
+			} else {
+				a := static()
+				other := a.Rules[0]
+				other.Name = "other"
+				a.Rules = append(a.Rules, other)
+				_, err = d.AdmitStatic(context.Background(), a)
+			}
+			if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				t.Fatalf("got %v", err)
+			}
+		})
 	}
 }

@@ -17,8 +17,8 @@ func TestConcurrentMeasurementAccounting(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 10000; j++ {
-				m.add(pacelock.Decision{Allowed: true}, false, false, nil, time.Millisecond)
-				m.add(pacelock.Decision{}, false, false, context.DeadlineExceeded, time.Second)
+				m.add(pacelock.Decision{Allowed: true}, nil, time.Millisecond)
+				m.add(pacelock.Decision{}, context.DeadlineExceeded, time.Second)
 			}
 		}()
 	}

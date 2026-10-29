@@ -116,13 +116,6 @@ func (l *contractLimiter) allowRules(ctx context.Context, rules ...pacelock.Rule
 	}
 	return static.Allow(ctx, charges...)
 }
-func (l *contractLimiter) allowRulesOnce(ctx context.Context, id string, retention time.Duration, rules ...pacelock.Rule) (pacelock.Receipt, error) {
-	static, charges, err := l.staticRules(rules...)
-	if err != nil {
-		return pacelock.Receipt{}, err
-	}
-	return static.AllowOnce(ctx, id, retention, charges...)
-}
 func (l *contractLimiter) waitRules(ctx context.Context, rules ...pacelock.Rule) error {
 	static, charges, err := l.staticRules(rules...)
 	if err != nil {
@@ -220,90 +213,6 @@ func TestDriverContract(t *testing.T) {
 				}
 				mustAllow(t, limiters[0], rule("q", 31, 1))
 			})
-			t.Run("retained same ID contention and conflict", func(t *testing.T) {
-				domain := freshDomain()
-				ls := []*contractLimiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
-				var first atomic.Int64
-				var wg sync.WaitGroup
-				for i := range 64 {
-					wg.Add(1)
-					go func(i int) {
-						defer wg.Done()
-						r, err := ls[i%2].allowRulesOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
-						if err != nil || !r.Allowed {
-							t.Errorf("%+v %v", r, err)
-						} else if !r.Replayed {
-							first.Add(1)
-						}
-					}(i)
-				}
-				wg.Wait()
-				if first.Load() != 1 {
-					t.Fatal("first", first.Load())
-				}
-				d, found, err := ls[1].Lookup(context.Background(), "same")
-				if err != nil || !found || !d.Allowed {
-					t.Fatal(d, found, err)
-				}
-				if _, err := ls[1].allowRulesOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
-					t.Fatal(err)
-				}
-				d, err = ls[0].allowRules(context.Background(), rule("q", 1, 1))
-				if err != nil || d.Allowed {
-					t.Fatal(d, err)
-				}
-			})
-			t.Run("denial replay preserves original wait", func(t *testing.T) {
-				l := limiter(t, b, 0, freshDomain())
-				mustAllow(t, l, rule("q", 1, 1))
-				first, err := l.allowRulesOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
-				if err != nil || first.Allowed {
-					t.Fatal(first, err)
-				}
-				again, err := l.allowRulesOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
-				if err != nil || !again.Replayed || !reflect.DeepEqual(first.Decision, again.Decision) {
-					t.Fatal(first, again, err)
-				}
-				d, found, err := l.Lookup(context.Background(), "denied")
-				if err != nil || !found || !reflect.DeepEqual(d, first.Decision) {
-					t.Fatal(d, found, err)
-				}
-			})
-			t.Run("ordered and equivalent policy fingerprints", func(t *testing.T) {
-				l := limiter(t, b, 0, freshDomain())
-				rules := []pacelock.Rule{rule("a", 3, 1), rule("b", 3, 1)}
-				if _, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); err != nil {
-					t.Fatal(err)
-				}
-				rules[0].Policy.Rate = 60
-				rules[0].Policy.Period = time.Hour
-				if r, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
-					t.Fatal(r, err)
-				}
-				rules[0], rules[1] = rules[1], rules[0]
-				if _, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
-					t.Fatal(err)
-				}
-			})
-			t.Run("expiry recovery and no retention extension", func(t *testing.T) {
-				l := limiter(t, b, 0, freshDomain())
-				r := rule("q", 1, 1)
-				r.Policy.Period = 20 * time.Millisecond
-				if _, err := l.allowRulesOnce(context.Background(), "short", time.Second, r); err != nil {
-					t.Fatal(err)
-				}
-				time.Sleep(600 * time.Millisecond)
-				replay, err := l.allowRulesOnce(context.Background(), "short", time.Second, r)
-				if err != nil || !replay.Replayed {
-					t.Fatal(replay, err)
-				}
-				time.Sleep(500 * time.Millisecond)
-				if _, found, err := l.Lookup(context.Background(), "short"); err != nil || found {
-					t.Fatal(found, err)
-				}
-				r.Policy.Burst = 2
-				mustAllow(t, l, r)
-			})
 			t.Run("32 dimensions and cancellation", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				rules := make([]pacelock.Rule, pacelock.MaxRules)
@@ -328,7 +237,7 @@ type cancelOnDenialDriver struct {
 	cancel context.CancelFunc
 }
 
-func (d cancelOnDenialDriver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Receipt, error) {
+func (d cancelOnDenialDriver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Decision, error) {
 	r, err := d.Driver.(pacelock.StaticDriver).AdmitStatic(ctx, a)
 	if err == nil && !r.Allowed {
 		d.cancel()

@@ -37,7 +37,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{owner.key("quota"), owner.attemptKey("admission")}
+	keys := []string{owner.key("quota")}
 	var masters []*redis.Client
 	t.Cleanup(func() {
 		clean, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -108,17 +108,11 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 		if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
 			t.Fatalf("Allow: %+v %v", d, err)
 		}
-		if d, err := l.AllowOnce(ctx, "admission", time.Minute, r); err != nil || !d.Allowed || d.Replayed {
-			t.Fatalf("AllowOnce: %+v %v", d, err)
-		}
-		if d, err := l.AllowOnce(ctx, "admission", time.Minute, r); err != nil || !d.Allowed || !d.Replayed {
-			t.Fatalf("replay: %+v %v", d, err)
-		}
-		if d, found, err := l.Lookup(ctx, "admission"); err != nil || !found || !d.Allowed {
-			t.Fatalf("Lookup: %+v found=%v err=%v", d, found, err)
+		if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
+			t.Fatalf("second admission: %+v %v", d, err)
 		}
 		if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
-			t.Fatalf("replay consumed extra quota: %+v %v", d, err)
+			t.Fatalf("third admission failed: %+v %v", d, err)
 		}
 		if d, err := l.Allow(ctx, r); err != nil || d.Allowed {
 			t.Fatalf("quota not exhausted: %+v %v", d, err)

@@ -11,54 +11,46 @@ type Options struct {
 	Observer Observer
 }
 
-// Observer receives one synchronous event per dynamic or static admission and
-// Lookup call. Constructors and UpdateQuotas emit no event. The callback must be
-// fast and concurrency-safe.
+// Observer receives one synchronous event per dynamic or static Allow or Wait call.
+// Constructors and UpdateQuotas emit no event. The callback must be fast and
+// concurrency-safe.
 // Panics propagate; no background work is created.
 type Observer func(context.Context, Event)
 
-// Event describes a call without exposing quota names or admission IDs as fields.
+// Event describes a call without exposing quota names as fields.
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, allow_once, wait, allow_static, allow_static_once,
-	// wait_static or lookup. Each Wait emits one event for the whole call.
+	// Operation is allow, wait, allow_static or wait_static.
+	// Each Wait emits one event for the whole call.
 	Operation string
 	// Duration excludes the observer callback execution time.
 	Duration time.Duration
-	// RuleCount includes invalid supplied rules or charges; Lookup reports zero.
+	// RuleCount includes invalid supplied rules or charges.
 	RuleCount int
-	// Result is allowed, denied, found, missing or error.
+	// Result is allowed, denied or error.
 	Result string
-	// Replayed is true only for AllowOnce or a static AllowOnce operation returning a retained decision.
-	Replayed bool
 	// RetryAfter is the last decision advisory wait (zero after allowance).
 	RetryAfter time.Duration
 	// Err is the returned error; do not label metrics with its text.
 	Err error
 }
 
-func (l *limiterCore) observe(ctx context.Context, op string, count int) func(Decision, bool, error) {
+func (l *limiterCore) observe(ctx context.Context, op string, count int) func(Decision, error) {
 	if l == nil || l.observer == nil {
-		return func(Decision, bool, error) {}
+		return func(Decision, error) {}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	start := time.Now()
-	return func(d Decision, replayed bool, err error) {
+	return func(d Decision, err error) {
 		result := "denied"
 		if d.Allowed {
 			result = "allowed"
 		}
-		if op == "lookup" {
-			result = "missing"
-			if replayed {
-				result = "found"
-			}
-		}
 		if err != nil {
 			result = "error"
 		}
-		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, Replayed: (op == "allow_once" || op == "allow_static_once") && replayed, RetryAfter: d.RetryAfter, Err: err})
+		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, RetryAfter: d.RetryAfter, Err: err})
 	}
 }

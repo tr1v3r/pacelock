@@ -69,7 +69,7 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	}
 	scope := pacelock.Scope{Namespace: "upgrade-tests", Domain: freshDomain()}
 	rule := pacelock.Rule{Name: "requests", Policy: pacelock.Policy{Rate: 1, Period: time.Hour, Burst: 10}, Cost: 1}
-	a := pacelock.StaticAdmission{Scope: scope, Rules: []pacelock.Rule{rule}, ID: "legacy-allow", Retention: time.Hour}
+	legacyID, legacyFingerprint := "legacy-allow", "legacy-fingerprint"
 	var now int64
 	if err = db.QueryRowContext(ctx, `SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint`).Scan(&now); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := now + time.Hour.Microseconds()
-	if _, err = db.ExecContext(ctx, `INSERT INTO pacelock_admissions VALUES($1,$2,$3,$4,$5)`, pgScopeID(scope), pgItemID(a.ID), a.Fingerprint(), raw, expires); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO pacelock_admissions VALUES($1,$2,$3,$4,$5)`, pgScopeID(scope), pgItemID(legacyID), legacyFingerprint, raw, expires); err != nil {
 		t.Fatal(err)
 	}
 	d, err := postgres.New(db)
@@ -118,10 +118,10 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 		var savedFingerprint string
 		var savedRaw []byte
 		var savedExpiry int64
-		if err = db.QueryRowContext(ctx, `SELECT fingerprint,decision,expires_us FROM pacelock_admissions WHERE scope_id=$1 AND admission_id=$2`, pgScopeID(scope), pgItemID(a.ID)).Scan(&savedFingerprint, &savedRaw, &savedExpiry); err != nil {
+		if err = db.QueryRowContext(ctx, `SELECT fingerprint,decision,expires_us FROM pacelock_admissions WHERE scope_id=$1 AND admission_id=$2`, pgScopeID(scope), pgItemID(legacyID)).Scan(&savedFingerprint, &savedRaw, &savedExpiry); err != nil {
 			t.Fatal(err)
 		}
-		if savedFingerprint != a.Fingerprint() || string(savedRaw) != string(raw) || savedExpiry != expires {
+		if savedFingerprint != legacyFingerprint || string(savedRaw) != string(raw) || savedExpiry != expires {
 			t.Fatal("migration changed retained receipt")
 		}
 	}
@@ -129,14 +129,6 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay := func() {
-		t.Helper()
-		r, err := l.allowRulesOnce(ctx, a.ID, a.Retention, rule)
-		if err != nil || !r.Allowed || !r.Replayed {
-			t.Fatalf("legacy replay: %+v %v", r, err)
-		}
-	}
-	replay()
 	if decision, err := l.allowRules(ctx, rule); err != nil || !decision.Allowed {
 		t.Fatalf("static admission after migration: %+v %v", decision, err)
 	}
@@ -154,5 +146,4 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	if decision, err := l.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1}); err != nil || !decision.Allowed {
 		t.Fatalf("managed admission after activation: %+v %v", decision, err)
 	}
-	replay()
 }

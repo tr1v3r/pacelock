@@ -1,39 +1,17 @@
 -- All KEYS are explicit and share a slot. No mutation precedes the final MSET.
--- ARGV: retention_ms (0 for Allow), fingerprint, then step/burst/cost/name.
+-- ARGV: step/burst/cost for each quota.
 local now = backend_time()
 if not now then return redis.error_reply('PACE_STATE server clock outside supported range') end
-local retention = tonumber(ARGV[1])
-local fingerprint = ARGV[2]
-local count = (#ARGV - 2) / 4
-local hasConfigs = #KEYS - (retention > 0 and 1 or 0) == count * 2
-local recordKey = nil
-if retention > 0 then
-    recordKey = KEYS[#KEYS]
-    local raw = redis.pcall('GET', recordKey)
-    if type(raw) == 'table' and raw.err then
-        return redis.error_reply('PACE_RECORD unreadable admission record')
-    end
-    if raw then
-        local read, problem = receipt_body(raw, now)
-        if problem == 'malformed' then return redis.error_reply('PACE_RECORD malformed admission record') end
-        if read then
-            if string.sub(read, 1, 64) ~= fingerprint then
-                return redis.error_reply('PACE_CONFLICT admission parameters differ')
-            end
-            return {1, read}
-        end
-    end
-end
+local count = #ARGV / 3
+local hasConfigs = #KEYS == count * 2
 local writes = {}
 local result = {1, 0}
-local names = {}
 local overBurst = false
 for i = 1, count do
-    local offset = 2 + (i - 1) * 4
+    local offset = (i - 1) * 3
     local step = tonumber(ARGV[offset + 1])
     local burst = tonumber(ARGV[offset + 2])
     local cost = tonumber(ARGV[offset + 3])
-    names[i] = ARGV[offset + 4]
     if hasConfigs then
         local config = redis.pcall('GET', KEYS[count + i])
         if type(config) == 'table' and config.err then return redis.error_reply('PACE_STATE unreadable policy') end
@@ -91,15 +69,6 @@ for i = 1, count do
 end
 if overBurst then return redis.error_reply('PACE_INVALID cost exceeds configured burst') end
 if result[1] == 0 then writes = {} end
-local response = result
-if recordKey then
-    -- All encoding and response assembly must finish before the commit command.
-    local complete = fingerprint .. '|' .. encode_decision(names, result)
-    local envelope = string.format('%.0f|', now + retention * 1000) .. complete
-    writes[#writes + 1] = recordKey
-    writes[#writes + 1] = envelope
-    response = {0, complete}
-end
 if #writes > 0 then
     local committed = redis.pcall('MSET', unpack(writes))
     if type(committed) == 'table' and committed.err then
@@ -107,4 +76,4 @@ if #writes > 0 then
     end
 end
 -- Commit boundary: no further Redis commands or result encoding.
-return response
+return result

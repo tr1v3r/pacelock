@@ -143,12 +143,7 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 			if c.Exists(ctx, l.key("fresh")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != raw {
 				t.Fatal("state error mutated quota state")
 			}
-			if _, err := l.AllowOnce(ctx, "invalid-quota", time.Minute, rule("fresh-once", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
-				t.Fatalf("AllowOnce state error: %v", err)
-			}
-			if c.Exists(ctx, l.key("fresh-once"), l.attemptKey("invalid-quota")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != raw {
-				t.Fatal("AllowOnce state error wrote a quota or receipt")
-			}
+
 		})
 	}
 }

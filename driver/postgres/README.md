@@ -30,11 +30,13 @@ register `_ "github.com/jackc/pgx/v5/stdlib"` in the application and use
 not connect, migrate or close db. Run Migrate explicitly during setup with a
 migration-capable role. It creates the fixed logged tables from schema.sql and
 adds a separate `pacelock_policies` configuration table. The existing quota/debt
-and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
+schema remains unchanged, retaining all debt. New installs do not create admission
+receipt tables; legacy deployed receipt tables are left untouched, never dropped
+automatically, and are no longer read, written or pruned. Incompatible
 schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})`, `AllowOnce` or `Wait(ctx, charges...)`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. Both dynamic and static limiters expose `Wait(ctx, charges...) error`.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `Wait(ctx, charges...)`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `Wait` take public `Charge{Name, Cost}` values. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. Both dynamic and static limiters expose `Wait(ctx, charges...) error`.
 
 ## Default dynamic policies
 
@@ -53,11 +55,7 @@ err = limiter.UpdateQuotas(ctx, pacelock.Quota{
 if err != nil { return err }
 // Data plane: the same call automatically uses future published versions.
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "requests", Cost: 1})
-// Or retain a decision; the ID fingerprint includes names/costs, not policy versions.
-receipt, err := limiter.AllowOnce(ctx, "operation-id", time.Minute,
-    pacelock.Charge{Name: "requests", Cost: 1})
 _ = decision
-_ = receipt
 ```
 
 Publish positive, monotonically increasing revisions (at most 9007199254740991).
@@ -73,7 +71,7 @@ Managed admission fails closed with `ErrPolicyMissing` / `NotCharged` if any pol
 is absent. Costs above the current burst return `ErrInvalid`, not retryable denial.
 A managed `Rate: 0` pauses admission (positive Period/Burst still required):
 `ErrPaused` / `NotCharged` is returned before the over-burst check, without a debit
-or receipt write. Resume by publishing a higher positive-rate revision.
+write. Resume by publishing a higher positive-rate revision.
 
 `Limiter.Wait(ctx, charges...)` copies charges once before dispatch and resolves the
 latest backend policies atomically on each ordinary attempt, without a policy
@@ -82,19 +80,16 @@ error stops, including pause, missing policy, a new Burst below Cost, transport
 errors even when `NotCharged`, `Unknown`, unsupported capabilities and invalid
 driver results. Cancellation between attempts is `NotCharged`; in-flight uncertainty
 is preserved, and confirmed success stays success despite cancellation. Each attempt
-has an empty ID and zero retention, with no receipts or automatic `Lookup`. One
+is an independent admission. One
 `wait` observation covers the whole call; static Wait remains `wait_static`. Updates
 do not proactively wake sleepers, so an old RetryAfter may delay using relaxed policy.
 Sleeping holds no transaction, lock or connection. No queue, worker, background
 goroutine, fairness or refund is added. Use a context deadline; configuration-source
 polling/publication remains outside the SDK. See [blocking admission](../../README.md#blocking-admission).
 
-Existing retained receipts replay **before** current policy checks, unchanged by
-pauses or updates. Managed retries with the same names/costs replay across revisions.
-Static and managed requests sharing an ID conflict. A replayed historical allow is
-not permission to execute upstream again. Static constructors reject managed
-revision fields locally, and new static admissions to configured quotas return
-`ErrPolicyMismatch`; old static receipts still replay before this bypass guard.
+Static constructors reject managed revision fields locally, and static admissions
+to configured quotas return `ErrPolicyMismatch`; no historical result can bypass
+this check. Each call is a fresh quota decision.
 
 Update failures before commit roll back; commit errors are `Unknown`, meaning the
 policy update may have committed, not that any quota was debited. Retry identical
@@ -114,9 +109,7 @@ controlled setup with no concurrent migration runners; DDL takes table locks.
 Each static call accepts any nonempty subset of fixed quotas as `...Charge`, each
 selected name exactly once with `0 < Cost <= Burst`; omitted quotas are neither
 checked nor charged. Selected charges are normalized to construction (binding)
-order. Idempotency fingerprints include only selected names, normalized order,
-effective policies, costs and retention; changing the subset with the same retained
-ID returns `ErrConflict`. Reordering charges preserves the fingerprint. Separate
+order. Separate
 calls are not atomic together. Empty calls, duplicate or unknown names and invalid
 costs fail locally with `ErrInvalid` / `NotCharged` before admission. Policies are
 validated/copied at construction, not carried in charges; policy changes require a
@@ -131,17 +124,16 @@ See [policy and cost contracts](../../README.md#explicit-static-alternative-fixe
 
 Each admission uses Read Committed, INSERT ON CONFLICT for a permanent domain guard,
 then SELECT FOR UPDATE on that guard. This serializes even initially missing quota
-and receipt rows. Backend time is sampled once with clock_timestamp after locking.
-All quota rows and a retained allow/deny result commit together. PostgreSQL uses
+rows. Backend time is sampled once with clock_timestamp after locking.
+All quota rows commit together. PostgreSQL uses
 the core Evaluate / EvaluateManaged transitions; Redis's equivalents run inside Lua.
 Managed admission validates original debt fields, then applies current configuration
 in memory. Debt rows store interval/burst for integrity checks, not policy authority.
 
 Before Commit is sent, failures roll back and are NotCharged. Every Commit error
-is conservatively Unknown; recover by retained ID with a fresh context. There is
-no automatic transaction retry. Lookup does not lock/wait for an in-flight admission,
-so missing does not prove zero debit. Replays and queries never extend retention.
-Upstream execution still needs application coordination.
+is conservatively Unknown: quota may already have been debited. There is no
+receipt lookup, replay or automatic transaction retry. Retrying is a fresh admission
+and can debit again. Application-owned business idempotency is outside the limiter.
 
 ## Deployment limits and cleanup
 
@@ -149,11 +141,12 @@ Upstream execution still needs application coordination.
   context deadlines, server statement/lock timeouts and a bounded connection pool.
   Never execute a provider call or sleep for RetryAfter inside the transaction.
 - Use logged tables, fsync and a suitable synchronous_commit/replication policy.
-  Async commit or failover to a lagging standby may lose debt and retained IDs.
+  Async commit or failover to a lagging standby may lose debt.
   Wall-clock jumps are not eliminated by PostgreSQL.
 - Expired debt is logically ignored, but managed policy identity persists forever.
   Schedule `driver.Prune(ctx, scope, limit)` externally to remove at most limit
-  expired debt rows (static or managed) and limit expired receipts per call (1..10000).
+  expired debt rows (static or managed) per call (1..10000).
+  Both expiry and TAT must be at or before database time, preserving active debt.
   It takes the same domain lock and never touches the policy table.
   Account for persistent policy cardinality. Domain guard rows are
   deliberately retained; plan for domain cardinality. Do not independently delete
@@ -163,14 +156,11 @@ Upstream execution still needs application coordination.
   or a throughput/SLO guarantee. Validate latency and hot domains in your deployment.
 
 Use the root Compose fixture and `scripts/check.sh`. `tests/contracts` exercises
-both drivers plus real PG rollback, lost-commit-reply recovery, lock cancellation,
+both drivers plus real PG rollback, lost-commit-reply accounting, lock cancellation,
 post-lock time and cleanup. See [Driver contract](../../docs/driver.md).
 
 [Runnable pgx example](../../examples/postgres/main.go): from the repository root,
 run `(cd examples/postgres && go run .)` against the Compose PostgreSQL fixture.
-
-Retention starts at the sampled backend decision time; SQL/commit latency consumes
-part of that window. Choose retention to cover dispatch and recovery latency.
 
 The core, both runtime drivers, the optional pgx example and integration-test
 modules require Go 1.26+. Production applications should use a maintained Go

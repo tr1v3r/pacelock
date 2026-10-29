@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 )
 
 // A dynamic-only driver intentionally has no optional StaticDriver capability.
@@ -12,31 +11,15 @@ type dynamicOnlyDriver struct {
 	calls int
 }
 
-func (d *dynamicOnlyDriver) Admit(context.Context, Admission) (Receipt, error) {
+func (d *dynamicOnlyDriver) Admit(context.Context, Admission) (Decision, error) {
 	d.calls++
-	return Receipt{Decision: Decision{Allowed: true}}, nil
-}
-
-func (*dynamicOnlyDriver) Lookup(context.Context, LookupRequest) (Decision, bool, error) {
-	return Decision{}, false, nil
-}
-
-func TestAdmissionFingerprintEncoding(t *testing.T) {
-	static := StaticAdmission{Rules: []Rule{sampleRule()}, Retention: time.Minute}
-	// Static fingerprints use the current protocol without a compatibility slot.
-	if got, want := static.Fingerprint(), "10e07ca7947bdd45374a09b74df360d81744c2cc95a6c4dd828928bdb5098c94"; got != want {
-		t.Fatalf("static fingerprint changed: %s != %s", got, want)
-	}
-	dynamic := Admission{Charges: []Charge{{Name: "q", Cost: 1}}, Retention: time.Minute}
-	if got, want := dynamic.Fingerprint(), "cb8ae8ea6ddef7b72d2a6889d32f8fbd073fc432c8d3faf6bc3aff97ebcb9acf"; got != want {
-		t.Fatalf("dynamic fingerprint discriminator changed: %s != %s", got, want)
-	}
+	return Decision{Allowed: true}, nil
 }
 
 func TestDefaultDynamicDoesNotFallBackToStatic(t *testing.T) {
 	ctx := context.Background()
 	d := &managedTestDriver{
-		testDriver: testDriver{result: Receipt{Decision: Decision{Allowed: true}}},
+		testDriver: testDriver{result: Decision{Allowed: true}},
 		policies:   map[string]QuotaState{},
 		debts:      map[string]QuotaState{},
 	}
@@ -48,21 +31,20 @@ func TestDefaultDynamicDoesNotFallBackToStatic(t *testing.T) {
 	charge := Charge{Name: "q", Cost: 1}
 	for _, call := range []func() error{
 		func() error { _, err := l.Allow(ctx, charge); return err },
-		func() error { _, err := l.AllowOnce(ctx, "attempt", time.Minute, charge); return err },
 		func() error { return l.Wait(ctx, charge) },
 	} {
 		if err := call(); !errors.Is(err, ErrPolicyMissing) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("default admission must fail closed: %v", err)
 		}
 	}
-	if d.calls != 0 || d.managedCalls != 3 {
+	if d.calls != 0 || d.managedCalls != 2 {
 		t.Fatalf("default admission dispatched static=%d dynamic=%d", d.calls, d.managedCalls)
 	}
 	static, _ := NewStaticWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }}, sampleQuota())
 	if decision, err := static.Allow(ctx, sampleCharge()); err != nil || !decision.Allowed || d.calls != 1 {
 		t.Fatalf("explicit static alternative: %+v %v", decision, err)
 	}
-	if len(events) != 4 || events[0].Operation != "allow" || events[1].Operation != "allow_once" || events[2].Operation != "wait" || events[3].Operation != "allow_static" {
+	if len(events) != 3 || events[0].Operation != "allow" || events[1].Operation != "wait" || events[2].Operation != "allow_static" {
 		t.Fatalf("operations: %+v", events)
 	}
 }
@@ -87,7 +69,6 @@ func TestOptionalStaticDriverUnsupportedBeforeDispatch(t *testing.T) {
 		call func() error
 	}{
 		{"allow_static", func() error { _, err := bound.Allow(ctx, sampleCharge()); return err }},
-		{"allow_static_once", func() error { _, err := bound.AllowOnce(ctx, "attempt", time.Minute, sampleCharge()); return err }},
 		{"wait_static", func() error { return bound.Wait(ctx, sampleCharge()) }},
 	} {
 		err := tc.call()

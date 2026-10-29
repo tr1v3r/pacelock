@@ -5,7 +5,7 @@
 `*StaticLimiter`; `NewStaticWithOptions` adds `Options` before the quota arguments.
 Static constructors validate and copy fixed Revision-0 quotas without backend I/O
 or a parent limiter. Later input mutation does not change the fixed policies.
-Both Redis and PostgreSQL implement the same admission and recovery contract.
+Both Redis and PostgreSQL implement the same admission contract.
 Dynamic admission is the default; see the breaking pre-v1 [migration](compatibility.md).
 
 ## Ownership and persistence boundary
@@ -15,27 +15,20 @@ and defensive result validation. It imports only the standard library. Applicati
 own their clients, deadlines and execution state. Drivers own authoritative backend
 time, synchronization, persistence, logical expiry and error classification.
 
-Mandatory `Driver.Admit(Admission)` receives a scope, ordered name/cost charges and
-an optional ID/retention, resolving current backend policies atomically. Optional
-`StaticDriver.AdmitStatic(StaticAdmission)` receives caller-owned Revision-0 rules.
-Optional `QuotaDriver` publishes revisioned permanent configurations; missing optional
-capabilities return `ErrUnsupported` without mutation when invoked. Static
-construction does not require `StaticDriver`; without it, admission returns
-`ErrUnsupported` / `NotCharged` while the shared `Lookup` remains available. The
-whole operation is the atomic boundary: all quotas pass together or an ordinary
-denial debits none. `Driver.Lookup` recovers a retained result on the authoritative
-primary without refreshing retention. The interface does not expose separate
-Get/Set calls or a network-spanning read/modify/write callback.
+Mandatory `Driver.Admit(ctx, Admission) (Decision, error)` receives only a scope
+and ordered name/cost charges, resolving current backend policies atomically.
+Optional `StaticDriver.AdmitStatic(ctx, StaticAdmission) (Decision, error)` receives
+only a scope and caller-owned Revision-0 rules. Optional `QuotaDriver.UpdateQuotas`
+publishes revisioned permanent configurations. Missing optional capabilities return
+`ErrUnsupported` / `NotCharged`. Constructors perform no backend I/O.
 
-`StaticLimiter.Allow` / `AllowOnce` / `Wait` accept public `Charge{Name, Cost}`
-values selecting any nonempty subset of fixed quotas. Charges contain no policy.
-The core validates selected charges and sends only those rules, normalized to
-binding order; omitted quotas are neither checked nor charged. Empty calls,
-duplicate or unknown quotas and invalid costs (`Cost <= 0` or `Cost > Burst`) fail
-locally with `ErrInvalid` / `NotCharged`. Separate calls are not atomic together.
-Idempotency fingerprints include only selected names, normalized order, effective
-policies, costs and retention; changing the subset with the same retained ID
-returns `ErrConflict`. Only selected quotas participate in each static admission.
+The whole operation is the atomic boundary: all selected quotas pass together or
+an ordinary denial debits none. There are no retained results or recovery methods.
+`StaticLimiter.Allow` / `Wait` accept public `Charge{Name, Cost}` values selecting
+any nonempty subset of fixed quotas. The core validates charges and sends only
+selected rules in binding order; omitted quotas are neither checked nor charged.
+Empty calls, duplicate or unknown names and invalid costs fail locally with
+`ErrInvalid` / `NotCharged`. Separate calls are not atomic together.
 
 Drivers must be concurrency-safe, must not retain/mutate request slices, and must
 not retry an ambiguous mutation. Validate direct requests too. Return `*Error` with
@@ -49,8 +42,7 @@ Both `Limiter.Wait(ctx, charges...) error` and `StaticLimiter.Wait(ctx, charges.
 use a shared private core waiting loop. Dynamic `Wait` copies the caller's charge
 slice once before dispatch, then makes ordinary `Admit` calls: each attempt resolves
 the latest backend policy atomically, without taking a policy snapshot. Static
-`Wait` uses the fixed policies and `AdmitStatic`. Each attempt has an empty ID and
-zero retention; neither path writes receipts or automatically calls `Lookup`.
+`Wait` uses the fixed policies and `AdmitStatic`. Neither path attempts recovery after an uncertain mutation.
 
 Drivers remain immediate: only a valid ordinary capacity denial is retried, after
 its validated advisory `RetryAfter`. Every error stops the loop, including
@@ -77,34 +69,24 @@ microseconds; expiry is a logical deadline, not a requirement to run a timer.
 Backend clocks are wall clocks, not monotonic clocks; jumps/failover need operational
 validation. Keep periods and burst recovery within 24h and each request within 32 rules.
 
-## Retained results
+## Failure boundary
 
-ID scope is namespace/domain. Dynamic `Admission.Fingerprint()` binds ordered
-names/costs and retention, not policies or revisions. `StaticAdmission.Fingerprint()`
-binds ordered effective rules as `[retention_ms,step,burst,cost,name,...]`, without an
-empty placeholder. Preserve the dynamic/static discriminator: cross-mode ID reuse
-conflicts. Replay retained results before current policy, pause or static-bypass checks.
-Names must be UTF-8 for idempotent requests; all other identity strings may be
-opaque bytes. Both allow and deny are retained; replay/lookup does not extend
-retention. A changed fingerprint returns `ErrConflict`. A retained denial stays
-denied; its RetryAfter is historical. A genuinely new business attempt needs a new
-ID. Expired/lost IDs must not be reused to depend on deduplication.
+Redis validates and encodes before one final MSET of admitted quotas. PostgreSQL
+commits quota writes in one transaction; confirmed rollback means `NotCharged`.
+A PostgreSQL Commit error is `Unknown`: the database may have committed before the
+reply was lost. Never retry an uncertain admission automatically. `Unknown` cannot
+be resolved through this SDK; callers must apply an explicit failure policy.
 
-Redis validates and encodes before one final MSET of quotas and the complete
-receipt. It uses logical expiry and application-scheduled bounded physical cleanup.
-Malformed receipts return `ErrState` / `Unknown`, never missing or a new admission.
-PostgreSQL commits quota and receipt writes in one transaction,
-so pre-commit failure rolls them all back. A PostgreSQL Commit error is still
-`Unknown`: the database may have committed before the reply was lost. Missing
-lookup results do not prove no debit or upstream exactly-once execution.
+The pre-v1 removal deletes `AllowOnce`, `Lookup`, receipt types, admission identity
+fields/fingerprints and replay events. Legacy receipt storage is not automatically
+dropped. See [migration and cleanup](compatibility.md).
 
 ## Backend modules
 
 - `driver/redis`: go-redis transport, single-command MSET commit, logical expiry,
   bounded cursor cleanup and guarded command replay/Cluster redirects. Keys use
   `pacelock:{scope_hash}:`; quotas use `tat:interval:burst`, with active-policy
-  checks and expiry at `tat <= now`. Receipts use
-  `expires_us|fingerprint|decision_json`. See its guide.
+  checks and expiry at `tat <= now`. See its guide.
 - `driver/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
   maintenance; no worker starts automatically. Run `Migrate` before upgraded binaries
@@ -121,6 +103,6 @@ Local replace directives support this checkout; published consumers resolve the
 pinned core dependency. Run `sh scripts/check.sh` from the root to check all modules.
 
 Do not run Redis and PostgreSQL as interchangeable failover stores for one live
-quota: they have separate debt, receipts and clocks. There is no automatic state
+quota: they have separate debt and clocks. There is no automatic state
 migration, cross-backend transaction, or API to join a caller's business transaction.
 Selecting such APIs or migration protocols is future work, not an implemented promise.

@@ -110,13 +110,11 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	req.ID = "paused"
-	req.Retention = time.Hour
 	req.Charges[0].Cost = 4
 	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, pacelock.ErrPaused) || OutcomeOf(err) != NotCharged {
 		t.Fatalf("paused: %v", err)
 	}
-	if c.Exists(ctx, l.attemptKey(req.ID)).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != debt {
+	if c.Get(ctx, l.key(r.Name)).Val() != debt {
 		t.Fatal("pause mutated state")
 	}
 	if _, err := l.Allow(ctx, rule(r.Name, 4, 1)); !errors.Is(err, ErrPolicyMismatch) {
@@ -150,7 +148,6 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 		t.Fatal(err)
 	}
 	req.Charges[0].Cost = 1
-	req.ID = "resumed"
 	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Allowed {
 		t.Fatalf("resume: %+v %v", d, err)
 	}
@@ -159,11 +156,8 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Replayed || !d.Allowed {
-		t.Fatalf("replay latest policy: %+v %v", d, err)
-	}
-	if _, err := l.AllowOnce(ctx, req.ID, req.Retention, rule(r.Name, 1, 1)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("static/managed conflict: %v", err)
+	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, pacelock.ErrPaused) || OutcomeOf(err) != NotCharged {
+		t.Fatalf("latest policy: %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -172,11 +166,11 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 }
 
-func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
+func TestRedisManagedCurrentStaticDebt(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("legacy", 2, 1)
-	if d, e := l.AllowOnce(ctx, "old", time.Hour, r); e != nil || !d.Allowed {
+	if d, e := l.Allow(ctx, r); e != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, e)
 	}
 	debt := c.Get(ctx, l.key(r.Name)).Val()
@@ -191,13 +185,11 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	static := r
 	static.Policy.Revision = 0
 	static.Policy.Rate = 1
-	if d, e := l.AllowOnce(ctx, "old", time.Hour, static); e != nil || !d.Replayed {
-		t.Fatalf("static replay: %+v %v", d, e)
+	if _, e := l.Allow(ctx, static); !errors.Is(e, ErrPolicyMismatch) {
+		t.Fatalf("static bypass: %v", e)
 	}
 	req := managedRequest(r.Name, 1)
-	req.ID = "old"
-	req.Retention = time.Hour
-	if _, e := l.AdmitManaged(ctx, req); !errors.Is(e, ErrConflict) {
+	if _, e := l.AdmitManaged(ctx, req); !errors.Is(e, pacelock.ErrPaused) {
 		t.Fatal(e)
 	}
 	r.Policy.Revision = 2
@@ -206,7 +198,6 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	if e := l.UpdateQuotas(ctx, quotaOf(r)); e != nil {
 		t.Fatal(e)
 	}
-	req.ID = "new"
 	if d, e := l.AdmitManaged(ctx, req); e != nil || d.Allowed {
 		t.Fatalf("legacy debt reset: %+v %v", d, e)
 	}

@@ -199,10 +199,10 @@ return sum
 			}
 			sha, err := c.ScriptLoad(ctx, script).Result()
 			must(err)
-			f := fullCase{name: fmt.Sprintf("allow_%s_%d_quotas", mode, n), sha: sha, tuple: tuple, args: []interface{}{0, ""}}
+			f := fullCase{name: fmt.Sprintf("allow_%s_%d_quotas", mode, n), sha: sha, tuple: tuple, args: []interface{}{}}
 			for j := 0; j < n; j++ {
 				f.keys = append(f.keys, fmt.Sprintf("bench:{lua-parse}:%s:%d:%d", mode, n, j))
-				f.args = append(f.args, 1, 1000000000, 1, fmt.Sprint(j))
+				f.args = append(f.args, 1, 1000000000, 1)
 			}
 			f.result = &Result{Name: f.name, Unit: "us/request (Redis commandstats)", Samples: []float64{}}
 			full = append(full, f)

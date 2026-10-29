@@ -11,7 +11,7 @@ and are charged, or a quota denial charges none. LLM APIs are a primary use case
 the core accepts any known positive cost.
 
 The API is pre-v1. This SDK is a rate-admission component, with explicit failure
-contracts and bounded idempotency; it does not implement an LLM gateway or billing
+contracts; it does not implement an LLM gateway or billing
 ledger. Requires Go 1.26+. Choose Redis 7+ or PostgreSQL 16+. Production builds should use a currently security-maintained Go release with its latest patches. See [compatibility](docs/compatibility.md)
 and the [verification record](docs/verification.md) for tested configurations.
 
@@ -23,7 +23,7 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [default dynamic API](managed.go), [standalone static API](static.go), [Rule and pure math helpers](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
+Start with the [default dynamic API](managed.go), [standalone static API](static.go), [Rule and pure math helpers](pacelock.go), [driver contract](driver.go), and [error outcomes](errors.go).
 
 For a visual walkthrough, see the [historical interactive admission workflows](docs/workflows/README.md)
 for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplified Chinese).
@@ -37,7 +37,6 @@ for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplifie
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
 - Context-aware blocking `Limiter.Wait` and `StaticLimiter.Wait` for weighted, multidimensional admission.
-- Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
 
@@ -154,27 +153,19 @@ static admission take public `Charge{Name, Cost}` values, never per-call policie
   Changing the original quota slice, quota or policy does not change its fixed
   policies. Each call assembles its own rules without mutating inputs.
   A driver without `StaticDriver` may be constructed; admission then returns
-  `ErrUnsupported` / `NotCharged`, while `Lookup` remains available.
-- `static.Allow(ctx, charges...)`, `static.AllowOnce(ctx, id, retention, charges...)`
-  and `static.Wait(ctx, charges...)` accept any nonempty subset of fixed quotas as
+  `ErrUnsupported` / `NotCharged`.
+- `static.Allow(ctx, charges...)` and `static.Wait(ctx, charges...)` accept any nonempty subset of fixed quotas as
   `...Charge`, each selected name exactly once with `0 < Cost <= Burst`.
   Omitted quotas are neither checked nor charged. Empty calls, duplicate or unknown
   names and invalid costs fail locally with `ErrInvalid` / `NotCharged` before
   dispatch. There are no default costs or zero-cost exemptions. Each call is atomic
   only across its selected quotas; separate calls are not atomic together.
 - Charge order is arbitrary. Selected quotas are normalized to construction
-  (binding) order for `Decision.Limited` and idempotency. Fingerprints include only
-  selected names, normalized order, effective policies, costs and retention.
-  Reordering charges preserves replay; changing the subset or selected quotas'
-  relative binding order with the same retained ID returns `ErrConflict`.
-  Unselected quotas do not affect the fingerprint.
+  (binding) order for `Decision.Limited`.
 - Build quota names from trusted identity and choose the applicable set in
   application code. The SDK cannot infer omitted applicable quotas.
 - Policy changes require a new `StaticLimiter`; construction neither migrates debt
-  nor bypasses backend `ErrPolicyMismatch` checks. Keep the original fixed policies,
-  costs and retention available for retained-attempt recovery.
-- `static.Lookup(ctx, id)` queries its namespace/domain, not just its fixed quota
-  set. It can recover results created by another limiter in the same scope.
+  nor bypasses backend `ErrPolicyMismatch` checks.
 
 ```go
 // Use a distinct static name with no published dynamic configuration.
@@ -208,11 +199,11 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `AllowOnce`, `Wait`, `Lookup`)
-and standalone `StaticLimiter` (`Allow`, `AllowOnce`, `Wait`, `Lookup`), with shared
+Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `Wait`)
+and standalone `StaticLimiter` (`Allow`, `Wait`), with shared
 outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
-quota and retained result in one short transaction. Pre-commit failures roll back;
+quota mutation in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
 Domain contention, WAL, pools and vacuum need deployment testing; no throughput
 advantage is claimed. `Prune` offers bounded caller-scheduled physical cleanup;
@@ -220,7 +211,7 @@ logical expiry works without cleanup. The SDK starts no background workers.
 
 See the [PostgreSQL guide](driver/postgres/README.md), [Redis guide](driver/redis/README.md),
 and [custom-driver contract](docs/driver.md). Drivers are alternatives: switching
-backends does not transfer quota debt or retained IDs and is not automatic failover.
+backends does not transfer quota debt and is not automatic failover.
 
 ## Default dynamic policies and pause
 
@@ -274,22 +265,17 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
   not a client-side GET followed by a write. PostgreSQL uses a separate policies
   table and the existing scope transaction lock. No distributed-lock key is needed.
 - `Rate=0` requires positive Period and Burst. Fresh admission returns `ErrPaused`
-  / `NotCharged` without a debit or receipt. Missing configuration returns
+  / `NotCharged` without a debit. Missing configuration returns
   `ErrPolicyMissing`, never unlimited admission. Cost above current burst is
   `ErrInvalid`. Dynamic `Wait` stops on these errors rather than waiting for a
   policy change. Applications own publication and configuration-source polling;
   the SDK starts no polling goroutine.
-- `AllowOnce(ctx, id, retention, charges...)` retains ordinary allow/deny
-  decisions. Its fingerprint binds ordered names/costs and retention, NOT policy
-  versions. Same-attempt retries replay the original result even after updates or
-  pause; `Lookup` reads either API's receipt. Changed costs or reuse across static
-  and managed APIs produce `ErrConflict`. Replay never authorizes executing twice.
-- `Prune` may reclaim expired debt and receipts, but never configuration/revisions.
+- `Prune` may reclaim expired debt, but never configuration/revisions.
   Plan configuration cardinality accordingly; deleting a config loses its version
   fence. All dynamic updates must use the SDK/version-check script, not raw SET.
 - `NewStatic` / `NewStaticWithOptions` require Revision-0 fixed policies. Once a backend
   configuration exists, fresh static admission for that name fails closed with
-  `ErrPolicyMismatch`; old static receipts remain recoverable. A managed policy
+  `ErrPolicyMismatch`. A managed policy
   cannot be passed to these static constructors. Use dynamic name/cost admission instead.
 - For PostgreSQL, run explicit `Migrate` to add the policies table BEFORE upgraded
   request binaries serve traffic, including static traffic. Deploy protocol-capable
@@ -342,58 +328,23 @@ use of a relaxed policy. `RetryAfter` reserves no capacity; competing callers ca
 win repeatedly, so there is no FIFO or starvation guarantee. Bound waiting with a
 context deadline.
 
-Both Wait methods are non-idempotent: each attempt uses an empty ID and zero
-retention, creates no receipt and never automatically calls `Lookup`. A denied
-`AllowOnce` ID replays its original denial, so polling one retained ID cannot
-implement blocking admission. Use the explicit recovery flow below when durable
-attempt identity is required.
+## Breaking pre-v1 removal
 
-## Idempotent admission and recovery
+Admission is non-idempotent. `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`,
+admission IDs/retention/fingerprints and `Event.Replayed` have been removed.
+Both limiter types expose `Allow(ctx, ...Charge) (Decision, error)` and
+`Wait(ctx, ...Charge) error`; only the dynamic limiter exposes `UpdateQuotas`.
+`Driver.Admit` and `StaticDriver.AdmitStatic` return `(Decision, error)`.
+There is no result recovery after an uncertain mutation: **do not blindly retry Unknown**.
+This is rate admission, not billing, refunds, business execution, queue or worker ownership.
 
-```go
-// Persist an admission ID alongside one business attempt before dispatch.
-receipt, err := limiter.AllowOnce(ctx, admissionID, 10*time.Minute, charges...)
-if err != nil {
-    return err
-}
-// receipt.Decision is the original decision; receipt.Replayed identifies a replay.
-// Replayed=true does not authorize executing the upstream request again.
-```
-
-After an ambiguous response, use a fresh context to query:
-
-```go
-decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
-```
-
-- An ID is scoped to namespace/domain. Default dynamic fingerprints bind **ordered
-  names, costs and retention**, not policy versions. Static fingerprints additionally
-  bind effective intervals and bursts, preserving the effective-rule encoding. Static
-  calls normalize to construction order. Cross-mode reuse conflicts through the fingerprint discriminator.
-  Names must be valid UTF-8 for retained admissions; IDs contain 1–256 bytes.
-  Static fingerprints contain only selected quotas, normalized to construction
-  order; changing the subset conflicts, while omitted quotas do not affect identity.
-- Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
-  a value covering your recovery window. Replays and queries never extend it.
-- Both allow and deny decisions are retained. A denied ID stays denied while
-  retained; a later, genuinely new attempt needs a new ID. Replayed `RetryAfter`
-  is the original delay, not a countdown or fresh capacity estimate.
-- Redis writes quotas and the complete decision in one final MSET, after all
-  checks/encoding. Malformed receipts return `ErrState` / `Unknown`, never a
-  missing result or permission for a new admission.
-  Redis expiry is logical; schedule bounded physical cleanup for every scope.
-  See the [Redis protocol and cleanup guide](driver/redis/README.md).
-- `found=false` does **not** prove no debit. The command may still be in flight,
-  or the record may have expired or been lost. Expiry, eviction, deletion and
-  failover loss end deduplication. Never reuse an old ID after that boundary.
-- Deduplicating admission does not deduplicate upstream execution. Coordinate the
-  business attempt separately. A new actual model call needs a new admission ID.
-
-For a complete application-owned flow using explicit static policies, see the [durable admission example](driver/redis/examples/durable/README.md): trusted quota assembly, persisted attempt IDs, restart recovery and explicit handling of unknown upstream execution.
+Upgrading does not automatically drop legacy receipt storage. Old Redis attempt
+keys and PostgreSQL admission tables/rows may remain; coordinate retirement of old
+writers, backups and explicit operator cleanup. See the [migration guide](docs/compatibility.md).
 
 ## Errors and observation
 
-Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`, `ErrConflict`,
+Use `errors.Is` for `ErrInvalid`, `ErrPolicyMismatch`, `ErrState`,
 `ErrBackend`, and wrapped context/transport errors. Admission
 errors expose `*pacelock.Error` with `Op` and `Outcome`:
 
@@ -401,8 +352,7 @@ errors expose `*pacelock.Error` with `Op` and `Outcome`:
 |---|---|---|
 | `Allowed=false`, no error | Quota denied; no quota debit | Reject or schedule a new attempt |
 | `NotCharged` error | This invocation is known not to debit | Fix input/policy, or handle cancellation |
-| `Unknown` error | May have charged; confirmation is unavailable | Query retained ID; use explicit recovery policy |
-| `Lookup`: missing | No retained complete result was found | Preserve uncertainty about previous execution |
+| `Unknown` error | May have charged; confirmation is unavailable | Do not blindly retry; apply explicit application failure policy |
 
 A `NotCharged` result never clears uncertainty from an earlier call. On **any**
 error, ignore the decision. `ErrState` alone does not mean no debit: a malformed
@@ -411,12 +361,10 @@ unrecognized errors.
 
 `Validate(rules...)` checks static bounds offline. `NewWithOptions` and
 `NewStaticWithOptions` accept a synchronous `Observer`: one event per
-dynamic/static admission or `Lookup`; constructors and `UpdateQuotas` emit none. Operation names are `allow`, `allow_once`,
-`wait`, `allow_static`, `allow_static_once`, `wait_static` and `lookup`. `StaticLimiter.Allow`
-/ `.AllowOnce` emit static operations. `Limiter.Wait` emits `wait` and
-`StaticLimiter.Wait` emits `wait_static`: one event for the whole call, not each
-internal attempt. Events expose counts, duration, result, replay,
-delay and error without raw names/IDs as fields. Errors can contain identifiers:
+dynamic/static admission; constructors and `UpdateQuotas` emit none. Operation names are
+`allow`, `wait`, `allow_static` and `wait_static`. Each Wait emits one event for the
+whole call, not each internal attempt. Events expose counts, duration, result,
+delay and error without raw names as fields. Errors can contain identifiers:
 never use them as metric labels. Callbacks must be fast and concurrency-safe;
 panics propagate.
 
@@ -444,7 +392,7 @@ panics propagate.
 - Use dedicated keys, primary routing, TLS/authentication and Redis `noeviction`.
   The Redis protocol uses a single commit command; crash/failover durability
   still depends on deployment.
-  Clock jumps, eviction and failover data loss can weaken limits and deduplication.
+  Clock jumps, eviction and failover data loss can weaken limits.
 
 See [operations and incident recovery](docs/operations.md),
 [design and proposed extensions](docs/design.md), and [compatibility](docs/compatibility.md).
@@ -454,7 +402,6 @@ See [operations and incident recovery](docs/operations.md),
 ```sh
 docker compose up -d --wait
 (cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
-(cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
 (cd examples/postgres && go run .)
 (cd examples/redis && go run . -redis localhost:16379)
 PACELOCK_REDIS_ADDR=localhost:16379 \
@@ -463,15 +410,14 @@ PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pa
 PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
 (cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 10s .)
-(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 10s .)
 docker compose down
 ```
 
 CI covers Go 1.26/stable, Redis 7.0/7/8, a three-master Cluster, and PostgreSQL 16/17/18.
-Shared contracts and PG rollback/commit-recovery tests run with race detection.
+Shared contracts and PG rollback/commit-loss tests run with race detection.
 The default suite includes synchronized bursts of 100/500/1000 callers, up to
-32 quota dimensions, weighted/shared quotas, tenant isolation, idempotency races,
-cancellation, pool exhaustion, lost-response recovery, and four-process contention.
+32 quota dimensions, weighted/shared quotas, tenant isolation,
+cancellation, pool exhaustion, lost-response accounting, and four-process contention.
 CI also repeats the concurrency suite three times with `-race` and randomized order.
 See [concurrency test contracts and reproduction](docs/concurrency-testing.md). Benchmark
 results depend on deployment; there is no universal throughput or failover SLO.

@@ -12,7 +12,7 @@ import (
 func BenchmarkStaticAdmission(b *testing.B) {
 	for _, n := range []int{1, 4, MaxRules} {
 		b.Run(fmt.Sprintf("quotas=%d", n), func(b *testing.B) {
-			driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+			driver := &testDriver{result: Decision{Allowed: true}}
 			quotas := make([]Quota, n)
 			charges := make([]Charge, n)
 			for i := range quotas {

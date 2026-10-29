@@ -1,8 +1,7 @@
 // Package pacelock provides distributed, weighted GCRA rate admission using Redis.
 //
-// Allow immediately admits known costs across named quotas. AllowOnce adds
-// bounded deduplication and Lookup recovers retained admission results. Neither
-// method queues work, owns concurrency, refunds capacity or bills usage.
+// Allow immediately admits known costs across named quotas. It never queues
+// work, owns concurrency, refunds capacity or bills usage.
 //
 // Use one namespace/domain for all quotas requiring atomic admission and explicitly
 // handle unknown debit outcomes. Built-in go-redis clients receive per-command
@@ -29,7 +28,6 @@ var (
 	ErrInvalid        = pacelock.ErrInvalid
 	ErrPolicyMismatch = pacelock.ErrPolicyMismatch
 	ErrState          = pacelock.ErrState
-	ErrConflict       = pacelock.ErrConflict
 	ErrBackend        = pacelock.ErrBackend
 )
 
@@ -90,7 +88,7 @@ func nilClient(client redis.Scripter) bool {
 	return false
 }
 
-// protocolSource contains shared quota and admission-record readers.
+// protocolSource contains shared quota and policy readers.
 //
 //go:embed protocol.lua
 var protocolSource string
@@ -124,7 +122,7 @@ func interval(r Rule) (int64, error) {
 // On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
 func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
 	finish := l.observe(ctx, "allow_static", len(rules))
-	defer func() { finish(decision, false, err) }()
+	defer func() { finish(decision, err) }()
 	if err := l.ready(ctx); err != nil {
 		return Decision{}, failure("allow_static", NotCharged, err)
 	}
@@ -167,12 +165,11 @@ func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 		return nil, nil, err
 	}
 	keys := make([]string, len(rules))
-	args := make([]interface{}, 0, 2+len(rules)*4)
-	args = append(args, int64(0), "")
+	args := make([]interface{}, 0, len(rules)*3)
 	for i, r := range rules {
 		step, _ := interval(r)
 		keys[i] = l.key(r.Name)
-		args = append(args, step, r.Policy.Burst, r.Cost, r.Name)
+		args = append(args, step, r.Policy.Burst, r.Cost)
 	}
 	for _, r := range rules {
 		if r.Policy.Revision != 0 {

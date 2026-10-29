@@ -36,15 +36,10 @@ func TestUpdateQuotasPublicValidation(t *testing.T) {
 
 func TestAdmissionOperationNames(t *testing.T) {
 	scope := pacelock.Scope{Namespace: "test", Domain: "q"}
-	for _, once := range []bool{false, true} {
+	{
 		dynamic := pacelock.Admission{Scope: scope, Charges: []pacelock.Charge{{Name: "q", Cost: 1}}}
 		static := pacelock.StaticAdmission{Scope: scope, Rules: []pacelock.Rule{{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: time.Second, Burst: 1}, Cost: 1}}}
 		dynamicOp, staticOp := "allow", "allow_static"
-		if once {
-			dynamic.ID, static.ID = "id", "id"
-			dynamic.Retention, static.Retention = time.Minute, time.Minute
-			dynamicOp, staticOp = "allow_once", "allow_static_once"
-		}
 		var driver *Driver
 		_, dynamicErr := driver.Admit(context.Background(), dynamic)
 		_, staticErr := driver.AdmitStatic(context.Background(), static)

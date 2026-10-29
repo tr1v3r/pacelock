@@ -59,91 +59,37 @@ func TestStaticDriverContract(t *testing.T) {
 	for _, backend := range boundBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
 			t.Run("atomic copied policies and shared static state", func(t *testing.T) { testBoundAtomic(t, backend) })
-			t.Run("idempotency and recovery", func(t *testing.T) { testBoundIdempotency(t, backend) })
 			t.Run("independent subset admissions", func(t *testing.T) { testBoundSubsets(t, backend) })
-			t.Run("subset idempotency", func(t *testing.T) { testBoundSubsetIdempotency(t, backend) })
 			t.Run("invalid subset is uncharged", func(t *testing.T) { testBoundInvalidCharges(t, backend) })
 			t.Run("constructor validation", func(t *testing.T) { testStaticConstructorValidation(t, backend) })
 			t.Run("blocking wait", func(t *testing.T) { testStaticWait(t, backend) })
 			t.Run("equivalent effective policies", func(t *testing.T) { testBoundEquivalentPolicies(t, backend) })
-			t.Run("concurrent admission and reordered retries", func(t *testing.T) { testBoundConcurrency(t, backend) })
+			t.Run("concurrent admission", func(t *testing.T) { testBoundConcurrency(t, backend) })
 		})
 	}
 }
 
 func testBoundSubsets(t *testing.T, backend backend) {
-	for _, once := range []bool{false, true} {
-		ctx := context.Background()
-		quotas := boundQuotas()
-		b := bind(t, limiter(t, backend, 0, freshDomain()), quotas...)
-		call := func(id string, charges ...pacelock.Charge) (pacelock.Decision, error) {
-			if once {
-				r, err := b.AllowOnce(ctx, id, time.Minute, charges...)
-				return r.Decision, err
-			}
-			return b.Allow(ctx, charges...)
-		}
-		if d, err := call("exhaust-rpm", quotaCharge(quotas[0], 2)); err != nil || !d.Allowed {
-			t.Fatalf("once=%t exhaust RPM: %+v %v", once, d, err)
-		}
-		if d, err := call("tokens-only", quotaCharge(quotas[1], 4)); err != nil || !d.Allowed {
-			t.Fatalf("omitted exhausted RPM blocked tokens: %+v %v", d, err)
-		}
-		if d, err := call("deny-rpm", quotaCharge(quotas[0], 1)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"rpm"}) {
-			t.Fatalf("selected denial: %+v %v", d, err)
-		}
-		if d, err := call("tokens-still-debited", quotaCharge(quotas[1], 2)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"tokens"}) {
-			t.Fatalf("later denial rolled back prior token debit: %+v %v", d, err)
-		}
-		if d, err := call("remaining-token", quotaCharge(quotas[1], 1)); err != nil || !d.Allowed {
-			t.Fatalf("omitted token was debited or denied call charged: %+v %v", d, err)
-		}
-	}
-}
-
-func testBoundSubsetIdempotency(t *testing.T, backend backend) {
 	ctx := context.Background()
-	l := limiter(t, backend, 0, freshDomain())
 	quotas := boundQuotas()
-	omitted := pacelock.Quota{Name: "omitted", Policy: quotas[0].Policy}
-	b := bind(t, l, quotas[0], omitted, quotas[1])
-	// An exhausted omitted quota must neither block admission nor enter its receipt.
-	if d, err := b.Allow(ctx, quotaCharge(omitted, 2)); err != nil || !d.Allowed {
-		t.Fatalf("exhaust omitted: %+v %v", d, err)
+	b := bind(t, limiter(t, backend, 0, freshDomain()), quotas...)
+	call := func(charges ...pacelock.Charge) (pacelock.Decision, error) {
+		return b.Allow(ctx, charges...)
 	}
-	first, err := b.AllowOnce(ctx, "subset", time.Minute, quotaCharge(quotas[1], 3), quotaCharge(quotas[0], 1))
-	if err != nil || !first.Allowed || first.Replayed {
-		t.Fatalf("subset admission: %+v %v", first, err)
+	if d, err := call(quotaCharge(quotas[0], 2)); err != nil || !d.Allowed {
+		t.Fatalf("exhaust RPM: %+v %v", d, err)
 	}
-	// Removing or changing only unselected binding entries cannot change identity.
-	omitted.Policy.Burst++
-	for _, other := range []*pacelock.StaticLimiter{b, bind(t, l, quotas...), bind(t, l, omitted, quotas[0], quotas[1])} {
-		r, err := other.AllowOnce(ctx, "subset", time.Minute, quotaCharge(quotas[0], 1), quotaCharge(quotas[1], 3))
-		if err != nil || !r.Replayed || !reflect.DeepEqual(r.Decision, first.Decision) {
-			t.Fatalf("canonical subset replay: %+v %v", r, err)
-		}
+	if d, err := call(quotaCharge(quotas[1], 4)); err != nil || !d.Allowed {
+		t.Fatalf("omitted exhausted RPM blocked tokens: %+v %v", d, err)
 	}
-	for _, selected := range [][]pacelock.Charge{
-		{quotaCharge(quotas[0], 1)},
-		{quotaCharge(quotas[1], 3)},
-		{quotaCharge(quotas[0], 1), quotaCharge((pacelock.Quota{Name: "omitted", Policy: quotas[0].Policy}), 1), quotaCharge(quotas[1], 3)},
-	} {
-		if _, err := b.AllowOnce(ctx, "subset", time.Minute, selected...); !errors.Is(err, pacelock.ErrConflict) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
-			t.Fatalf("changed subset must conflict without debit: %v", err)
-		}
+	if d, err := call(quotaCharge(quotas[0], 1)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"rpm"}) {
+		t.Fatalf("selected denial: %+v %v", d, err)
 	}
-	if r, err := l.allowRulesOnce(ctx, "subset", time.Minute, rule("rpm", 2, 1), rule("tokens", 5, 3)); err != nil || !r.Replayed {
-		t.Fatalf("selected-only fingerprint: %+v %v", r, err)
+	if d, err := call(quotaCharge(quotas[1], 2)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"tokens"}) {
+		t.Fatalf("later denial rolled back prior token debit: %+v %v", d, err)
 	}
-	if d, err := b.Allow(ctx, quotaCharge(quotas[1], 2), quotaCharge(quotas[0], 1)); err != nil || !d.Allowed {
-		t.Fatalf("replay/conflict debited subset: %+v %v", d, err)
-	}
-	denied, err := b.AllowOnce(ctx, "denied-subset", time.Minute, quotaCharge(quotas[1], 1))
-	if err != nil || denied.Allowed || denied.Replayed || !reflect.DeepEqual(denied.Limited, []string{"tokens"}) {
-		t.Fatalf("subset denial: %+v %v", denied, err)
-	}
-	if replay, err := b.AllowOnce(ctx, "denied-subset", time.Minute, quotaCharge(quotas[1], 1)); err != nil || !replay.Replayed || !reflect.DeepEqual(replay.Decision, denied.Decision) {
-		t.Fatalf("subset denial replay: %+v %v", replay, err)
+	if d, err := call(quotaCharge(quotas[1], 1)); err != nil || !d.Allowed {
+		t.Fatalf("omitted token was debited or denied call charged: %+v %v", d, err)
 	}
 }
 
@@ -175,61 +121,6 @@ func testBoundAtomic(t *testing.T, backend backend) {
 	mustAllow(t, l, rule("fresh", 2, 2))
 }
 
-func testBoundIdempotency(t *testing.T, backend backend) {
-	l := limiter(t, backend, 0, freshDomain())
-	originalQuotas := boundQuotas()
-	b := bind(t, l, originalQuotas...)
-	ctx := context.Background()
-	first, err := b.AllowOnce(ctx, "id", time.Minute, quotaCharge(originalQuotas[1], 3), quotaCharge(originalQuotas[0], 1))
-	if err != nil || !first.Allowed || first.Replayed {
-		t.Fatalf("%+v %v", first, err)
-	}
-	replay, err := b.AllowOnce(ctx, "id", time.Minute, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 3))
-	if err != nil || !replay.Replayed || !reflect.DeepEqual(first.Decision, replay.Decision) {
-		t.Fatalf("charge reordering changed attempt: %+v %v", replay, err)
-	}
-	quotas := boundQuotas()
-	quotas[0], quotas[1] = quotas[1], quotas[0]
-	reordered := bind(t, l, quotas...)
-	if _, err := reordered.AllowOnce(ctx, "id", time.Minute, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 3)); !errors.Is(err, pacelock.ErrConflict) {
-		t.Fatalf("changed binding order: %v", err)
-	}
-	quotas = boundQuotas()
-	quotas[0].Policy.Burst++
-	changedPolicy := bind(t, l, quotas...)
-	if _, err := changedPolicy.AllowOnce(ctx, "id", time.Minute, quotaCharge(quotas[0], 1), quotaCharge(quotas[1], 3)); !errors.Is(err, pacelock.ErrConflict) {
-		t.Fatalf("changed effective policy: %v", err)
-	}
-	if _, err := b.AllowOnce(ctx, "id", time.Minute, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 2)); !errors.Is(err, pacelock.ErrConflict) {
-		t.Fatalf("changed cost: %v", err)
-	}
-	if _, err := b.AllowOnce(ctx, "id", 2*time.Minute, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 3)); !errors.Is(err, pacelock.ErrConflict) {
-		t.Fatalf("changed retention: %v", err)
-	}
-	// Lookup is domain-scoped and does not require the original bound quota set.
-	if d, found, err := reordered.Lookup(ctx, "id"); err != nil || !found || !reflect.DeepEqual(d, first.Decision) {
-		t.Fatalf("lookup: %+v %t %v", d, found, err)
-	}
-	if _, found, err := b.Lookup(ctx, "missing"); err != nil || found {
-		t.Fatalf("missing lookup: %t %v", found, err)
-	}
-	// A fresh static instance uses the existing ordered rule fingerprint protocol.
-	if r, err := l.allowRulesOnce(ctx, "id", time.Minute, rule("rpm", 2, 1), rule("tokens", 5, 3)); err != nil || !r.Replayed {
-		t.Fatalf("low-level replay: %+v %v", r, err)
-	}
-	denied, err := b.AllowOnce(ctx, "denied", time.Minute, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 3))
-	if err != nil || denied.Allowed || denied.Replayed {
-		t.Fatalf("denied receipt: %+v %v", denied, err)
-	}
-	if r, err := b.AllowOnce(ctx, "denied", time.Minute, quotaCharge(originalQuotas[1], 3), quotaCharge(originalQuotas[0], 1)); err != nil || r.Allowed || !r.Replayed || !reflect.DeepEqual(r.Decision, denied.Decision) {
-		t.Fatalf("denial replay: %+v %v", r, err)
-	}
-	// A replay must not have consumed the one remaining request and two tokens.
-	if d, err := b.Allow(ctx, quotaCharge(originalQuotas[0], 1), quotaCharge(originalQuotas[1], 2)); err != nil || !d.Allowed {
-		t.Fatalf("replay debited quotas: %+v %v", d, err)
-	}
-}
-
 func testBoundInvalidCharges(t *testing.T, backend backend) {
 	cases := []struct {
 		name    string
@@ -244,8 +135,7 @@ func testBoundInvalidCharges(t *testing.T, backend backend) {
 		{"duplicate name", []pacelock.Charge{{Name: "tokens", Cost: 1}, {Name: "tokens", Cost: 1}}},
 	}
 	for _, tc := range cases {
-		for _, operation := range []string{"allow_static", "allow_static_once", "wait_static"} {
-			once := operation == "allow_static_once"
+		for _, operation := range []string{"allow_static", "wait_static"} {
 			t.Run(tc.name+"/"+operation, func(t *testing.T) {
 				ctx := context.Background()
 				quotas := boundQuotas()
@@ -254,9 +144,7 @@ func testBoundInvalidCharges(t *testing.T, backend backend) {
 				// even when no policy has yet been registered in the backend.
 				charges := tc.charges
 				var err error
-				if once {
-					_, err = b.AllowOnce(ctx, "rejected", time.Minute, charges...)
-				} else if operation == "wait_static" {
+				if operation == "wait_static" {
 					err = b.Wait(ctx, charges...)
 				} else {
 					_, err = b.Allow(ctx, charges...)
@@ -265,15 +153,7 @@ func testBoundInvalidCharges(t *testing.T, backend backend) {
 					t.Fatalf("local rejection: %v (outcome %v)", err, pacelock.OutcomeOf(err))
 				}
 				full := []pacelock.Charge{quotaCharge(quotas[0], 2), quotaCharge(quotas[1], 5)}
-				if once {
-					if _, found, err := b.Lookup(ctx, "rejected"); err != nil || found {
-						t.Fatalf("invalid admission retained a receipt: found=%t err=%v", found, err)
-					}
-					r, err := b.AllowOnce(ctx, "rejected", time.Minute, full...)
-					if err != nil || !r.Allowed || r.Replayed {
-						t.Fatalf("invalid admission debited or reserved its ID: %+v %v", r, err)
-					}
-				} else if d, err := b.Allow(ctx, full...); err != nil || !d.Allowed {
+				if d, err := b.Allow(ctx, full...); err != nil || !d.Allowed {
 					t.Fatalf("invalid admission debited quotas: %+v %v", d, err)
 				}
 				if d, err := b.Allow(ctx, quotaCharge(quotas[0], 1), quotaCharge(quotas[1], 1)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"rpm", "tokens"}) {
@@ -299,18 +179,11 @@ func testBoundEquivalentPolicies(t *testing.T, backend backend) {
 			// Construction snapshots policy values; charges carry only names and costs.
 			quota.Name = "mutated"
 			quota.Policy = pacelock.Policy{}
-			first, err := b.AllowOnce(ctx, "equivalent", time.Minute, charge)
-			if err != nil || !first.Allowed || first.Replayed {
-				t.Fatalf("charge snapshot: %+v %v", first, err)
+			if d, err := b.Allow(ctx, charge); err != nil || !d.Allowed {
+				t.Fatalf("charge snapshot: %+v %v", d, err)
 			}
-			for _, bound := range []*pacelock.StaticLimiter{b, other} {
-				replay, err := bound.AllowOnce(ctx, "equivalent", time.Minute, quotaCharge(equivalent, 1))
-				if err != nil || !replay.Replayed || !reflect.DeepEqual(replay.Decision, first.Decision) {
-					t.Fatalf("equivalent policy replay: %+v %v", replay, err)
-				}
-			}
-			if d, err := b.Allow(ctx, quotaCharge(equivalent, 2)); err != nil || !d.Allowed {
-				t.Fatalf("equivalent policy rejected or replay debited: %+v %v", d, err)
+			if d, err := other.Allow(ctx, quotaCharge(equivalent, 2)); err != nil || !d.Allowed {
+				t.Fatalf("equivalent policy rejected: %+v %v", d, err)
 			}
 			if d, err := other.Allow(ctx, quotaCharge(equivalent, 1)); err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"q"}) || d.RetryAfter <= 0 {
 				t.Fatalf("equivalent policies did not share quota state: %+v %v", d, err)
@@ -347,7 +220,11 @@ func testBoundConcurrency(t *testing.T, backend backend) {
 	}
 	var accepted atomic.Int64
 	wave(func(ctx context.Context, i int) {
-		d, err := bounds[i%2].Allow(ctx, charges...)
+		ordered := charges
+		if i%2 == 0 {
+			ordered = []pacelock.Charge{charges[1], charges[0]}
+		}
+		d, err := bounds[i%2].Allow(ctx, ordered...)
 		if err != nil {
 			t.Error(err)
 			return
@@ -358,28 +235,6 @@ func testBoundConcurrency(t *testing.T, backend backend) {
 	})
 	if accepted.Load() != 20 {
 		t.Fatalf("admitted %d, want 20", accepted.Load())
-	}
-	shared := bind(t, limiter(t, backend, 0, freshDomain()), quotas...)
-	var originals atomic.Int64
-	wave(func(ctx context.Context, i int) {
-		ordered := charges
-		if i%2 == 0 {
-			ordered = []pacelock.Charge{charges[1], charges[0]}
-		}
-		r, err := shared.AllowOnce(ctx, "shared-id", time.Minute, ordered...)
-		if err != nil || !r.Allowed {
-			t.Errorf("receipt=%+v err=%v", r, err)
-			return
-		}
-		if !r.Replayed {
-			originals.Add(1)
-		}
-	})
-	if originals.Load() != 1 {
-		t.Fatalf("original receipts=%d, want 1", originals.Load())
-	}
-	if d, err := shared.Allow(context.Background(), quotaCharge(quotas[0], 19), quotaCharge(quotas[1], 57)); err != nil || !d.Allowed {
-		t.Fatalf("concurrent replays debited more than once: %+v %v", d, err)
 	}
 }
 

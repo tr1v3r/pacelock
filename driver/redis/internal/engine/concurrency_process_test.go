@@ -16,7 +16,7 @@ import (
 // Launch the same race-instrumented test executable as four independent SDK
 // processes. A file barrier ensures all clients are connected before admission.
 func testContentionProcesses(t *testing.T, f *contentionFixture) {
-	for _, mode := range []string{"allow", "once"} {
+	for _, mode := range []string{"allow"} {
 		t.Run(mode, func(t *testing.T) {
 			l := f.limiter(t)
 			dir := t.TempDir()
@@ -88,16 +88,10 @@ func testContentionProcesses(t *testing.T, f *contentionFixture) {
 				total += count
 			}
 			want := int64(127)
-			if mode == "once" {
-				want = 1
-			}
 			if total != want {
 				t.Fatalf("cross-process admissions=%d, want %d", total, want)
 			}
 			burst := int64(127)
-			if mode == "once" {
-				burst = 1
-			}
 			requireDenied(t, l, contentionRule("q", burst, 1))
 		})
 	}
@@ -136,20 +130,11 @@ func TestConcurrencyProcessWorker(t *testing.T) {
 	}
 	var admitted atomic.Int64
 	contentionWave(t, 64, func(ctx context.Context, i int) {
-		if os.Getenv("PACELOCK_CONTENTION_MODE") == "once" {
-			d, err := l.AllowOnce(ctx, "shared", time.Minute, contentionRule("q", 1, 1))
-			if err != nil || !d.Allowed {
-				t.Errorf("%+v %v", d, err)
-			} else if !d.Replayed {
-				admitted.Add(1)
-			}
-		} else {
-			d, err := l.Allow(ctx, contentionRule("q", 127, 1))
-			if err != nil {
-				t.Error(err)
-			} else if d.Allowed {
-				admitted.Add(1)
-			}
+		d, err := l.Allow(ctx, contentionRule("q", 127, 1))
+		if err != nil {
+			t.Error(err)
+		} else if d.Allowed {
+			admitted.Add(1)
 		}
 	})
 	b, err := json.Marshal(admitted.Load())

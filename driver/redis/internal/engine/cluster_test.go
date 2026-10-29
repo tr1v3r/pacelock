@@ -47,7 +47,7 @@ func TestRedisCluster(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []string{l.key("rpm"), l.key("tokens"), l.attemptKey("id")} {
+		for _, k := range []string{l.key("rpm"), l.key("tokens"), l.policyKey("rpm")} {
 			keys = append(keys, k)
 			slot, err := c.ClusterKeySlot(ctx, k).Result()
 			if err != nil || slot != quotaSlot {
@@ -59,16 +59,9 @@ func TestRedisCluster(t *testing.T) {
 				seen[s.Nodes[0].Addr] = true
 			}
 		}
-		d, err := l.AllowOnce(ctx, "id", time.Minute, r...)
-		if err != nil || !d.Allowed || d.Replayed {
+		d, err := l.Allow(ctx, r...)
+		if err != nil || !d.Allowed {
 			t.Fatalf("%+v %v", d, err)
-		}
-		replay, err := l.AllowOnce(ctx, "id", time.Minute, r...)
-		if err != nil || !replay.Replayed {
-			t.Fatalf("%+v %v", replay, err)
-		}
-		if found, ok, err := l.Lookup(ctx, "id"); err != nil || !ok || !found.Allowed {
-			t.Fatalf("%+v %v %v", found, ok, err)
 		}
 		if d, err := l.Allow(ctx, r...); err != nil || !d.Allowed {
 			t.Fatalf("%+v %v", d, err)
@@ -85,7 +78,7 @@ func TestRedisCluster(t *testing.T) {
 	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1})
 	defer other.Close()
 	l2 := &Limiter{client: other, prefix: l.prefix}
-	keys = append(keys, l.key("q"), l.attemptKey("same"))
+	keys = append(keys, l.key("q"))
 	var first atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {
@@ -96,10 +89,10 @@ func TestRedisCluster(t *testing.T) {
 			if i%2 == 0 {
 				current = l2
 			}
-			d, err := current.AllowOnce(ctx, "same", time.Minute, rule("q", 1, 1))
-			if err != nil || !d.Allowed {
+			d, err := current.Allow(ctx, rule("q", 1, 1))
+			if err != nil {
 				t.Errorf("%+v %v", d, err)
-			} else if !d.Replayed {
+			} else if d.Allowed {
 				first.Add(1)
 			}
 		}(i)

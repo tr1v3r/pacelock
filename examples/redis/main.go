@@ -52,11 +52,17 @@ func main() {
 	// 1. Immediate admission: charge 1 request and 200 input tokens.
 	// Charges may select any nonempty subset, in any order.
 	d, err := limiter.Allow(ctx, pacelock.Charge{Name: tpm.Name, Cost: 200}, pacelock.Charge{Name: rpm.Name, Cost: 1})
-	fmt.Printf("Allow:     allowed=%v err=%v\n", d.Allowed, err)
+	if err != nil {
+		log.Fatalf("Allow failed (outcome=%v); do not blindly retry Unknown: %v", pacelock.OutcomeOf(err), err)
+	}
+	fmt.Printf("Allow:     allowed=%v\n", d.Allowed)
 
-	// 2. Denial is atomic and free: this burst only fits three heavy calls.
+	// 2. Denial is atomic and free: the remaining 800 tokens fit two heavy calls.
 	for i := 1; i <= 4; i++ {
 		d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tpm.Name, Cost: 400})
+		if err != nil {
+			log.Fatalf("heavy call failed (outcome=%v); stop without retry: %v", pacelock.OutcomeOf(err), err)
+		}
 		var retryAfter time.Duration
 		if err == nil && !d.Allowed {
 			retryAfter = d.RetryAfter
@@ -75,31 +81,9 @@ func main() {
 		pacelock.Charge{Name: tpm.Name, Cost: 200})
 	fmt.Printf("Wait:      err=%v elapsed=%v\n", err, time.Since(start).Round(time.Millisecond))
 
-	// 4. Idempotent admission: persist the attempt ID *before* dispatch.
-	// If the reply is lost, Lookup recovers the authoritative decision
-	// instead of double-charging on a blind retry.
-	attemptID := "order-4711"
-	receipt, err := limiter.AllowOnce(ctx, attemptID, time.Minute,
-		pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tpm.Name, Cost: 120})
-	fmt.Printf("AllowOnce: allowed=%v replayed=%v err=%v\n",
-		receipt.Allowed, receipt.Replayed, err)
-
-	// A replay with the same ID and same charges returns the retained
-	// decision (allows and denials alike) without debiting again.
-	replay, err := limiter.AllowOnce(ctx, attemptID, time.Minute,
-		pacelock.Charge{Name: tpm.Name, Cost: 120}, pacelock.Charge{Name: rpm.Name, Cost: 1})
-	fmt.Printf("Replay:    allowed=%v replayed=%v err=%v\n",
-		replay.Allowed, replay.Replayed, err)
-
-	// 5. Recovery: reconstruct a lost reply from retained state.
-	if d, found, err := limiter.Lookup(ctx, attemptID); err == nil && found {
-		fmt.Printf("Lookup:    found allowed=%v retry_after=%v\n", d.Allowed, d.RetryAfter)
-	}
-
-	// 6. Error accounting: failures classify as NotCharged (certainly no
-	// debit) or Unknown (cannot rule one out); never assume NotCharged.
-	if _, err := limiter.AllowOnce(ctx, "", time.Minute, pacelock.Charge{Name: rpm.Name, Cost: 1}); err != nil {
-		fmt.Printf("Invalid:   outcome=%v is_invalid=%v\n",
-			pacelock.OutcomeOf(err), errors.Is(err, pacelock.ErrInvalid))
+	// Unknown means a debit cannot be ruled out. Do not blindly retry it.
+	// Wait retries confirmed capacity denials only; it stops on every error.
+	if _, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 0}); err != nil {
+		fmt.Printf("Invalid: outcome=%v is_invalid=%v\n", pacelock.OutcomeOf(err), errors.Is(err, pacelock.ErrInvalid))
 	}
 }
