@@ -3,7 +3,7 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
-unformatted=$(gofmt -l .)
+unformatted=$(gofmt -s -l .)
 if [ -n "$unformatted" ]; then
     printf '%s\n' "$unformatted"
     exit 1
