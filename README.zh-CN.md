@@ -288,6 +288,7 @@ docker compose up -d --wait
 (cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/llm)
 (cd driver/redis && REDIS_ADDR=localhost:16379 go run ./examples/idempotency)
 (cd examples/postgres && go run .)
+(cd examples/redis && go run . -redis localhost:16379)
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
