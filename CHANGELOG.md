@@ -32,6 +32,19 @@
 - Migrate shared backend contracts, runnable examples and bilingual documentation;
   retain rollback, commit-loss, concurrency, cancellation and Unknown coverage.
 
+### Redis dynamic format numbering
+
+- Number the first dynamic storage format D1/P1: all new debt writes use D1;
+  new policies and higher-revision publications use P1. Marker `1` is independent
+  of the positive, monotonically increasing `Policy.Revision`.
+- Keep strict read-only compatibility for D3/P3 and old tuple debt. Reads do not
+  migrate state; equivalent same-revision updates remain no-write successes and
+  leave P3 unchanged. The next allowed admission writes D1, preserving existing debt.
+- Stop all old binaries, including maintenance, before marker migration: D3/P3-only
+  readers cannot read D1/P1. No mixed old/new writers, resets, renames or deletions
+  to migrate. Permanent revision fences and historical receipt data remain intact.
+  See [migration](docs/compatibility.md#redis-state).
+
 ### Maintenance
 
 - Align security/contribution guidance and error/prune comments with dynamic-only

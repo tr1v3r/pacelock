@@ -219,10 +219,18 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
   not read, rescale, reset or shorten the lifetime of TAT. Admission
   reads current configuration and debt under the same atomic boundary. Outstanding
   debt exceeding a newly reduced burst is retained until natural recovery.
-- Redis uses one persistent P3 configuration key and one D3 debt key per managed
+- Redis uses one persistent P1 configuration key and one D1 debt key per managed
   quota, all explicit and in the same slot. `Allow` is one script roundtrip,
   not a client-side GET followed by a write. PostgreSQL uses a separate policies
   table and the existing scope transaction lock. No distributed-lock key is needed.
+- D1/P1 number the first dynamic storage format, not `Policy.Revision` (still
+  positive and monotonic). D3/P3 and old tuple debt have strict read-only
+  compatibility. Equivalent same-revision updates leave P3 unchanged; new policies
+  or higher revisions write P1, and the next allowed debt write uses D1.
+  **Stop old binaries before marker migration**: D3/P3-only readers cannot read
+  D1/P1. Upgrade readers, writers and maintenance before resuming; no mixed old/new
+  writers or resets/deletions to migrate. Preserve revision fences and old receipts.
+  See [Redis migration](docs/compatibility.md#redis-state).
 - `Rate=0` requires positive Period and Burst. Fresh admission returns `ErrPaused`
   / `NotCharged` without a debit. Missing configuration returns
   `ErrPolicyMissing`, never unlimited admission. Cost above current burst is

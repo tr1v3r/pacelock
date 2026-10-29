@@ -22,7 +22,7 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 默认 `New` 构造动态 Limiter。控制面以 `UpdateQuotas` 发布正数且单调递增的 Revision，最大 9007199254740991；数据面只发送 `Charge{Name, Cost}`。同版本同有效策略只读成功，旧版本或同版本冲突返回 `ErrPolicyMismatch`。更新不读取、重置、重标定或缩短旧债务；缩小 Burst 后超过容量的债务继续自然恢复。`Rate=0` 暂停，准入返回 `ErrPaused` / `NotCharged`；缺失配置返回 `ErrPolicyMissing`，不默认无限额度。
 
-配置可以写在代码中，但必须先显式发布。后端权威执行支持新旧 pod 滚动共存；旧配置发布被拒绝时须明确处理或上报，不能吞掉所有错误。回滚以更高版本发布旧参数。每次选中额度的 `Decision.Limited` 按请求 Charge 顺序返回；多次调用合起来不具备原子性。
+配置可以写在代码中，但必须先显式发布。后端权威执行支持存储协议兼容的新旧 pod 滚动共存（不包括新旧标记二进制混用）；旧配置发布被拒绝时须明确处理或上报，不能吞掉所有错误。回滚以更高版本发布旧参数。每次选中额度的 `Decision.Limited` 按请求 Charge 顺序返回；多次调用合起来不具备原子性。
 
 安装策略前必须退役旧静态写入者或停止其静态路径。PostgreSQL 先显式 Migrate，再让新版进程处理流量。迁移保留旧债务与历史回执，不自动清空状态。
 
@@ -41,7 +41,7 @@ allowed   = 所有选中额度的 retry 均为 0
 
 Period 和 Burst × I 最多 24 小时。GCRA 是速率/突发包络，不是精确固定或滑动窗口计数器。已知输入 token 不控制未知输出 token；字符、字节、SSE chunk 不是 token。
 
-Redis 在同槽 Lua 中读取 TIME、配置和债务，校验并完成编码后以一次 MSET 提交全部通过的额度。兼容读取历史债务格式 `tat:interval:burst`，动态债务使用 `D3|tat`，永久配置使用 `P3|interval:burst:revision`。债务在 `tat <= now` 逻辑过期；MSET 不配置原生 TTL，应用调度有界 Prune 清理，永久配置和版本栅栏不删除。详见[Redis 指南](../driver/redis/README.zh-CN.md)。
+Redis 在同槽 Lua 中读取 TIME、配置和债务，校验并完成编码后以一次 MSET 提交全部通过的额度。新债务使用 `D1|tat`，新策略或更高 revision 写入永久配置 `P1|interval:burst:revision`。D3/P3 与历史债务格式 `tat:interval:burst` 保留严格只读兼容；同版本同有效策略仍不写入，P3 保持不变，下次成功准入才写 D1 债务。标记 `1` 表示首个动态格式，不是仍须正数且单调递增的 `Policy.Revision`。标记迁移前须停止全部旧二进制（含维护进程）：D3/P3-only reader 无法读取 D1/P1，禁止混用新旧 writer，不能通过重置、改名或删键迁移。债务在 `tat <= now` 逻辑过期；MSET 不配置原生 TTL，应用调度有界 Prune 清理，永久配置和版本栅栏不删除。详见[Redis 指南](../driver/redis/README.zh-CN.md)。
 
 PostgreSQL 锁定 domain 行后采样 clock_timestamp，在短事务内读取与写入全部额度；确认回滚为 NotCharged，提交丢响应为 Unknown。它不加入业务事务。后端之间不自动迁移债务，不提供联合事务或自动故障切换。
 

@@ -78,8 +78,14 @@ dropped. See [migration and cleanup](compatibility.md).
 
 - `driver/redis`: go-redis transport, single-command MSET commit, logical expiry,
   bounded cursor cleanup and guarded command replay/Cluster redirects. Keys use
-  `pacelock:{scope_hash}:`; debt uses `D3|tat` (legacy `tat:interval:burst` remains readable),
-  policy uses `P3|interval:burst:revision`, and debt expires at `tat <= now`. See its guide.
+  `pacelock:{scope_hash}:`; new debt writes use `D1|tat`, new policy writes use
+  `P1|interval:burst:revision`. D3/P3 and legacy `tat:interval:burst` debt have strict
+  read-only compatibility; debt expires at `tat <= now`. Marker `1` is not the
+  positive monotonic policy revision. Same-revision equivalent updates leave P3
+  unchanged; higher revisions/new policies write P1, next allowed debt writes D1.
+  Stop all old binaries before marker migration: D3/P3-only readers cannot read
+  D1/P1. No mixed old/new writers or reset/deletion migration; preserve permanent
+  fences and receipts. See [Redis migration](compatibility.md#redis-state).
 - `driver/postgres`: database/sql primary handle, explicit `Migrate`, one locked
   domain row and short Read Committed transactions. `Prune` is optional bounded
   maintenance; no worker starts automatically. Run `Migrate` before upgraded binaries

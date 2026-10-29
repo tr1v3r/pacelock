@@ -1,7 +1,7 @@
 // Package redisdriver implements Pacelock atomic admission using Redis Lua.
 // It commits quotas in one MSET, with logical expiry and
-// caller-scheduled bounded cleanup. Policies and debt use P3 and D3
-// respectively; legacy tuple debt remains readable for upgrades. One domain
+// caller-scheduled bounded cleanup. New policies and debt use P1 and D1
+// respectively; P3/D3 and legacy tuple debt remain readable for upgrades. One domain
 // occupies one Redis Cluster hash slot; transport commands prevent ambiguous replay.
 package redisdriver
 

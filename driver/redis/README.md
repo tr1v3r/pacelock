@@ -89,32 +89,41 @@ No queue, worker, background goroutine, fairness or refund is added. Use a conte
 deadline; see [blocking admission](../../README.md#blocking-admission).
 
 Configuration and debt are separate. The same-slot `policy:<name_hash>` key holds
-permanent `P3|interval_us:burst:revision` (zero interval means paused). Updates read
+permanent `P1|interval_us:burst:revision` (zero interval means paused). Updates read
 and change only configuration, never debt or its expiry; same-revision equivalent
-updates perform no write. Existing quota keys hold managed debt as `D3|tat_us`,
-with legacy tuple debts still readable for upgrade. Prune reclaims expired debt but validates and
-retains configuration forever. Memory therefore includes all configured names;
-there is no automatic policy retirement/reset.
+updates perform no write, so an equivalent publication leaves an existing P3 value
+unchanged. New policies and higher-revision updates write P1. Existing quota keys
+hold managed debt as `D1|tat_us`; D3 debt, P3 policies and legacy tuple debt remain
+strictly validated, read-only compatibility formats. Reading does not rewrite them.
+Prune reclaims expired debt but validates and retains configuration and its revision
+fence forever. Memory therefore includes all configured names; there is no automatic
+policy retirement/reset. The `1` in D1/P1 numbers the first dynamic storage format,
+not `Policy.Revision`, which remains positive and monotonically increasing.
 
-Deploy protocol-aware binaries to **every reader, writer and maintenance process
-before activation**: older writers do not check configuration keys and can bypass
-policy. Mixed-version activation and unconverted rollback are unsupported. Idle or
-pruning does not make rollback safe. Callers own configuration polling/publication;
-the SDK starts no worker. See the [runnable managed example](examples/managed/main.go).
+**Stop old binaries before marker migration**, including every old reader, writer
+and maintenance process. D3/P3-only readers cannot read newly written D1/P1 values;
+older static writers can also bypass configuration. Do not mix old/new writers or
+reset, rename or delete keys to migrate. Deploy protocol-aware binaries everywhere
+before resuming traffic or policy publication. Mixed-version activation and
+unconverted rollback are unsupported; idle time or pruning does not make rollback
+safe. Preserve old receipt data separately. Callers own configuration
+polling/publication; the SDK starts no worker. See the
+[runnable managed example](examples/managed/main.go).
 
 ## Logical expiry and bounded physical cleanup
 
 Keys use `pacelock:{scope_hash}:...`. Values use:
 
 ```text
-quota:   D3|tat_us (all new writes)
-legacy:  tat_us:interval_us:burst (read-only upgrade compatibility)
-policy:  P3|interval_us:burst:revision (separate same-slot key)
+quota:   D1|tat_us (all new debt writes)
+policy:  P1|interval_us:burst:revision (all new policy writes; separate same-slot key)
+legacy:  D3|tat_us / tat_us:interval_us:burst (strict read-only debt compatibility)
+legacy:  P3|interval_us:burst:revision (strict read-only policy compatibility)
 ```
 
 Debt logically expires at TAT, when capacity is fully replenished. Policy identity
-never expires. Legacy tuple debt is preserved, not reset on policy publication;
-the next successful admission writes D3. Every admission requires policy keys.
+never expires. D3 and legacy tuple debt are preserved, not reset on policy publication;
+the next successful admission writes D1. Every admission requires policy keys.
 The Lua protocol is `KEYS = [N debt keys, N policy keys]`, `ARGV = [N costs]`;
 there is no mode selector or caller-supplied interval/burst.
 These encodings are internal; applications must not construct them. Malformed
@@ -163,7 +172,7 @@ for step := 0; step < 8; step++ {
 ## Upgrading from retained admissions
 
 Admission IDs, retention, receipts and recovery queries are no longer supported.
-Quota keys and existing debt remain readable; new debt writes use D3. Do not
+Quota keys and existing debt remain readable; new debt writes use D1. Do not
 reset or rename keys. Existing `:attempt:` keys are ignored by admission and
 excluded from `Prune` discovery, including expired or malformed records. They
 are **not** automatically deleted, and persistent legacy records can occupy memory.

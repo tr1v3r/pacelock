@@ -18,7 +18,7 @@ for i = 1, #KEYS do
     end
     if changed then
         writes[#writes + 1] = KEYS[i]
-        writes[#writes + 1] = string.format('P3|%s:%s:%s', ARGV[offset + 1], ARGV[offset + 2], ARGV[offset + 3])
+        writes[#writes + 1] = string.format('P1|%s:%s:%s', ARGV[offset + 1], ARGV[offset + 2], ARGV[offset + 3])
     end
 end
 if #writes > 0 then

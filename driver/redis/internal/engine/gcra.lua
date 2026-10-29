@@ -40,7 +40,7 @@ for i = 1, count do
     local nexttat = tat + cost * step
     local wait = math.max(0, nexttat - burst * step - now)
     writes[#writes + 1] = KEYS[i]
-    writes[#writes + 1] = string.format('D3|%.0f', nexttat)
+    writes[#writes + 1] = string.format('D1|%.0f', nexttat)
     result[i + 2] = 0
     if wait > 0 then
         result[1] = 0

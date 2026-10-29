@@ -78,7 +78,7 @@ func TestRedisUpdateLostReplyNoRetry(t *testing.T) {
 			if !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown || loss.dropped.Load() != 1 {
 				t.Fatalf("lost reply: %v drops=%d", err, loss.dropped.Load())
 			}
-			if got := c.Get(ctx, l.policyKey("q")).Val(); got != "P3|3600000000:1:1" {
+			if got := c.Get(ctx, l.policyKey("q")).Val(); got != "P1|3600000000:1:1" {
 				t.Fatalf("commit absent: %s", got)
 			}
 			if err = l.UpdateQuotas(ctx, quotaOf(r)); err != nil {

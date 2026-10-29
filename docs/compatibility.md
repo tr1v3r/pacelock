@@ -99,9 +99,22 @@ older API. A stable tag remains a separate, explicitly authorized release decisi
 ## Redis state
 
 Keys use scope hash tags so jointly admitted quotas share one Cluster slot.
-Legacy debt uses `tat:interval:burst`, dynamic debt uses `D3|tat`, and permanent
-configuration uses `P3|interval:burst:revision`. These are internal formats, not
-application APIs; see the [Redis guide](../driver/redis/README.md).
+All new debt writes use `D1|tat`; new policies and higher-revision updates use
+`P1|interval:burst:revision`. D1/P1 name the first dynamic storage format; marker
+`1` is not `Policy.Revision`, which remains positive and monotonically increasing.
+Strict read-only compatibility accepts D3 debt, P3 policies and the old
+`tat:interval:burst` debt tuple. Reads do not rewrite values. An equivalent
+same-revision update still performs no write, leaving P3 unchanged; the next
+allowed admission writes D1 debt without resetting the existing TAT.
+These are internal formats, not application APIs; see the
+[Redis guide](../driver/redis/README.md).
+
+**Stop old binaries before marker migration**, including readers, writers and
+maintenance processes. An old D3/P3-only reader cannot read new D1/P1 values.
+Do not mix old/new writers: upgrade every process before resuming traffic or
+policy publication. Do not reset, rename or delete keys to migrate; permanent
+revision fences and old receipt data must remain intact. Idle time and pruning
+do not make an unconverted rollback safe.
 
 Debt logically expires at `tat <= now`, independently of physical cleanup. A
 single MSET commits admitted quota debt. Current admission does not read or write
@@ -118,7 +131,8 @@ Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening
 with `ErrPolicyMissing`.
 
 Configuration can remain in code, while execution is backend-authoritative. This
-supports rolling pods using the same quota names: older pods' charges use the
+supports rolling pods using the same quota names and compatible storage readers
+(not mixed old/new marker binaries): older pods' charges use the
 latest backend policy. Stale publication still fails; explicitly handle or surface
 `ErrPolicyMismatch` rather than swallowing all update errors. Rollback publishes
 old parameters at a higher revision. Renaming quotas or deleting state creates

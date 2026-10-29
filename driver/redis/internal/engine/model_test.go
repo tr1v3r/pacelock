@@ -60,7 +60,7 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 					base += offset
 				}
 				step := r.Policy.Period.Microseconds()
-				want := fmt.Sprintf("D3|%d", base+step)
+				want := fmt.Sprintf("D1|%d", base+step)
 				if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != want {
 					t.Fatalf("quota=%q want=%q", raw, want)
 				}
@@ -193,7 +193,7 @@ return {decision, states, expiries, writes}
 			state, stateOK := states[i].(string)
 			expected := before[i]
 			if want.Allowed {
-				expected = fmt.Sprintf("D3|%d", candidates[i])
+				expected = fmt.Sprintf("D1|%d", candidates[i])
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
@@ -206,7 +206,7 @@ return {decision, states, expiries, writes}
 		if want.Allowed {
 			command := []interface{}{"MSET"}
 			for i := range rules {
-				command = append(command, keys[i], fmt.Sprintf("D3|%d", candidates[i]))
+				command = append(command, keys[i], fmt.Sprintf("D1|%d", candidates[i]))
 			}
 			expectedWrites = append(expectedWrites, command)
 		}

@@ -170,7 +170,8 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 
 - 版本来自同一个权威配置源，不能由各进程独立递增。多实例可重复发布同一批配置：高版本生效，同版本同有效策略只读成功，旧版本或同版本冲突返回 `ErrPolicyMismatch`。回滚需以**更高版本**发布旧参数。同 scope 内最多 `MaxRules` 条配置原子更新。
 - 额度配置变更不会补充容量或重置债务。更新不读取、不重标定、不清零 TAT，也不缩短已有债务寿命。准入在同一原子边界内读取当前配置和债务；旧债超过新 burst 时，保留到自然恢复。
-- Redis 每个动态 quota 使用永久 P3 配置 key 与 D3 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
+- Redis 每个动态 quota 使用永久 P1 配置 key 与 D1 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
+- D1/P1 的 `1` 表示首个动态存储格式，不是 `Policy.Revision`（仍为正数且单调递增）。D3/P3 与旧 tuple 债务保留严格只读兼容；同版本同有效策略不写入，P3 保持不变；新策略或更高版本写 P1，下次允许的债务写入使用 D1。**标记迁移前先停止旧二进制**：仅支持 D3/P3 的旧 reader 读不了 D1/P1。读取、写入及维护进程全部升级后再恢复，不能混用新旧 writer，也不能通过重置或删键迁移；永久版本栅栏与历史回执仍需保留。详见[Redis 迁移](docs/compatibility.md#redis-state)。
 - `Rate=0` 时仍要求正的 Period 和 Burst。新准入返回 `ErrPaused` / `NotCharged`，不扣减。配置不存在返回 `ErrPolicyMissing`，不能默认无限额度。cost 超过当前 burst 返回 `ErrInvalid`。动态 `Wait` 遇到这些错误立即停止，不等待策略变更。配置发布与配置源轮询由应用负责，SDK 不启动轮询 goroutine。
 - `Prune` 可以清理过期债务，但绝不删除配置/版本。需规划配置名称基数；删除配置会丢失版本防护。所有动态发布都应走 SDK/版本检查脚本，不能裸 SET。
 - PostgreSQL 必须在新版请求进程接流量前显式 `Migrate`。安装策略前必须退役旧静态写入者或停止其静态路径；迁移保留旧债务和历史回执，并不会让旧写入程序自动兼容。
