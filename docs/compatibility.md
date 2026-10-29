@@ -2,53 +2,49 @@
 
 ## Dynamic-default API migration (breaking pre-v1)
 
-- Default `Allow(ctx, ...Charge{Name, Cost})` and `AllowOnce(ctx, id, retention, ...Charge)`
-  resolve backend policies. First publish `Quota{Name, Policy{Revision: 1, ...}}` through
-  `UpdateQuotas`; request nodes do not refresh policies or carry revisions.
-- Former dynamic `AllowManaged` / `AllowManagedOnce` become `Allow` / `AllowOnce`;
-  `NamedCharge` becomes public name/cost `Charge`. The old names are removed.
-- Static admission now uses standalone constructors:
-  `NewStatic(driver, namespace, domain, quotas...)` or
-  `NewStaticWithOptions(driver, namespace, domain, options, quotas...)`.
-  They validate/copy fixed Revision-0 quotas without backend I/O or a parent limiter.
-  `StaticLimiter` provides `Allow`, `AllowOnce`, `Wait`, `Lookup`.
-- Remove former `Bind` / `BindStatic` construction and captured-policy
-  `Quota.Charge` / `Quota.StaticCharge` / `StaticCharge` use. Pass public
-  `Charge{Name, Cost}` to static admission instead. The former rule-taking
-  `Limiter.AllowStatic`, `AllowStaticOnce`, `WaitStatic` methods are removed;
-  migrate to the corresponding `StaticLimiter` methods. `Rule` remains for
-  low-level `StaticAdmission` and pure `Validate` / `Evaluate` helpers.
-- Static calls preserve nonempty-subset semantics: selected names must be unique,
-  known and have `0 < Cost <= Burst`; omitted quotas are not checked or charged.
-  Selected quotas retain construction/binding order for decisions and fingerprints.
-  Fingerprints bind selected names/order/effective policies/costs/retention only;
-  unchanged effective calls preserve retained results. `Wait` snapshots charges,
-  retries ordinary denial only, stops on every error and emits one observation.
-- Dynamic `Driver.Admit(Admission)` is mandatory (`ManagedAdmission` → `Admission`).
-  Static support moves to optional `StaticDriver.AdmitStatic(StaticAdmission)`;
-  `Lookup` is shared. Update custom drivers too.
-- `Limiter.UpdatePolicies` and driver `UpdatePolicies` become `UpdateQuotas`;
-  `PolicyDriver` becomes `QuotaDriver`, and `PolicyUpdate` becomes `QuotaUpdate`.
-  The old public names are removed. The `Policy` type and pure `ApplyPolicies`
-  helper keep their names. Configuration changes do not refill capacity or
-  reset/rescale debt: absolute TAT and retained receipts remain unchanged.
-- Both dynamic `Limiter` and `StaticLimiter` now expose `Wait(ctx, charges...) error`.
-  Dynamic Wait copies charges once before dispatch, not policies: each ordinary
-  attempt atomically uses the latest backend policy. Only valid capacity denials
-  retry after advisory `RetryAfter`; every error stops, including paused/missing
-  policies, a new Burst below Cost and transport errors even when `NotCharged`.
-  Between-attempt cancellation is `NotCharged`; in-flight uncertainty and confirmed
-  success are preserved. One `wait` or `wait_static` event covers the complete call.
-  Attempts have an empty ID and zero retention, without receipts or automatic Lookup.
-  Updates do not proactively wake sleepers, so an earlier delay can postpone use of
-  relaxed policy. No automatic policy watcher is added. Pure `Evaluate` and
-  `EvaluateManaged` remain available; the API rename itself does not reset debt.
+- `New` / `NewWithOptions` construct dynamic `Limiter`; publish versioned `Quota`
+  values with `UpdateQuotas` before name/cost admission.
+- The sole `Limiter` exposes `Allow(ctx, ...Charge) (Decision, error)`,
+  `Wait(ctx, ...Charge) error` and `UpdateQuotas`. Charges select a nonempty set;
+  omitted quotas are not checked or charged. Limited names follow charge order.
+- Removed static APIs: `StaticLimiter`, `NewStatic`, `NewStaticWithOptions`,
+  `StaticDriver`, `StaticAdmission`, `ValidateStatic` and backend static paths.
+- Removed: `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`, admission
+  `ID`/`Retention`/`Fingerprint`, and `Event.Replayed`. There are no compatibility
+  aliases or retained-result recovery methods. Every admission can consume again.
+- `Driver.Admit(ctx, Admission) (Decision, error)` is unchanged; `Admission` has
+  only `Scope` + `Charges`. Remove static/lookup implementations and receipt/replay
+  processing. `QuotaDriver.UpdateQuotas` publishes configuration explicitly.
+- Earlier renames still apply: `AllowManaged` → `Allow`, `NamedCharge` → `Charge`,
+  `UpdatePolicies` → `UpdateQuotas`, `PolicyDriver` → `QuotaDriver`,
+  `PolicyUpdate` → `QuotaUpdate`. Replace `Bind` / `BindStatic` and rule-taking
+  limiter methods with explicit publication and dynamic name/cost admission. `Rule`, `Policy`, `Validate`,
+  `Evaluate`, `EvaluateManaged` and `ApplyPolicies` remain pure-helper vocabulary.
+- Dynamic Wait is preserved: snapshot charges once, resolve the latest backend
+  policy on every attempt, retry only confirmed capacity denials after RetryAfter.
+  Every error stops, including Unknown and transport errors classified NotCharged.
+  Cancellation between attempts is NotCharged; in-flight certainty and confirmed
+  success are preserved. One event covers the whole call. No queue, worker, fairness,
+  capacity reservation, refund or configuration watcher is added.
+
+**Do not blindly retry Unknown.** A mutation may already have committed, and there
+is no SDK recovery API to determine its result. Admission is not business execution
+coordination, exactly-once delivery, billing or a refund ledger.
+
+### Existing installations and legacy receipts
+
+The API removal does not reset quota debt or automatically drop legacy receipt
+storage. PostgreSQL `Migrate` preserves existing legacy admissions tables/rows;
+new installations need no receipt table. Old Redis attempt keys may remain and
+must not be assumed to disappear through current quota maintenance. Retire old
+writers first, back up as required, and explicitly plan operator-owned cleanup
+of obsolete receipt storage without deleting active debt or permanent policy fences.
+Do not run old receipt-writing clients alongside new clients expecting deduplication.
 
 For PostgreSQL: **Migrate → upgrade all binaries → activate configuration**. Run
-`Migrate` before upgraded binaries serve even static traffic. For either backend,
-upgrade every writer/maintenance process before publishing dynamic policies; old
-writers can bypass configuration. Mixed activation and unconverted rollback are unsupported.
-
+Migrate before upgraded binaries serve traffic. Retire old static writers or stop
+their static path before installing policies; old writers can bypass configuration.
+Upgrade maintenance processes too. Mixed activation and unconverted rollback are unsupported.
 
 ## Supported contract
 
@@ -74,8 +70,7 @@ caller. No background goroutines, queues, implicit retry loop or package-global
 quota configuration are introduced.
 
 The public API is pre-v1. Construct a Redis or PostgreSQL `Driver` explicitly,
-then pass it to `New` / `NewWithOptions` for dynamic admission or `NewStatic` /
-`NewStaticWithOptions` for fixed policies. The core has no backend dependency.
+then pass it to `New` / `NewWithOptions` for dynamic admission. The core has no backend dependency.
 Typed-nil clients and nil contexts return `ErrInvalid`. Check errors with
 `errors.Is/As` and accounting certainty with `OutcomeOf`, not string matching.
 
@@ -103,39 +98,15 @@ older API. A stable tag remains a separate, explicitly authorized release decisi
 
 ## Redis state
 
-Keys use a scope hash tag and separate quota/receipt suffixes:
+Keys use scope hash tags so jointly admitted quotas share one Cluster slot.
+Legacy debt uses `tat:interval:burst`, dynamic debt uses `D3|tat`, and permanent
+configuration uses `P3|interval:burst:revision`. These are internal formats, not
+application APIs; see the [Redis guide](../driver/redis/README.md).
 
-```text
-pacelock:{domain_digest}:quota_digest
-pacelock:{domain_digest}:attempt:sha256(admission_id)
-```
-
-The state formats are:
-
-```text
-TAT_microseconds:effective_interval_microseconds:Burst (static debt)
-D3|TAT_microseconds (dynamic debt)
-P3|effective_interval_microseconds:Burst:Revision (permanent dynamic configuration)
-expires_at_microseconds|fingerprint|{"names":[...],"values":[allowed,retry_us,blocked_flags...]}
-```
-
-Debt logically expires when `tat <= now`, regardless of native TTL. Active static
-quotas require matching effective interval and burst; dynamic policy identity never
-expires. Complete-result expiry equals admission Redis time plus retention.
-One MSET commits admitted quotas and the complete receipt, clearing native TTLs;
-physical removal requires explicit bounded cleanup. Replays and lookups do not
-change either deadline. Static fingerprints use `[retention_ms,step,burst,cost,name,...]`,
-without an empty placeholder. Dynamic fingerprints bind ordered names/costs and
-retention, not revisions, with a distinct managed-admission-v1 discriminator.
-Removed Q2/E2/C1/P1 formats are not accepted.
-
-Malformed receipts return `ErrState` / `Unknown`, never missing or permission to
-admit again. Prune parses candidates by key role, validates the entire batch before
-one DEL, removes only expired debts/receipts, and permanently retains valid policy
-configuration. Malformed or wrong-role candidates fail without deleting anything.
-
-These are internal formats, not application APIs. See the bilingual Redis guides
-for cleanup cursor semantics, ACLs and operational limits.
+Debt logically expires at `tat <= now`, independently of physical cleanup. A
+single MSET commits admitted quota debt. Current admission does not read or write
+legacy attempt records. Prune must preserve permanent configuration and revision
+fences; follow the driver's current cleanup contract rather than old receipt-era tools.
 
 ## Policy changes
 
@@ -143,30 +114,20 @@ Default dynamic policy changes use `UpdateQuotas` with monotonically increasing
 positive revisions (maximum 9007199254740991). Equivalent same-revision publications
 are read-only successes; stale/conflicting publications return `ErrPolicyMismatch`.
 Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening.
-`Rate=0` pauses; resume or roll back parameters at a higher revision. Retained
-receipts replay before current configuration checks. Missing policy fails closed,
-and static admission cannot bypass configured policies.
+`Rate=0` pauses; resume or roll back parameters at a higher revision. Missing policy fails closed,
+with `ErrPolicyMissing`.
 
-For the explicit Revision-0 static alternative, active policy mismatch rejects
-before quota mutation. Coordinate static policy changes
-across callers. Either wait for the old quota to replenish and expire while
-coordinating traffic, or design an explicit debt-preserving migration outside this
-SDK. Renaming a quota/domain creates fresh capacity; deleting keys silently resets
-debt. Neither is a transparent policy update.
+Configuration can remain in code, while execution is backend-authoritative. This
+supports rolling pods using the same quota names: older pods' charges use the
+latest backend policy. Stale publication still fails; explicitly handle or surface
+`ErrPolicyMismatch` rather than swallowing all update errors. Rollback publishes
+old parameters at a higher revision. Renaming quotas or deleting state creates
+fresh capacity, not a transparent update.
 
-## Failure and replay safety
+## Failure and retry safety
 
-`Allow` has no attempt ID and remains unsafe to replay after an ambiguous failure.
-`AllowOnce` returns the original decision while its record survives. A complete
-record is useful evidence of that admission, but says nothing about whether the
-upstream business request was executed. A malformed receipt, missing record, lost
-replication or expired ID is not evidence that capacity was never charged.
-
-Use separate IDs for admission transport recovery and for distinct business
-attempts. Implement business execution coordination outside this limiter. This
-SDK does not provide exactly-once execution, crash-proof quota accounting, refund,
-output reservation or billing. Those are not implied by a successful release.
-
-The core, both runtime drivers, the optional pgx example and the
-integration-test modules require Go 1.26+. Production applications should
-use a maintained Go release.
+`Allow` is unsafe to repeat after an ambiguous failure. `Wait` never retries an
+error. A later NotCharged result does not resolve an earlier Unknown result.
+Apply an explicit application failure policy without silently clearing or refunding
+debt. The SDK provides no result recovery, exactly-once business execution, billing,
+refunds, output reservation or worker/queue ownership.

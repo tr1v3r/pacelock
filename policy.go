@@ -5,6 +5,19 @@ import (
 	"fmt"
 )
 
+// Quota associates an independent quota name with its backend-owned policy.
+// UpdateQuotas requires a positive revision.
+type Quota struct {
+	// Name identifies shared state within the domain and must contain 1..256 bytes.
+	Name string
+	// Policy specifies how this quota replenishes and how much it can accumulate.
+	Policy Policy
+}
+
+func (q Quota) rule(cost int64) Rule {
+	return Rule{Name: q.Name, Policy: q.Policy, Cost: cost}
+}
+
 // QuotaDriver is the optional, atomic quota-configuration extension to Driver.
 // Implementations serialize updates with admission and preserve absolute TAT.
 // Revisions are permanent fences, not expiring debt. No automatic retries occur.

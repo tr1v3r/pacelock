@@ -1,60 +1,40 @@
 # Commercial SDK hardening contract
 
-Redis-specific hardening details below remain applicable to the Redis driver.
-For PostgreSQL deployment limits, see [its guide](../driver/postgres/README.md).
+Scope: immediate and context-aware blocking admission for known positive costs.
+This is not a scheduler, concurrency owner, billing ledger, refund mechanism or
+output-token reservation system. See [migration](compatibility.md) for the breaking
+pre-v1 removal of retained admission results.
 
-Scope: the existing immediate, known-cost, weighted multidimensional limiter.
-This work does not turn the limiter into a scheduler, concurrency owner, billing
-ledger, or output-token reservation system. Dynamic-default admission is a breaking
-pre-v1 API migration; see [compatibility](compatibility.md). Accounting semantics are preserved.
+## Required contracts
 
-## Contracts fixed before implementation
+- A normal quota denial debits no dimension. Redis computes/encodes before one
+  final MSET; PostgreSQL uses one transaction. Confirmed pre-commit rejection or
+  rollback is NotCharged. Lost replies and uncertain commits remain Unknown.
+- Admission consumes capacity even when later business execution fails.
+- Never blindly retry Unknown. There is no SDK result recovery after an uncertain
+  mutation; a later NotCharged result cannot resolve earlier uncertainty.
+- Allow returns Decision/error. Wait retries only
+  valid capacity denials, stop on every error, preserve confirmed success and
+  in-flight accounting, and add no worker, queue or fairness guarantee.
+- Applications own clients, context deadlines, policy publication, trusted quota
+  selection, observability callbacks and bounded physical cleanup.
+- Admission does not store request identity. Retired receipt storage is not dropped
+  automatically; retire old writers and plan explicit operator cleanup.
+- Optional observation is synchronous, once per public admission call (one whole
+  Wait), with no raw quota identifiers or replay field. Callbacks must be fast and
+  concurrency-safe; panics propagate.
+- Custom transport, proxy, hook and routing integrations must not retry ambiguous
+  mutations. Redis NoRetry still permits safe routing and NOSCRIPT fallback.
 
-- A normal quota denial changes no quota. Redis computes/encodes before one
-  final MSET of quotas and receipt. Script-visible commit rejection is NotCharged;
-  lost replies/crash durability still require conservative recovery.
-- Admission consumes capacity for a business attempt, even if later work fails.
-  There is no implicit refund, queue, background worker, or automatic retry.
-- Invalid inputs and pre-dispatch cancellation do not charge. Errors expose
-  whether the admission outcome is unknown; callers can still use errors.Is/As.
-- `AllowOnce(ctx, id, retention, charges...)` caches both successful and denied
-  decisions in the same slot as quotas. An ID identifies one admission, not an
-  entire business request across multiple upstream attempts. Retention is an
-  explicit whole-millisecond duration between 1 ms and 24 h. It is not extended
-  by reads or replays. Order is significant: dynamic IDs bind names/costs and retention, not policy
-  versions; static IDs also bind effective policies with effective-rule encoding.
-  Dynamic/static modes have distinct fingerprints. A mismatch never charges.
-- Redis operations commit complete results. Malformed receipts return
-  `ErrState` / `Unknown`, never missing or permission to debit again.
-  Logical expiry is independent of bounded application-scheduled cleanup.
-  Only a complete record can be replayed or returned by `Lookup`. Missing records
-  do not prove that an admission never happened. Expiry, eviction, deletion and
-  failover data loss bound all deduplication guarantees.
-- Replayed decisions describe the original observation. In particular, a denied
-  ID stays denied until expiry, and its RetryAfter is not a fresh reservation or
-  countdown. A genuinely new attempt needs a new ID.
-- `Allow` remains non-idempotent. No method performs transport retries. Client,
-  proxy and Cluster redirection behavior remains an integration responsibility.
-- Optional observation runs synchronously once per public operation, outside
-  Redis execution, with no SDK goroutines and no raw quota/attempt identifiers.
-  Callbacks must be concurrency-safe and fast; callback panics propagate.
+## Delivery and deployment checks
 
-## Delivery checks
+Run formatting, module verification, vet, and real Redis/Cluster/PostgreSQL race
+contracts. Preserve broad atomicity, contention, cancellation, state validation,
+logical expiry, cleanup, rollback and commit-loss coverage. Validate direct driver
+inputs and malformed responses, not only facade calls. Maintain matching English
+and Chinese README contracts and runnable examples.
 
-- [x] Defensive inputs, complete reply/state validation, typed outcome errors
-- [x] Bounded idempotency, conflict detection, corrupt-receipt protection, lookup
-- [x] Optional dependency-free observation and runnable examples
-- [x] Model, fuzz, contention, replay, cancellation and lost-response tests
-- [x] Redis Cluster integration and reproducible local/CI infrastructure
-- [x] Benchmarks with environment and scope, not unsupported throughput claims
-- [x] Matching English/Chinese READMEs and operational/compatibility guidance
-- [x] gofmt, go test ./..., go vet ./..., real Redis tests with -race
-
-## Release boundary
-
-No tag, release, publish, push or stable-version claim is part of this change.
-Production failover durability, customer workload SLOs and provider-specific
-accounting need deployment validation. Reservation/reconciliation remains a
-separate proposal with conservation and recovery contracts to define first.
-
-Verification results and deployment gates: [verification.md](verification.md).
+Historical [verification records](verification.md) do not validate the current
+implementation. Target load, failover durability, TLS/ACL, clock stability, memory
+headroom and backend topology require deployment-specific acceptance. A tag,
+stable release, support SLA or production certification needs a separate decision.

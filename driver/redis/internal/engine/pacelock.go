@@ -1,8 +1,7 @@
-// Package pacelock provides distributed, weighted GCRA rate admission using Redis.
+// Package engine provides distributed, weighted GCRA rate admission using Redis.
 //
-// Allow immediately admits known costs across named quotas. AllowOnce adds
-// bounded deduplication and Lookup recovers retained admission results. Neither
-// method queues work, owns concurrency, refunds capacity or bills usage.
+// Admit immediately admits known costs across named quotas. It never queues
+// work, owns concurrency, refunds capacity or bills usage.
 //
 // Use one namespace/domain for all quotas requiring atomic admission and explicitly
 // handle unknown debit outcomes. Built-in go-redis clients receive per-command
@@ -29,7 +28,6 @@ var (
 	ErrInvalid        = pacelock.ErrInvalid
 	ErrPolicyMismatch = pacelock.ErrPolicyMismatch
 	ErrState          = pacelock.ErrState
-	ErrConflict       = pacelock.ErrConflict
 	ErrBackend        = pacelock.ErrBackend
 )
 
@@ -90,7 +88,7 @@ func nilClient(client redis.Scripter) bool {
 	return false
 }
 
-// protocolSource contains shared quota and admission-record readers.
+// protocolSource contains shared quota and policy readers.
 //
 //go:embed protocol.lua
 var protocolSource string
@@ -101,7 +99,7 @@ var protocolSource string
 var admissionSource string
 
 // source is the complete script, also used by model and failure-injection tests.
-var source = protocolSource + "\nlocal managed = false\n" + admissionSource
+var source = protocolSource + "\n" + admissionSource
 
 // admissionScript caches the script hash and falls back to EVAL on NOSCRIPT.
 var admissionScript = redis.NewScript(source)
@@ -111,84 +109,12 @@ func (l *Limiter) key(name string) string {
 	return fmt.Sprintf("%s%x", l.prefix, sha256.Sum256([]byte(name)))
 }
 
-// interval validates a rule and returns its conservative per-unit refill time in microseconds.
-func interval(r Rule) (int64, error) {
-	d, err := r.Interval()
-	return d.Microseconds(), err
-}
-
-// Allow immediately checks and charges every rule or denies without charging any.
-// It does not wait, queue work, reserve future capacity, or retry transport errors.
-// Rules must satisfy Validate. A denial returns Allowed=false with a nil error.
-// A timeout or cancellation after dispatch can leave the debit outcome unknown.
-// On error, ignore Decision and inspect OutcomeOf before deciding how to recover.
-func (l *Limiter) Allow(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow_static", len(rules))
-	defer func() { finish(decision, false, err) }()
-	if err := l.ready(ctx); err != nil {
-		return Decision{}, failure("allow_static", NotCharged, err)
-	}
-	keys, args, err := l.prepare(rules)
-	if err != nil {
-		return Decision{}, failure("allow_static", NotCharged, err)
-	}
-	keys = l.withPolicyKeys(keys, rules)
-	cmd := admissionScript.Run(ctx, l.client, keys, args...)
-	if err := cmd.Err(); err != nil {
-		return Decision{}, scriptFailure("allow_static", err)
-	}
-	values, err := cmd.Int64Slice()
-	if err != nil {
-		return Decision{}, failure("allow_static", Unknown, fmt.Errorf("%w: invalid script reply: %v", ErrState, err))
-	}
-	d, err := decodeDecision(values, namesOf(rules))
-	if err != nil {
-		return Decision{}, failure("allow_static", Unknown, err)
-	}
-	return d, nil
-}
-
-// Validate checks all rule and effective-policy bounds without contacting Redis.
-// Supply 1..MaxRules rules with unique names. It wraps ErrInvalid on failure;
-// it cannot detect conflicts with policies already stored in Redis.
-func Validate(rules ...Rule) error { return pacelock.Validate(rules...) }
-
 // ready rejects unusable receivers and contexts before any backend request.
 func (l *Limiter) ready(ctx context.Context) error {
 	if ctx == nil || l == nil || l.prefix == "" || nilClient(l.client) {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
-}
-
-// prepare validates ordered rules and encodes keys and arguments for ordinary admission.
-func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
-	if err := Validate(rules...); err != nil {
-		return nil, nil, err
-	}
-	keys := make([]string, len(rules))
-	args := make([]interface{}, 0, 2+len(rules)*4)
-	args = append(args, int64(0), "")
-	for i, r := range rules {
-		step, _ := interval(r)
-		keys[i] = l.key(r.Name)
-		args = append(args, step, r.Policy.Burst, r.Cost, r.Name)
-	}
-	for _, r := range rules {
-		if r.Policy.Revision != 0 {
-			return nil, nil, fmt.Errorf("%w: use managed admission for managed policies", ErrInvalid)
-		}
-	}
-	return keys, args, nil
-}
-
-// namesOf copies quota names in request order for response validation.
-func namesOf(rules []Rule) []string {
-	names := make([]string, len(rules))
-	for i := range rules {
-		names[i] = rules[i].Name
-	}
-	return names
 }
 
 // decodeDecision validates the script result and converts microsecond waits to durations.

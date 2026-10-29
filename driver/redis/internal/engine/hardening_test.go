@@ -2,13 +2,9 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -57,34 +53,13 @@ func TestDefensiveInputs(t *testing.T) {
 	l, _ := New(s, "app", "domain")
 	r := rule("q", 1, 1)
 	for _, current := range []*Limiter{nil, {}, l} {
-		if _, err := current.Allow(nil, r); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+		if _, err := current.admitRules(nil, r); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("nil context/limiter: %v", err)
-		}
-	}
-	for _, tc := range []struct {
-		id    string
-		ttl   time.Duration
-		rules []Rule
-	}{
-		{"", time.Minute, []Rule{r}},
-		{strings.Repeat("x", 257), time.Minute, []Rule{r}},
-		{"a", 0, []Rule{r}}, {"a", time.Millisecond + 1, []Rule{r}},
-		{"a", MaxHorizon + time.Millisecond, []Rule{r}},
-		{"a", time.Minute, []Rule{rule(string([]byte{255}), 1, 1)}},
-	} {
-		if _, err := l.AllowOnce(context.Background(), tc.id, tc.ttl, tc.rules...); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
-			t.Fatalf("invalid: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := l.AllowOnce(ctx, "a", time.Minute, r); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
-		t.Fatal(err)
-	}
-	if _, _, err := l.Lookup(ctx, "a"); !errors.Is(err, context.Canceled) {
-		t.Fatal(err)
-	}
-	if _, _, err := l.Lookup(context.Background(), ""); !errors.Is(err, ErrInvalid) {
+	if _, err := l.admitRules(ctx, r); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if s.calls != 0 {
@@ -105,8 +80,6 @@ func TestTransportAndReplyErrors(t *testing.T) {
 		{"canceled after dispatch", nil, context.Canceled, context.Canceled, Unknown},
 		{"policy", nil, serverError("PACE_POLICY conflict"), ErrPolicyMismatch, NotCharged},
 		{"state", nil, serverError("PACE_STATE wrong type"), ErrState, NotCharged},
-		{"record", nil, serverError("PACE_RECORD bad record"), ErrState, Unknown},
-		{"conflict", nil, serverError("PACE_CONFLICT mismatch"), ErrConflict, NotCharged},
 		{"non-server error", nil, errors.New("PACE_STATE not a Redis error"), ErrBackend, Unknown},
 		{"prefix lookalike", nil, serverError("PACE_STATE_OTHER not ours"), ErrBackend, Unknown},
 		{"flag", []interface{}{int64(1), int64(0), int64(2)}, nil, ErrState, Unknown},
@@ -116,21 +89,24 @@ func TestTransportAndReplyErrors(t *testing.T) {
 		{"short reply", []interface{}{}, nil, ErrState, Unknown},
 		{"reply type", "invalid", nil, ErrState, Unknown},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &stubScripter{reply: tc.reply, err: tc.err}
-			l, _ := New(s, "a", "b")
-			_, err := l.Allow(context.Background(), rule("q", 1, 1))
-			if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome {
-				t.Fatalf("%v: %s", err, OutcomeOf(err))
-			}
-			var sdk *Error
-			if !errors.As(err, &sdk) || sdk.Op != "allow_static" {
-				t.Fatal(err)
-			}
-			if s.calls != 1 || s.evalCalls != 0 {
-				t.Fatal("transport or malformed reply retried")
-			}
-		})
+		{
+			op := "allow"
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				s := &stubScripter{reply: tc.reply, err: tc.err}
+				l, _ := New(s, "a", "b")
+				_, err := l.Admit(context.Background(), managedRequest("q", 1))
+				if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome {
+					t.Fatalf("%v: %s", err, OutcomeOf(err))
+				}
+				var sdk *Error
+				if !errors.As(err, &sdk) || sdk.Op != op {
+					t.Fatal(err)
+				}
+				if s.calls != 1 || s.evalCalls != 0 {
+					t.Fatal("transport or malformed reply retried")
+				}
+			})
+		}
 	}
 	if OutcomeOf(nil) != Unknown || OutcomeOf(io.EOF) != Unknown {
 		t.Fatal("untyped error must be conservative")
@@ -140,7 +116,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 func TestOnlyNoScriptFallsBack(t *testing.T) {
 	s := &stubScripter{shaErr: serverError("NOSCRIPT No matching script"), reply: []interface{}{int64(1), int64(0), int64(0)}}
 	l, _ := New(s, "a", "b")
-	d, err := l.Allow(context.Background(), rule("q", 1, 1))
+	d, err := l.admitRules(context.Background(), rule("q", 1, 1))
 	if err != nil || !d.Allowed || s.calls != 1 || s.evalCalls != 1 {
 		t.Fatalf("%+v %v calls=%d/%d", d, err, s.calls, s.evalCalls)
 	}
@@ -150,12 +126,12 @@ func TestObserver(t *testing.T) {
 	var events []Event
 	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
 	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	l.Allow(context.Background(), rule("q", 1, 1))
-	l.Allow(context.Background())
+	l.admitRules(context.Background(), rule("q", 1, 1))
+	l.admitRules(context.Background())
 	s.reply = nil
 	s.err = redis.Nil
-	l.Lookup(context.Background(), "missing")
-	if len(events) != 3 || events[0].Result != "allowed" || events[1].Result != "error" || events[2].Result != "missing" || events[0].RuleCount != 1 {
+	l.admitRules(context.Background(), rule("q", 1, 1))
+	if len(events) != 3 || events[0].Result != "allowed" || events[1].Result != "error" || events[2].Result != "error" || events[0].RuleCount != 1 {
 		t.Fatalf("%+v", events)
 	}
 	for _, e := range events {
@@ -166,73 +142,22 @@ func TestObserver(t *testing.T) {
 }
 
 func TestAdmissionObservers(t *testing.T) {
-	for _, once := range []bool{false, true} {
-		var events []Event
-		s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
-		l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-		request := managedRequest("q", 1)
-		dynamicOp, staticOp := "allow", "allow_static"
-		if once {
-			request.ID, request.Retention = "id", time.Minute
-			dynamicOp, staticOp = "allow_once", "allow_static_once"
-			s.reply = []interface{}{int64(1), request.Fingerprint() + `|{"names":["q"],"values":[1,0,0]}`}
-		}
-		if _, err := l.AdmitManaged(context.Background(), request); err != nil {
-			t.Fatal(err)
-		}
-		if once {
-			rules := []Rule{rule("q", 1, 1)}
-			_, args, _ := l.prepare(rules)
-			args[0] = request.Retention.Milliseconds()
-			s.reply = []interface{}{int64(1), fingerprint(args) + `|{"names":["q"],"values":[1,0,0]}`}
-			if _, err := l.AllowOnce(context.Background(), "id", request.Retention, rules...); err != nil {
-				t.Fatal(err)
-			}
-		} else if _, err := l.Allow(context.Background(), rule("q", 1, 1)); err != nil {
-			t.Fatal(err)
-		}
-		if len(events) != 2 || events[0].Operation != dynamicOp || events[1].Operation != staticOp {
-			t.Fatalf("operations: %+v", events)
-		}
-		for _, event := range events {
-			if event.Result != "allowed" || event.RuleCount != 1 || event.Replayed != once {
-				t.Fatalf("event: %+v", event)
-			}
-		}
-	}
-}
-
-func TestRecordValidation(t *testing.T) {
-	fp := strings.Repeat("a", 64)
-	good := fp + `|{"names":["q"],"values":[1,0,0]}`
-	for _, raw := range []string{"", "C1|", "P1|" + fp + "x", strings.Repeat("z", 64) + "|{}", fp + "|{}", fp + `|{"names":["q"],"values":[0,1,2]}`} {
-		if _, err := decodeRecord(raw, "", nil); !errors.Is(err, ErrState) {
-			t.Fatalf("%q: %v", raw, err)
-		}
-	}
-	for _, payload := range malformedReceiptPayloads() {
-		if _, err := decodeRecord(fp+"|"+payload, "", nil); !errors.Is(err, ErrState) {
-			t.Fatalf("malformed payload %q: %v", payload, err)
-		}
-	}
-	for _, name := range []string{"é中文😀", "quote\"slash/\\\n\t\x00"} {
-		encoded, err := json.Marshal([]string{name})
-		if err != nil {
-			t.Fatal(err)
-		}
-		payload := `{"names":` + string(encoded) + `,"values":[0,86400000000,1]}`
-		if d, err := decodeRecord(fp+"|"+payload, fp, []string{name}); err != nil || d.Allowed || d.RetryAfter != MaxHorizon || !reflect.DeepEqual(d.Limited, []string{name}) {
-			t.Fatalf("valid Unicode/escaped name: %+v %v", d, err)
-		}
-	}
-	if d, err := decodeRecord(good, fp, []string{"q"}); err != nil || !d.Allowed {
-		t.Fatalf("%+v %v", d, err)
-	}
-	if _, err := decodeRecord(good, fp, []string{"other"}); !errors.Is(err, ErrState) {
+	var events []Event
+	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
+	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
+	if _, err := l.Admit(context.Background(), managedRequest("q", 1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decodeRecord("P1|"+fp, "", nil); !errors.Is(err, ErrState) {
+	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); err != nil {
 		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Operation != "allow" || events[1].Operation != "allow" {
+		t.Fatalf("%+v", events)
+	}
+	for _, e := range events {
+		if e.Result != "allowed" || e.RuleCount != 1 {
+			t.Fatal(e)
+		}
 	}
 }
 
@@ -258,64 +183,7 @@ func FuzzInterval(f *testing.F) {
 	})
 }
 
-func FuzzRecord(f *testing.F) {
-	f.Add(strings.Repeat("a", 64) + `|{"names":["q"],"values":[1,0,0]}`)
-	f.Add("")
-	f.Fuzz(func(t *testing.T, raw string) {
-		d, err := decodeRecord(raw, "", nil)
-		if err == nil && ((!d.Allowed && (len(d.Limited) == 0 || d.RetryAfter <= 0)) || (d.Allowed && (len(d.Limited) != 0 || d.RetryAfter != 0))) {
-			t.Fatalf("inconsistent decision: %+v", d)
-		}
-	})
-}
-
-func TestFingerprintBindsParameters(t *testing.T) {
-	l, _ := New(&stubScripter{}, "a", "b")
-	a := rule("a", 2, 1)
-	b := rule("b", 2, 1)
-	_, first, _ := l.prepare([]Rule{a, b})
-	first[0] = int64(1000)
-	_, second, _ := l.prepare([]Rule{b, a})
-	second[0] = int64(1000)
-	if fingerprint(first) == fingerprint(second) {
-		t.Fatal("order not bound")
-	}
-	a.Policy.Rate = 2
-	a.Policy.Period = 2 * time.Hour
-	_, equivalent, _ := l.prepare([]Rule{a, b})
-	equivalent[0] = int64(1000)
-	if fingerprint(first) != fingerprint(equivalent) {
-		t.Fatal("effective policies should match")
-	}
-	saved := append([]interface{}(nil), first...)
-	first[1] = "already populated"
-	if fingerprint(first) != fingerprint(saved) || first[1] != "already populated" {
-		t.Fatal("fingerprint slot included or mutated")
-	}
-	first[1] = saved[1]
-	if !reflect.DeepEqual(first, saved) {
-		t.Fatal("fingerprint mutated arguments")
-	}
-	if reflect.DeepEqual(first, second) {
-		t.Fatal(fmt.Sprint(first))
-	}
-}
-
-func TestMalformedReceiptDoesNotAuthorize(t *testing.T) {
-	for _, reply := range []interface{}{"bad", []interface{}{}, []interface{}{int64(2), "bad"}, []interface{}{int64(0), "bad"}} {
-		s := &stubScripter{reply: reply}
-		l, _ := New(s, "a", "b")
-		d, err := l.AllowOnce(context.Background(), "id", time.Minute, rule("q", 1, 1))
-		if !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown || d.Allowed {
-			t.Fatalf("%+v %v", d, err)
-		}
-		if err.Error() == "" {
-			t.Fatal("empty error")
-		}
-	}
-}
-
-func TestLookupMalformedReplyAndObserverContext(t *testing.T) {
+func TestMalformedReplyAndObserverContext(t *testing.T) {
 	s := &stubScripter{reply: int64(1)}
 	var seen Event
 	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(ctx context.Context, e Event) {
@@ -324,13 +192,13 @@ func TestLookupMalformedReplyAndObserverContext(t *testing.T) {
 		}
 		seen = e
 	}})
-	if _, _, err := l.Lookup(context.Background(), "id"); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 		t.Fatal(err)
 	}
 	if seen.Result != "error" {
 		t.Fatal(seen)
 	}
-	if _, err := l.Allow(nil, rule("q", 1, 1)); !errors.Is(err, ErrInvalid) {
+	if _, err := l.admitRules(nil, rule("q", 1, 1)); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
 }

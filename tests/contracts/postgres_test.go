@@ -50,33 +50,6 @@ func pgScopeID(s pacelock.Scope) string {
 }
 func pgItemID(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }
 
-func TestPostgresRejectsMalformedReceipt(t *testing.T) {
-	db, d, s, l := postgresFixture(t)
-	ctx := context.Background()
-	r := rule("q", 5, 1)
-	if _, err := l.allowRulesOnce(ctx, "malformed", time.Minute, r); err != nil {
-		t.Fatal(err)
-	}
-	var before int64
-	if err := db.QueryRow(`SELECT tat_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, pgScopeID(s), pgItemID(r.Name)).Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE pacelock_admissions SET decision=$1 WHERE scope_id=$2 AND admission_id=$3`, []byte(`{"Allowed":true}`), pgScopeID(s), pgItemID("malformed")); err != nil {
-		t.Fatal(err)
-	}
-	// Exercise the driver boundary directly, not only the facade's validation.
-	if _, err := d.AdmitStatic(ctx, pacelock.StaticAdmission{Scope: s, ID: "malformed", Retention: time.Minute, Rules: []pacelock.Rule{r}}); !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
-		t.Fatal(err)
-	}
-	if _, found, err := d.Lookup(ctx, pacelock.LookupRequest{Scope: s, ID: "malformed"}); found || !errors.Is(err, pacelock.ErrState) || pacelock.OutcomeOf(err) != pacelock.Unknown {
-		t.Fatal(found, err)
-	}
-	var after int64
-	if err := db.QueryRow(`SELECT tat_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, pgScopeID(s), pgItemID(r.Name)).Scan(&after); err != nil || after != before {
-		t.Fatalf("malformed replay mutated quota: before=%d after=%d err=%v", before, after, err)
-	}
-}
-
 func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
 	db, _, s, l := postgresFixture(t)
 	// A real server-side trigger raises only on this test's second quota. The first
@@ -93,26 +66,23 @@ func TestPostgresRollbackAfterFirstQuotaWrite(t *testing.T) {
 	if _, err := db.Exec("CREATE TRIGGER " + name + " BEFORE INSERT OR UPDATE ON pacelock_quotas FOR EACH ROW EXECUTE FUNCTION " + name + "()"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := l.allowRulesOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
+	_, err := l.allowRules(context.Background(), rule("first", 5, 1), rule("second", 5, 1))
 	if err == nil || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
 	}
-	var quotas, records int
+	var quotas int
 	if err = db.QueryRow(`SELECT count(*) FROM pacelock_quotas WHERE scope_id=$1`, pgScopeID(s)).Scan(&quotas); err != nil {
 		t.Fatal(err)
 	}
-	if err = db.QueryRow(`SELECT count(*) FROM pacelock_admissions WHERE scope_id=$1`, pgScopeID(s)).Scan(&records); err != nil {
-		t.Fatal(err)
-	}
-	if quotas != 0 || records != 0 {
-		t.Fatalf("partial commit: quotas=%d receipts=%d", quotas, records)
+	if quotas != 0 {
+		t.Fatalf("partial commit: quotas=%d", quotas)
 	}
 	if _, err = db.Exec("DROP TRIGGER " + name + " ON pacelock_quotas"); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := l.allowRulesOnce(context.Background(), "attempt", time.Minute, rule("first", 5, 1), rule("second", 5, 1))
-	if err != nil || !receipt.Allowed || receipt.Replayed {
-		t.Fatal(receipt, err)
+	admitted, err := l.allowRules(context.Background(), rule("first", 5, 1), rule("second", 5, 1))
+	if err != nil || !admitted.Allowed {
+		t.Fatal(admitted, err)
 	}
 }
 
@@ -164,8 +134,8 @@ func (tx *loseCommitTx) Commit() error {
 	return nil
 }
 
-func TestPostgresLostCommitReplyRecovery(t *testing.T) {
-	_, normal, s, l := postgresFixture(t)
+func TestPostgresLostCommitReplyIsUnknown(t *testing.T) {
+	observerDB, _, s, _ := postgresFixture(t)
 	config, err := pgx.ParseConfig(os.Getenv("PACELOCK_POSTGRES_DSN"))
 	if err != nil {
 		t.Fatal(err)
@@ -178,20 +148,18 @@ func TestPostgresLostCommitReplyRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	broken, _ := newContractLimiter(fault, s.Namespace, s.Domain)
-	connector.armed.Store(true)
-	if _, err := broken.allowRulesOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+	if _, err := broken.publishRules(context.Background(), rule("q", 1, 1)); err != nil {
 		t.Fatal(err)
 	}
-	decision, found, err := l.Lookup(context.Background(), "lost")
-	if err != nil || !found || !decision.Allowed {
-		t.Fatal(decision, found, err)
+	connector.armed.Store(true)
+	if _, err := broken.Allow(context.Background(), pacelock.Charge{Name: "q", Cost: 1}); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+		t.Fatal(err)
 	}
-	replay, err := l.allowRulesOnce(context.Background(), "lost", time.Minute, rule("q", 1, 1))
-	if err != nil || !replay.Replayed || !replay.Allowed {
-		t.Fatal(replay, err)
-	}
-	if d, err := normal.AdmitStatic(context.Background(), pacelock.StaticAdmission{Scope: s, Rules: []pacelock.Rule{rule("q", 1, 1)}}); err != nil || d.Allowed {
-		t.Fatal(d, err)
+	// Inspect state out of band: this is evidence of mutation, not a recovery API.
+	// Do not dispatch another admission after the uncertain result.
+	var count int
+	if err := observerDB.QueryRow(`SELECT count(*) FROM pacelock_quotas WHERE scope_id=$1`, pgScopeID(s)).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("committed mutation missing: count=%d err=%v", count, err)
 	}
 }
 
@@ -210,7 +178,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	_, err = l.allowRulesOnce(ctx, "canceled", time.Minute, r)
+	_, err = l.Allow(ctx, pacelock.Charge{Name: r.Name, Cost: r.Cost})
 	cancel()
 	if !errors.Is(err, context.DeadlineExceeded) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
@@ -219,7 +187,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		d, err := l.allowRules(ctx, r)
+		d, err := l.Allow(ctx, pacelock.Charge{Name: r.Name, Cost: r.Cost})
 		if err == nil && !d.Allowed {
 			err = fmt.Errorf("stale transaction clock: %+v", d)
 		}
@@ -232,22 +200,19 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := l.Lookup(context.Background(), "canceled"); err != nil || found {
-		t.Fatal(found, err)
-	}
 }
 
 func TestPostgresPrunePreservesActiveDebt(t *testing.T) {
 	db, d, s, l := postgresFixture(t)
 	short := rule("expired", 1, 1)
 	short.Policy.Period = 20 * time.Millisecond
-	if _, err := l.allowRulesOnce(context.Background(), "short", 20*time.Millisecond, short); err != nil {
+	if _, err := l.allowRules(context.Background(), short); err != nil {
 		t.Fatal(err)
 	}
 	mustAllow(t, l, rule("active", 1, 1))
 	time.Sleep(40 * time.Millisecond)
 	n, err := d.Prune(context.Background(), s, 10)
-	if err != nil || n != 2 {
+	if err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
 	decision, err := l.allowRules(context.Background(), rule("active", 1, 1))

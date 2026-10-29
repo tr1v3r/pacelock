@@ -20,11 +20,3 @@ CREATE TABLE IF NOT EXISTS pacelock_policies (
     revision bigint NOT NULL CHECK (revision >= 1 AND revision <= 9007199254740991),
     PRIMARY KEY (scope_id, quota_id)
 );
-CREATE TABLE IF NOT EXISTS pacelock_admissions (
-    scope_id text NOT NULL REFERENCES pacelock_domains(scope_id),
-    admission_id text NOT NULL,
-    fingerprint text NOT NULL,
-    decision bytea NOT NULL,
-    expires_us bigint NOT NULL,
-    PRIMARY KEY (scope_id, admission_id)
-);

@@ -56,7 +56,7 @@ var pruneScript = redis.NewScript(protocolSource + pruneSource)
 // Prune performs at most one SCAN page and checks at most limit candidate values,
 // with 1 <= limit <= MaxPruneKeys. SCAN COUNT is only a discovery-work hint;
 // overflow is buffered in the cursor. This is not a hard Redis latency bound.
-// Active debt and live receipts are never reset. Malformed candidates abort the
+// Active debt and legacy records are never reset. Malformed candidates abort the
 // batch without deleting any keys. The caller owns scheduling; no worker is started.
 func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := l.ready(ctx); err != nil {
@@ -126,17 +126,13 @@ func (l *Limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (Pru
 	return result, nil
 }
 
-// ownedKey recognizes only SDK-generated quota and admission keys in this scope.
+// ownedKey recognizes only SDK-generated quota and policy keys in this scope.
 func (l *Limiter) ownedKey(key string) bool {
 	suffix, ok := strings.CutPrefix(key, l.prefix)
 	if !ok {
 		return false
 	}
-	if strings.HasPrefix(suffix, "attempt:") {
-		suffix = strings.TrimPrefix(suffix, "attempt:")
-	} else {
-		suffix = strings.TrimPrefix(suffix, "policy:")
-	}
+	suffix = strings.TrimPrefix(suffix, "policy:")
 	if len(suffix) != 64 {
 		return false
 	}

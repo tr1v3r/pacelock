@@ -37,7 +37,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{owner.key("quota"), owner.attemptKey("admission")}
+	keys := []string{owner.key("quota"), owner.policyKey("quota")}
 	var masters []*redis.Client
 	t.Cleanup(func() {
 		clean, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -89,12 +89,13 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 		return l
 	}
 	r := Rule{Name: "quota", Policy: Policy{Rate: 1, Period: time.Hour, Burst: 3}, Cost: 1}
+	publishRules(t, owner, r)
 	t.Run("standalone_grants_cannot_discover_cluster", func(t *testing.T) {
-		d, err := connect(t).Allow(ctx, r)
+		d, err := connect(t).admitRules(ctx, r)
 		if err == nil || !errors.Is(err, ErrBackend) || !strings.Contains(strings.ToLower(err.Error()), "cluster|slots") || d.Allowed {
 			t.Fatalf("want denied CLUSTER SLOTS, got decision=%+v err=%v", d, err)
 		}
-		if n, err := admin.Exists(ctx, keys...).Result(); err != nil || n != 0 {
+		if n, err := admin.Exists(ctx, owner.key("quota")).Result(); err != nil || n != 0 {
 			t.Fatalf("discovery failure wrote state: keys=%d err=%v", n, err)
 		}
 	})
@@ -105,22 +106,16 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	}
 	t.Run("only_cluster_slots_restores_public_operations", func(t *testing.T) {
 		l := connect(t)
-		if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
+		if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
 			t.Fatalf("Allow: %+v %v", d, err)
 		}
-		if d, err := l.AllowOnce(ctx, "admission", time.Minute, r); err != nil || !d.Allowed || d.Replayed {
-			t.Fatalf("AllowOnce: %+v %v", d, err)
+		if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
+			t.Fatalf("second admission: %+v %v", d, err)
 		}
-		if d, err := l.AllowOnce(ctx, "admission", time.Minute, r); err != nil || !d.Allowed || !d.Replayed {
-			t.Fatalf("replay: %+v %v", d, err)
+		if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
+			t.Fatalf("third admission failed: %+v %v", d, err)
 		}
-		if d, found, err := l.Lookup(ctx, "admission"); err != nil || !found || !d.Allowed {
-			t.Fatalf("Lookup: %+v found=%v err=%v", d, found, err)
-		}
-		if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
-			t.Fatalf("replay consumed extra quota: %+v %v", d, err)
-		}
-		if d, err := l.Allow(ctx, r); err != nil || d.Allowed {
+		if d, err := l.admitRules(ctx, r); err != nil || d.Allowed {
 			t.Fatalf("quota not exhausted: %+v %v", d, err)
 		}
 	})

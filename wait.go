@@ -18,18 +18,18 @@ import (
 // quota was consumed once, even if ctx was canceled after a confirmed debit.
 // Business failure does not refund that consumption.
 //
-// Wait uses an empty ID and the calling goroutine. It creates no queue,
+// Wait uses the calling goroutine. It creates no queue,
 // reservation or background goroutine and guarantees no fairness. Contention
-// can delay admission indefinitely; use a deadline to bound waiting. Wait is
-// neither idempotent nor recoverable with Lookup. It emits one observer event.
+// can delay admission indefinitely; use a deadline to bound waiting.
+// It emits one observer event.
 func (l *Limiter) Wait(ctx context.Context, charges ...Charge) (err error) {
 	core := l.engine()
 	finish := core.observe(ctx, "wait", len(charges))
 	var decision Decision
-	defer func() { finish(decision, false, err) }()
+	defer func() { finish(decision, err) }()
 	charges = append([]Charge(nil), charges...)
-	decision, err = waitAdmission(ctx, "wait", func() (Receipt, error) {
-		return core.admitManaged(ctx, "", 0, charges)
+	decision, err = waitAdmission(ctx, "wait", func() (Decision, error) {
+		return core.admitManaged(ctx, charges)
 	})
 	return err
 }
@@ -37,13 +37,13 @@ func (l *Limiter) Wait(ctx context.Context, charges ...Charge) (err error) {
 // waitAdmission retries only validated denials. Attempts validate context before
 // dispatch and return a validated decision or an accounting-aware error. Keep
 // the last decision for whole-call observation, including a canceled delay.
-func waitAdmission(ctx context.Context, op string, attempt func() (Receipt, error)) (decision Decision, err error) {
+func waitAdmission(ctx context.Context, op string, attempt func() (Decision, error)) (decision Decision, err error) {
 	for {
-		receipt, attemptErr := attempt()
+		result, attemptErr := attempt()
 		if attemptErr != nil {
 			return decision, failure(op, OutcomeOf(attemptErr), attemptErr)
 		}
-		decision = receipt.Decision
+		decision = result
 		if decision.Allowed {
 			return decision, nil
 		}

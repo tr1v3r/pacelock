@@ -1,19 +1,6 @@
 # Redis Lua 单数字与三字段基准
 
-可运行程序测量**当前**无版本前缀的静态 `tat:interval:burst`，与单数字 TAT 原型比较，
-直接读取此 checkout 的 Lua。单数字原型去掉了策略冲突检测，**不是保持原契约的替代实现**。
-
-在 Redis driver 模块目录中，连接**独立、可销毁的 Redis**：
-
-```sh
-go run ./bench/lua-parse -addr 127.0.0.1:PORT > results.json
-go run ./bench/lua-parse -addr 127.0.0.1:PORT -iterations 200000 > results-200k.json
-```
-
-必须显式传地址，不要连接生产实例或并行运行：程序会覆盖/删除固定的
-`bench:{lua-parse}:*` 键，并要求独占 EVALSHA 统计。需要 SCRIPT LOAD、EVALSHA、
-INFO、TIME、GET、MSET 和 DEL。用 `--save '' --appendonly no` 启动临时 Redis，
-不要改变已有服务的持久化配置。
+本目录仅保留历史静态 tuple/单数字实验，不代表当前动态准入性能。调用方策略协议已移除，因此一并移除可运行程序。若需复现三字段实验，请在单独 checkout 中使用提交 `bcc67d5` 的程序及配套 Lua，连接可销毁 Redis；绝不能对当前策略或债务键运行旧程序。
 
 ## 方法
 
@@ -33,13 +20,13 @@ INFO、TIME、GET、MSET 和 DEL。用 `--save '' --appendonly no` 启动临时 
 - 可选的 200,000 次循环检查规模稳定性。这些是本地实验，不是线上吞吐承诺，
   也不是百万 QPS 容量的证明。
 
-## 当前三字段测量（2026-10-28）
+## 历史三字段测量（2026-10-28）
 
-[原始结果](results-redis8-tuple.json) 记录 Lua SHA-256 和当前额度格式。
+[原始结果](results-redis8-tuple.json) 记录 Lua SHA-256 和当时额度格式。
 Apple M3 Pro / arm64、OrbStack Linux、Redis 8.10.2、关闭 RDB/AOF；
 15 轮有效测量，微基准每轮 50,000 次，完整请求每个样本 1,000 次调用。
 
-| 场景 | 单数字 | 当前三字段 |
+| 场景 | 单数字 | 历史三字段 |
 |---|---:|---:|
 | 解析 | 935.14 ns | 1285.60 ns |
 | 读取及校验 | 1128.92 ns | 1512.82 ns |
@@ -53,7 +40,7 @@ Apple M3 Pro / arm64、OrbStack Linux、Redis 8.10.2、关闭 RDB/AOF；
 
 保留 [50k](results-redis8-valid.json) 和 [200k](results-redis8-200k.json) 原始数据作为
 证据，被测源码是 `2820790`，程序提交是 `c331f56`。它们测的是**已移除的 Q2 格式**，
-不代表当前三字段格式。旧程序可从 Git 查阅，当前程序不保留旧协议读取或执行分支。
+不代表历史三字段格式。旧程序可从 Git 查阅，当前驱动只兼容读取旧 tuple 债务，不保留旧准入执行分支。
 
 Apple M3 Pro / arm64、OrbStack Linux、Redis 8.10.2、关闭 RDB/AOF。
 有效 50k 结果的各轮平均耗时中位数：

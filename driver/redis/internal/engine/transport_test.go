@@ -169,7 +169,7 @@ func TestClusterRedirectsDisabled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = l.Allow(context.Background(), rule("q", 1, 1))
+			_, err = l.admitRules(context.Background(), rule("q", 1, 1))
 			if !errors.Is(err, ErrBackend) || !errors.Is(err, hook.err) || OutcomeOf(err) != Unknown || hook.calls.Load() != 1 {
 				t.Fatalf("redirect not surfaced once: calls=%d err=%v", hook.calls.Load(), err)
 			}
@@ -212,7 +212,7 @@ func TestClusterRedirectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = limiter.Allow(context.Background(), rule("q", 1, 1))
+	_, err = limiter.admitRules(context.Background(), rule("q", 1, 1))
 	if !errors.Is(err, ErrBackend) || hook.calls.Load() != 3 {
 		t.Fatalf("unbounded redirects: calls=%d err=%v", hook.calls.Load(), err)
 	}

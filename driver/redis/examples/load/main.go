@@ -1,5 +1,5 @@
 // load is a bounded measurement tool for disposable Redis deployments.
-// It explicitly measures static admission to preserve historical benchmark comparability.
+// It publishes backend policies before measuring dynamic admission.
 package main
 
 import (
@@ -27,10 +27,9 @@ import (
 type metrics struct {
 	// Mutex protects all counters, the latency reservoir and its random source.
 	sync.Mutex
-	// Calls counts completions; Allowed/Denied count successful decisions (Denied includes missing lookups).
+	// Calls counts completions; Allowed/Denied count successful decisions.
 	// Errors counts failures; Unknown and ContextErrors count their outcome/context subsets.
-	// Found counts successful lookups; Replayed counts retained AllowOnce decisions.
-	Calls, Allowed, Denied, Errors, Unknown, Found, Replayed, ContextErrors int64
+	Calls, Allowed, Denied, Errors, Unknown, ContextErrors int64
 	// Samples holds up to 100000 uniformly sampled call durations in microseconds, including errors.
 	Samples []int64
 	// random is the deterministic source used for reservoir sampling, protected by Mutex.
@@ -38,7 +37,7 @@ type metrics struct {
 }
 
 // add records one completed call, including failed-call latency, under the metrics mutex.
-func (m *metrics) add(d pacelock.Decision, found, replayed bool, err error, elapsed time.Duration) {
+func (m *metrics) add(d pacelock.Decision, err error, elapsed time.Duration) {
 	m.Lock()
 	defer m.Unlock()
 	m.Calls++
@@ -56,12 +55,7 @@ func (m *metrics) add(d pacelock.Decision, found, replayed bool, err error, elap
 		} else {
 			m.Denied++
 		}
-		if found {
-			m.Found++
-		}
-		if replayed {
-			m.Replayed++
-		}
+
 	}
 	value := elapsed.Microseconds()
 	if len(m.Samples) < 100000 {
@@ -131,22 +125,20 @@ func run() error {
 	disposable := flag.Bool("disposable", false, "confirm this is a dedicated disposable backend")
 	duration := flag.Duration("duration", 30*time.Second, "measurement interval")
 	warmup := flag.Duration("warmup", time.Second, "warmup interval")
-	retention := flag.Duration("retention", 10*time.Second, "idempotency retention")
 	workers := flag.Int("workers", 16, "concurrent workers")
 	domains := flag.Int("domains", 1, "1 is a hot domain; larger values spread independent quotas")
 	dimensions := flag.Int("rules", 4, "quota dimensions 1..32")
 	rps := flag.Int("rps", 0, "approximate aggregate offered rate; 0 means closed-loop saturation")
-	mode := flag.String("mode", "allow", "allow|deny|once|once-deny|replay|lookup")
-	expiry := flag.Bool("expiry", false, "wait retention+2s and measure memory/keys again")
+	mode := flag.String("mode", "allow", "allow|deny")
 	flag.Parse()
 	if !*disposable {
 		return fmt.Errorf("requires -disposable; never use shared or production Redis")
 	}
-	if *duration <= 0 || *warmup < 0 || *workers < 1 || *workers > 1024 || *domains < 1 || *domains > 1024 || *dimensions < 1 || *dimensions > 32 || *rps < 0 || *rps > 1000000 || *retention < time.Millisecond || *retention > 24*time.Hour || *retention%time.Millisecond != 0 {
+	if *duration <= 0 || *warmup < 0 || *workers < 1 || *workers > 1024 || *domains < 1 || *domains > 1024 || *dimensions < 1 || *dimensions > 32 || *rps < 0 || *rps > 1000000 {
 		return fmt.Errorf("invalid bounded load configuration")
 	}
 	switch *mode {
-	case "allow", "deny", "once", "once-deny", "replay", "lookup":
+	case "allow", "deny":
 	default:
 		return fmt.Errorf("invalid mode")
 	}
@@ -163,14 +155,14 @@ func run() error {
 		return err
 	}
 	namespace := fmt.Sprintf("pacelock-load-%d", time.Now().UnixNano())
-	limiters := make([]*pacelock.StaticLimiter, *domains)
+	limiters := make([]*pacelock.Limiter, *domains)
 	prefixes := make([]string, *domains)
 	quotas := make([]pacelock.Quota, *dimensions)
 	charges := make([]pacelock.Charge, *dimensions)
 	for i := range quotas {
-		quotas[i] = pacelock.Quota{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000}}
+		quotas[i] = pacelock.Quota{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000, Revision: 1}}
 		charges[i] = pacelock.Charge{Name: quotas[i].Name, Cost: 1}
-		if *mode == "deny" || *mode == "once-deny" {
+		if *mode == "deny" {
 			quotas[i].Policy.Rate = 1
 			quotas[i].Policy.Period = 24 * time.Hour
 			quotas[i].Policy.Burst = 1
@@ -178,23 +170,22 @@ func run() error {
 	}
 	for i := range limiters {
 		domain := fmt.Sprint(i)
-		l, err := newLimiter(c, namespace, domain, quotas...)
+		l, err := newLimiter(c, namespace, domain)
 		if err != nil {
+			return err
+		}
+		if err := l.UpdateQuotas(ctx, quotas...); err != nil {
 			return err
 		}
 		limiters[i] = l
 		digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
 		prefixes[i] = fmt.Sprintf("pacelock:{%x}:*", digest)
-		if *mode == "deny" || *mode == "once-deny" {
+		if *mode == "deny" {
 			if _, err := l.Allow(ctx, charges...); err != nil {
 				return err
 			}
 		}
-		if *mode == "replay" || *mode == "lookup" {
-			if _, err := l.AllowOnce(ctx, "seed", 24*time.Hour, charges...); err != nil {
-				return err
-			}
-		}
+
 	}
 	keys := func(remove bool) (int64, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -238,7 +229,7 @@ func run() error {
 			fmt.Fprintln(os.Stderr, "namespace cleanup:", err)
 		}
 	}()
-	phase := func(length time.Duration, label string) *metrics {
+	phase := func(length time.Duration) *metrics {
 		m := &metrics{random: rand.New(rand.NewSource(1))}
 		ctx, cancel := context.WithTimeout(context.Background(), length)
 		defer cancel()
@@ -261,34 +252,12 @@ func run() error {
 						}
 					}
 					l := limiters[(w+n)%len(limiters)]
-					id := fmt.Sprintf("%s-%d-%d", label, w, n)
 					start := time.Now()
 					// Stop scheduling at the phase deadline, but drain in-flight calls.
 					call, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					var d pacelock.Decision
-					var found, replayed bool
-					var err error
-					switch *mode {
-					case "allow", "deny":
-						d, err = l.Allow(call, charges...)
-					case "once", "once-deny", "replay":
-						if *mode == "replay" {
-							id = "seed"
-						}
-						var receipt pacelock.Receipt
-						receipt, err = l.AllowOnce(call, id, func() time.Duration {
-							if *mode == "replay" {
-								return 24 * time.Hour
-							}
-							return *retention
-						}(), charges...)
-						d = receipt.Decision
-						replayed = receipt.Replayed
-					case "lookup":
-						d, found, err = l.Lookup(call, "seed")
-					}
+					d, err := l.Allow(call, charges...)
 					cancel()
-					m.add(d, found, replayed, err, time.Since(start))
+					m.add(d, err, time.Since(start))
 				}
 			}(w)
 		}
@@ -296,7 +265,7 @@ func run() error {
 		return m
 	}
 	if *warmup > 0 {
-		phase(*warmup, "warmup")
+		phase(*warmup)
 	}
 	snap := func() map[string]string {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -305,7 +274,7 @@ func run() error {
 	}
 	before := snap()
 	start := time.Now()
-	m := phase(*duration, "measure")
+	m := phase(*duration)
 	elapsed := time.Since(start)
 	after := snap()
 	count, countErr := keys(false)
@@ -317,18 +286,9 @@ func run() error {
 		return m.Samples[int(float64(len(m.Samples)-1)*p)]
 	}
 	build, _ := debug.ReadBuildInfo()
-	result := map[string]interface{}{"mode": *mode, "domains": *domains, "rules": *dimensions, "workers": *workers, "offered_rps": *rps, "duration_seconds": elapsed.Seconds(), "warmup_seconds": warmup.Seconds(), "retention_seconds": retention.Seconds(), "calls": m.Calls, "allowed": m.Allowed, "denied_or_missing": m.Denied, "found": m.Found, "replayed": m.Replayed, "errors": m.Errors, "context_errors": m.ContextErrors, "cluster": *clusterMode, "unknown": m.Unknown, "throughput": float64(m.Calls) / elapsed.Seconds(), "latency_us": map[string]int64{"p50": percentile(.50), "p95": percentile(.95), "p99": percentile(.99)}, "latency_sample_size": len(m.Samples), "latency_sampling": "uniform reservoir, max 100000; includes failures", "keys_after": count, "redis_before": before, "redis_after": after, "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "cpus": runtime.NumCPU(), "pool_stats": c.PoolStats(), "build": build}
+	result := map[string]interface{}{"admission": "dynamic", "mode": *mode, "domains": *domains, "rules": *dimensions, "workers": *workers, "offered_rps": *rps, "duration_seconds": elapsed.Seconds(), "warmup_seconds": warmup.Seconds(), "calls": m.Calls, "allowed": m.Allowed, "denied": m.Denied, "errors": m.Errors, "context_errors": m.ContextErrors, "cluster": *clusterMode, "unknown": m.Unknown, "throughput": float64(m.Calls) / elapsed.Seconds(), "latency_us": map[string]int64{"p50": percentile(.50), "p95": percentile(.95), "p99": percentile(.99)}, "latency_sample_size": len(m.Samples), "latency_sampling": "uniform reservoir, max 100000; includes failures", "keys_after": count, "redis_before": before, "redis_after": after, "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "cpus": runtime.NumCPU(), "pool_stats": c.PoolStats(), "build": build}
 	if countErr != nil {
 		result["keys_error"] = countErr.Error()
-	}
-	if *expiry {
-		time.Sleep(*retention + 2*time.Second)
-		n, err := keys(false)
-		result["keys_after_retention"] = n
-		result["redis_after_retention"] = snap()
-		if err != nil {
-			result["expiry_keys_error"] = err.Error()
-		}
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -336,15 +296,15 @@ func run() error {
 }
 
 // newLimiter constructs a Redis driver and the shared admission facade.
-func newLimiter(client redis.Scripter, namespace, domain string, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
-	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{}, quotas...)
+func newLimiter(client redis.Scripter, namespace, domain string) (*pacelock.Limiter, error) {
+	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{})
 }
 
 // newLimiterWithOptions attaches application observation to the common facade.
-func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
+func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options) (*pacelock.Limiter, error) {
 	driver, err := redisdriver.New(client)
 	if err != nil {
 		return nil, err
 	}
-	return pacelock.NewStaticWithOptions(driver, namespace, domain, options, quotas...)
+	return pacelock.NewWithOptions(driver, namespace, domain, options)
 }

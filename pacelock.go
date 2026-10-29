@@ -1,9 +1,7 @@
 // Package pacelock provides weighted, multidimensional GCRA admission using
-// backend-owned dynamic policies by default. Explicit static admission and
-// context-aware static waits support caller-owned policies.
-// Drivers own backend time, atomic persistence and retained admission records.
+// backend-owned dynamic policies, with immediate checks and context-aware waits.
+// Drivers own backend time and atomic persistence.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
-// NewStatic separates fixed quota policies from per-attempt costs.
 package pacelock
 
 import (
@@ -17,7 +15,7 @@ import (
 const (
 	// MaxRules bounds the work performed by one atomic admission.
 	MaxRules = 32
-	// MaxHorizon bounds periods, burst recovery and admission retention.
+	// MaxHorizon bounds periods and burst recovery.
 	MaxHorizon = 24 * time.Hour
 	// MaxRevision is the largest policy revision represented exactly by Redis Lua.
 	MaxRevision int64 = 9007199254740991
@@ -26,12 +24,11 @@ const (
 var (
 	// ErrInvalid reports invalid input before dispatch.
 	ErrInvalid = errors.New("pacelock: invalid argument")
-	// ErrPolicyMismatch reports a policy conflict with active quota state.
+	// ErrPolicyMismatch reports a stale or conflicting quota policy update,
+	// or a policy mismatch detected by the offline math helpers.
 	ErrPolicyMismatch = errors.New("pacelock: policy differs from active backend state")
 	// ErrState reports malformed state or replies; inspect OutcomeOf.
 	ErrState = errors.New("pacelock: invalid backend state")
-	// ErrConflict reports reuse of a retained ID with different parameters.
-	ErrConflict = errors.New("pacelock: admission ID used with different parameters")
 	// ErrBackend wraps an unclassified backend or transport failure.
 	ErrBackend = errors.New("pacelock: backend failure")
 	// ErrPaused rejects a fresh admission until the managed policy is resumed.
@@ -46,8 +43,8 @@ var (
 // charge. The same named quota must use the same effective policy throughout
 // a domain.
 type Policy struct {
-	// Revision is zero for static policies, or 1..MaxRevision for policies
-	// explicitly installed by UpdateQuotas. Managed revisions never expire.
+	// Revision is 1..MaxRevision for policies installed by UpdateQuotas.
+	// Revisions never expire. Zero is supported only by offline math helpers.
 	Revision int64
 	// Rate is units replenished per Period. Zero pauses a managed policy.
 	Rate int64
@@ -59,8 +56,8 @@ type Policy struct {
 
 // Rule charges Cost units to the quota named by Name under a caller-owned Policy.
 // Burst is total instantaneous capacity, including the first unit. Rule is the
-// low-level driver and math format; use NewStatic to fix caller-owned policies.
-// Both public limiter types accept Charge values for per-attempt costs.
+// offline math format, not a backend admission request. Limiter accepts Charge
+// values and resolves policies from the backend.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
@@ -114,20 +111,10 @@ func Validate(rules ...Rule) error {
 type Decision struct {
 	// Allowed is true when all quota charges were accepted.
 	Allowed bool
-	// RetryAfter is advisory, not a reservation. Retained results preserve the original wait.
+	// RetryAfter is advisory, not a reservation.
 	RetryAfter time.Duration
-	// Limited lists every blocking quota in charge/rule order, or binding order for
-	// StaticLimiter. It is empty on allowance.
+	// Limited lists every blocking quota in charge/rule order. It is empty on allowance.
 	Limited []string
-}
-
-// Receipt contains an original decision and its replay status. Replayed admission
-// does not authorize executing upstream work twice.
-type Receipt struct {
-	// Decision is the original allow/deny result; ignore it on error.
-	Decision
-	// Replayed reports reuse of a retained allow or deny decision.
-	Replayed bool
 }
 
 // Limiter admits charges using current backend-owned dynamic policies.
@@ -138,8 +125,7 @@ type Limiter struct {
 	core *limiterCore
 }
 
-// limiterCore shares transport, scope and observation without exposing either
-// public limiter's policy ownership or admission methods to the other.
+// limiterCore holds transport, scope and observation for admission and updates.
 type limiterCore struct {
 	driver   Driver
 	scope    Scope
@@ -196,68 +182,6 @@ func (l *limiterCore) ready(ctx context.Context) error {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
-}
-
-func (l *limiterCore) admitStatic(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
-	op := "allow_static"
-	if id != "" {
-		op = "allow_static_once"
-	}
-	if err := l.ready(ctx); err != nil {
-		return Receipt{}, failure(op, NotCharged, err)
-	}
-	request := StaticAdmission{Scope: l.scope, Rules: append([]Rule(nil), rules...), ID: id, Retention: retention}
-	if err := request.Validate(); err != nil {
-		return Receipt{}, failure(op, NotCharged, err)
-	}
-	driver, ok := l.driver.(StaticDriver)
-	if !ok {
-		return Receipt{}, failure(op, NotCharged, ErrUnsupported)
-	}
-	result, err := driver.AdmitStatic(ctx, request)
-	if err != nil {
-		return Receipt{}, driverFailure(op, err)
-	}
-	if err := validateDecision(result.Decision, rules); err != nil {
-		return Receipt{}, failure(op, Unknown, err)
-	}
-	if id == "" && result.Replayed {
-		return Receipt{}, failure(op, Unknown, fmt.Errorf("%w: replay of ordinary admission", ErrState))
-	}
-	return result, nil
-}
-
-// Lookup returns a retained complete decision without charging or extending its
-// retention. A missing result does not prove no debit: the original operation may
-// still be in flight or its record may have expired or been lost. Drivers route
-// recovery to the authoritative primary. Use Decision only when found and err==nil.
-func (l *Limiter) Lookup(ctx context.Context, id string) (Decision, bool, error) {
-	return l.engine().lookup(ctx, id)
-}
-
-func (l *limiterCore) lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
-	finish := l.observe(ctx, "lookup", 0)
-	defer func() { finish(decision, found, err) }()
-	if err := l.ready(ctx); err != nil {
-		return Decision{}, false, failure("lookup", NotCharged, err)
-	}
-	request := LookupRequest{Scope: l.scope, ID: id}
-	if err := request.Validate(); err != nil {
-		return Decision{}, false, failure("lookup", NotCharged, err)
-	}
-	decision, found, err = l.driver.Lookup(ctx, request)
-	if err != nil {
-		return Decision{}, false, driverFailure("lookup", err)
-	}
-	if found {
-		if err := validateDecision(decision, nil); err != nil {
-			return Decision{}, false, failure("lookup", Unknown, err)
-		}
-	}
-	if !found {
-		decision = Decision{}
-	}
-	return decision, found, nil
 }
 
 func validateDecision(d Decision, rules []Rule) error {

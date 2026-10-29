@@ -18,7 +18,7 @@ const (
 
 // Error preserves the underlying error chain and reports operation/accounting context.
 type Error struct {
-	// Op identifies allow, wait, allow_once or lookup.
+	// Op identifies allow, wait or update_quotas (and driver maintenance operations).
 	Op string
 	// Outcome reports accounting certainty for this invocation.
 	Outcome Outcome

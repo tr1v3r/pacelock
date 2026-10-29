@@ -1,22 +1,6 @@
 # Redis Lua scalar vs tuple benchmark
 
-The runnable harness measures the **current** unversioned `tat:interval:burst`
-static quota representation against an experimental scalar TAT. It loads this checkout's
-actual Lua. The scalar prototype removes policy-conflict detection, so it is not
-a contract-equivalent production alternative.
-
-Run from the Redis driver module against an **isolated, disposable Redis**:
-
-```sh
-go run ./bench/lua-parse -addr 127.0.0.1:PORT > results.json
-go run ./bench/lua-parse -addr 127.0.0.1:PORT -iterations 200000 > results-200k.json
-```
-
-The address must be explicit. Do not run against production or concurrently:
-the harness overwrites/deletes fixed `bench:{lua-parse}:*` keys and requires exclusive
-EVALSHA statistics. It needs SCRIPT LOAD, EVALSHA, INFO, TIME, GET, MSET and DEL.
-Start the disposable Redis with `--save '' --appendonly no`; do not change an
-existing service's persistence settings.
+This directory preserves historical static tuple/scalar experiments, not current dynamic-admission performance. The runnable harness has been removed because its caller-policy protocol no longer exists. To reproduce the tuple experiment, use the harness and Lua together from commit `bcc67d5` in a separate checkout against a disposable Redis. Never run it against current policy/debt keys.
 
 ## Method
 
@@ -40,13 +24,13 @@ existing service's persistence settings.
 - The optional 200,000-iteration run checks scaling. These are local experiments,
   not production-throughput promises or evidence of million-QPS capacity.
 
-## Current tuple measurements (2026-10-28)
+## Historical tuple measurements (2026-10-28)
 
-[Raw results](results-redis8-tuple.json) record the Lua SHA-256 and current quota
+[Raw results](results-redis8-tuple.json) record the Lua SHA-256 and then-current quota
 format. Apple M3 Pro / arm64, OrbStack Linux, Redis 8.10.2, RDB/AOF disabled;
 15 measured rounds, 50,000 micro iterations, 1,000 calls per full sample.
 
-| Case | Scalar | Current tuple |
+| Case | Scalar | Historical tuple |
 |---|---:|---:|
 | Parse | 935.14 ns | 1285.60 ns |
 | Read and validate | 1128.92 ns | 1512.82 ns |
@@ -61,8 +45,8 @@ against the historical run below; cross-run differences do not isolate tag remov
 
 The raw [50k](results-redis8-valid.json) and [200k](results-redis8-200k.json) datasets
 are retained evidence from production source `2820790` and harness commit `c331f56`.
-They measure the **removed Q2 format**, not the current tuple. Historical code is
-available in Git; no legacy reader or execution path is kept in the current harness.
+They measure the **removed Q2 format**, not the later tuple. Historical code is
+available in Git; the current driver retains only legacy tuple debt reading, not the old admission path.
 
 Apple M3 Pro / arm64, OrbStack Linux, Redis 8.10.2, RDB/AOF disabled. Medians of
 round averages from the corrected 50k run:

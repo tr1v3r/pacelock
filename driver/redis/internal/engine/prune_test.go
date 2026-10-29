@@ -27,18 +27,17 @@ func TestRedisPruneContracts(t *testing.T) {
 			const expired = 137
 			for i := 0; i < expired; i++ {
 				key, raw := l.key(fmt.Sprint(i)), fmt.Sprintf("%d:1:1", now.UnixMicro()-1)
-				if i%2 == 0 {
-					key = l.attemptKey(fmt.Sprint(i))
-					raw = fmt.Sprintf("%d|%s", now.UnixMicro()-1, complete)
-				}
 				if err := f.clients[0].Set(ctx, key, raw, 0).Err(); err != nil {
 					t.Fatal(err)
 				}
 			}
 			live := contentionRule("live", 1000, 1)
+			publishRules(t, l, live)
 			requireAllowed(t, l, live)
 			preservedReceipts := map[string]string{
-				l.attemptKey("live-envelope"): fmt.Sprintf("%d|%s", now.Add(time.Hour).UnixMicro(), complete),
+				l.prefix + "attempt:" + strings.Repeat("b", 64): "1|" + complete,
+				l.prefix + "attempt:" + strings.Repeat("c", 64): "malformed legacy record",
+				l.prefix + "attempt:" + strings.Repeat("a", 64): fmt.Sprintf("%d|%s", now.Add(time.Hour).UnixMicro(), complete),
 			}
 			for key, raw := range preservedReceipts {
 				if err := f.clients[0].Set(ctx, key, raw, time.Minute).Err(); err != nil {
@@ -86,6 +85,7 @@ func TestRedisPruneContracts(t *testing.T) {
 			// Concurrent cleanup of an old candidate cannot reset newly admitted debt.
 			racing := f.limiter(t)
 			active := contentionRule("q", 37, 1)
+			publishRules(t, racing, active)
 			if err := f.clients[0].Set(ctx, racing.key("q"), "1:1:1", 0).Err(); err != nil {
 				t.Fatal(err)
 			}
@@ -93,7 +93,7 @@ func TestRedisPruneContracts(t *testing.T) {
 			var accepted atomic.Int64
 			contentionWave(t, 200, func(ctx context.Context, i int) {
 				if i%2 == 0 {
-					d, err := racing.Allow(ctx, active)
+					d, err := racing.admitRules(ctx, active)
 					if err != nil {
 						t.Error(err)
 					} else if d.Allowed {
@@ -121,22 +121,16 @@ func TestRedisPruneContracts(t *testing.T) {
 				{"receipt envelope on quota", l.key("bad"), "1|" + complete},
 				{"complete receipt on quota", l.key("bad"), complete},
 				{"pending receipt on quota", l.key("bad"), "P1|" + strings.Repeat("a", 64)},
-				{"quota on receipt", l.attemptKey("bad"), "1:1:1"},
-				{"Q2 on receipt", l.attemptKey("bad"), "Q2|1:1:1"},
-				{"malformed receipt", l.attemptKey("bad"), "1|" + strings.Repeat("a", 64) + "|{}"},
-				{"tagged complete", l.attemptKey("bad"), "C1|" + complete},
-				{"tagged envelope", l.attemptKey("bad"), "E2|1|C1|" + complete},
-				{"tagged marker", l.attemptKey("bad"), "P1|" + strings.Repeat("a", 64)},
 			} {
 				t.Run(entry.name, func(t *testing.T) {
-					expiredQuota, expiredReceipt := l.key("expired-peer"), l.attemptKey("expired-peer")
+					expiredQuota := l.key("expired-peer")
 					before := map[string]string{
-						expiredQuota: "1:1:1", expiredReceipt: "1|" + complete, entry.key: entry.raw,
+						expiredQuota: "1:1:1", entry.key: entry.raw,
 					}
 					if err := f.clients[0].MSet(ctx, before).Err(); err != nil {
 						t.Fatal(err)
 					}
-					cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{expiredQuota, expiredReceipt, entry.key}}
+					cursor := PruneCursor{scope: l.prefix, position: "0", pending: []string{expiredQuota, entry.key}}
 					if _, err := l.Prune(ctx, cursor, 3); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
 						t.Fatalf("invalid candidate: %v", err)
 					}
@@ -225,7 +219,7 @@ func TestPruneBoundsAndScanOverflow(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		keys = append(keys, l.key(fmt.Sprint(i)))
 	}
-	keys = append(keys, "foreign", l.prefix+"not-an-sdk-key", l.prefix+strings.Repeat("z", 64))
+	keys = append(keys, "foreign", l.prefix+"not-an-sdk-key", l.prefix+strings.Repeat("z", 64), l.prefix+"attempt:"+strings.Repeat("a", 64))
 	s.replies = []interface{}{[]interface{}{"0", keys}, int64(2), int64(2), int64(1)}
 	cursor := PruneCursor{}
 	total := int64(0)

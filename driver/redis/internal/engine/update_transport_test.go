@@ -26,17 +26,17 @@ func TestRedisManagedLostReplyNoRetry(t *testing.T) {
 	if err := c.Ping(ctx).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := managedScript.Load(ctx, c).Err(); err != nil {
+	if err := admissionScript.Load(ctx, c).Err(); err != nil {
 		t.Fatal(err)
 	}
 	c.AddHook(&armReplyLoss{loss: loss, command: "evalsha"})
 	broken := &Limiter{client: safeScripter(c), prefix: l.prefix}
 	req := managedRequest("q", 1)
-	if _, err := broken.AdmitManaged(ctx, req); !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
+	if _, err := broken.Admit(ctx, req); !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
 		t.Fatalf("lost reply: %v", err)
 	}
 	for _, allowed := range []bool{true, false} {
-		d, err := l.AdmitManaged(ctx, req)
+		d, err := l.Admit(ctx, req)
 		if err != nil || d.Allowed != allowed {
 			t.Fatalf("replayed debit: %+v %v", d, err)
 		}

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -145,7 +144,7 @@ func requireAllowed(t *testing.T, l *Limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if d, err := l.Allow(ctx, rules...); err != nil || !d.Allowed {
+	if d, err := l.admitRules(ctx, rules...); err != nil || !d.Allowed {
 		t.Fatalf("want allowed: %+v %v", d, err)
 	}
 }
@@ -154,7 +153,7 @@ func requireDenied(t *testing.T, l *Limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if d, err := l.Allow(ctx, rules...); err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) == 0 {
+	if d, err := l.admitRules(ctx, rules...); err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) == 0 {
 		t.Fatalf("want denied: %+v %v", d, err)
 	}
 }
@@ -195,13 +194,9 @@ func TestRedisConcurrency(t *testing.T) {
 				{"repeated_workers", testContentionWorkers},
 				{"overlapping_quotas", testContentionOverlapping},
 				{"isolation", testContentionIsolation},
-				{"same_id", testContentionSameID},
-				{"mixed_apis_and_ids", testContentionMixedAPIs},
-				{"id_conflict", testContentionConflict},
-				{"policy_race", testContentionPolicy},
+				{"policy_updates", testContentionPolicyUpdates},
 				{"invalid_and_canceled", testContentionCancellation},
-				{"lookup_and_replay", testContentionLookup},
-				{"malformed_records_and_quotas", testContentionBadState},
+				{"malformed_quotas", testContentionBadState},
 				{"lost_responses", testContentionLostResponses},
 				{"small_pool", testContentionSmallPool},
 				{"pool_exhaustion", testContentionPoolExhaustion},
@@ -228,6 +223,7 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 					cost := int64(j%3 + 1)
 					rules[j] = contentionRule(fmt.Sprintf("q%d", j), int64(37+j%3)*cost, cost)
 				}
+				publishRules(t, l, rules...)
 				var admitted atomic.Int64
 				contentionWave(t, n, func(ctx context.Context, i int) {
 					// Different argument orders must not affect atomic admission.
@@ -237,7 +233,7 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 							r[a], r[b] = r[b], r[a]
 						}
 					}
-					d, err := f.caller(l, i).Allow(ctx, r...)
+					d, err := f.caller(l, i).admitRules(ctx, r...)
 					if err != nil {
 						t.Error(err)
 						return
@@ -278,13 +274,14 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 func testContentionCosts(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
 	r := contentionRule("units", 1000, 1)
+	publishRules(t, l, r)
 	requireAllowed(t, l, r) // Establish a common TAT before competing weighted calls.
 	var charged atomic.Int64
 	charged.Store(1)
 	contentionWave(t, 500, func(ctx context.Context, i int) {
 		r := r
 		r.Cost = int64(i%7 + 1)
-		d, err := f.caller(l, i).Allow(ctx, r)
+		d, err := f.caller(l, i).admitRules(ctx, r)
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {
@@ -305,10 +302,14 @@ func testContentionCosts(t *testing.T, f *contentionFixture) {
 
 func testContentionOverlapping(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
+	publishRules(t, l, contentionRule("global", 122, 2))
+	for i := 0; i < 4; i++ {
+		publishRules(t, l, contentionRule(fmt.Sprintf("tenant%d", i), 17, 1))
+	}
 	var admitted [4]atomic.Int64
 	contentionWave(t, 400, func(ctx context.Context, i int) {
 		tenant := i % 4
-		d, err := f.caller(l, i).Allow(ctx, contentionRule("global", 122, 2), contentionRule(fmt.Sprintf("tenant%d", tenant), 17, 1))
+		d, err := f.caller(l, i).admitRules(ctx, contentionRule("global", 122, 2), contentionRule(fmt.Sprintf("tenant%d", tenant), 17, 1))
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {
@@ -337,7 +338,7 @@ func testContentionOverlapping(t *testing.T, f *contentionFixture) {
 }
 
 func testContentionIsolation(t *testing.T, f *contentionFixture) {
-	// Same ID/quota name; vary namespace alone, domain alone, and both.
+	// Same quota name; vary namespace alone, domain alone, and both.
 	seed := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	limiters := make([]*Limiter, 32)
 	for i := range limiters {
@@ -352,15 +353,16 @@ func testContentionIsolation(t *testing.T, f *contentionFixture) {
 			t.Fatal(err)
 		}
 		limiters[i] = l
+		publishRules(t, l, contentionRule("q", 1, 1))
 		f.cleanup(t, l)
 	}
 	var originals [32]atomic.Int64
 	contentionWave(t, 512, func(ctx context.Context, i int) {
 		domain := i % len(limiters)
-		d, err := f.caller(limiters[domain], i).AllowOnce(ctx, "same", time.Minute, contentionRule("q", 1, 1))
-		if err != nil || !d.Allowed {
+		d, err := f.caller(limiters[domain], i).admitRules(ctx, contentionRule("q", 1, 1))
+		if err != nil {
 			t.Errorf("domain %d: %+v %v", domain, d, err)
-		} else if !d.Replayed {
+		} else if d.Allowed {
 			originals[domain].Add(1)
 		}
 	})
@@ -372,143 +374,14 @@ func testContentionIsolation(t *testing.T, f *contentionFixture) {
 	}
 }
 
-func testContentionSameID(t *testing.T, f *contentionFixture) {
-	for _, allow := range []bool{true, false} {
-		t.Run(fmt.Sprintf("allowed_%t", allow), func(t *testing.T) {
-			l := f.limiter(t)
-			r := contentionRule("q", 1, 1)
-			if !allow {
-				requireAllowed(t, l, r)
-			}
-			receipts := make([]Receipt, 1000)
-			var originals atomic.Int64
-			contentionWave(t, len(receipts), func(ctx context.Context, i int) {
-				d, err := f.caller(l, i).AllowOnce(ctx, "same", time.Minute, r)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				receipts[i] = d
-				if !d.Replayed {
-					originals.Add(1)
-				}
-			})
-			if originals.Load() != 1 {
-				t.Fatalf("originals=%d", originals.Load())
-			}
-			for _, d := range receipts {
-				if d.Allowed != allow || !reflect.DeepEqual(d.Decision, receipts[0].Decision) {
-					t.Fatalf("inconsistent retained result: %+v", d)
-				}
-			}
-			requireDenied(t, l, r)
-		})
-	}
-}
-
-func testContentionMixedAPIs(t *testing.T, f *contentionFixture) {
-	l := f.limiter(t)
-	r := contentionRule("q", 73, 1)
-	receipts := make([]Receipt, 400)
-	var admitted, originals atomic.Int64
-	contentionWave(t, 500, func(ctx context.Context, i int) {
-		current := f.caller(l, i)
-		if i >= 400 {
-			d, err := current.Allow(ctx, r)
-			if err != nil {
-				t.Error(err)
-			} else if d.Allowed {
-				admitted.Add(1)
-			}
-			return
-		}
-		d, err := current.AllowOnce(ctx, fmt.Sprintf("id%d", i%100), time.Minute, r)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		receipts[i] = d
-		if !d.Replayed {
-			originals.Add(1)
-			if d.Allowed {
-				admitted.Add(1)
-			}
-		}
-	})
-	if originals.Load() != 100 || admitted.Load() != 73 {
-		t.Fatalf("originals=%d admitted=%d", originals.Load(), admitted.Load())
-	}
-	contentionWave(t, 100, func(ctx context.Context, i int) {
-		for j := 1; j < 4; j++ {
-			if !reflect.DeepEqual(receipts[i].Decision, receipts[i+j*100].Decision) {
-				t.Errorf("ID %d disagrees", i)
-			}
-		}
-		d, found, err := f.caller(l, i).Lookup(ctx, fmt.Sprintf("id%d", i))
-		if err != nil || !found || !reflect.DeepEqual(d, receipts[i].Decision) {
-			t.Errorf("lookup ID %d: %+v %t %v", i, d, found, err)
-		}
-	})
-	requireDenied(t, l, r)
-}
-
-func testContentionConflict(t *testing.T, f *contentionFixture) {
-	l := f.limiter(t)
-	var originals, conflicts, winningCost atomic.Int64
-	contentionWave(t, 500, func(ctx context.Context, i int) {
-		cost := int64(i%2 + 1)
-		d, err := f.caller(l, i).AllowOnce(ctx, "same", time.Minute, contentionRule("q", 10, cost))
-		if errors.Is(err, ErrConflict) && OutcomeOf(err) == NotCharged {
-			conflicts.Add(1)
-			return
-		}
-		if err != nil || !d.Allowed {
-			t.Errorf("%+v %v", d, err)
-			return
-		}
-		if !d.Replayed {
-			originals.Add(1)
-			winningCost.Store(cost)
-		}
-	})
-	if originals.Load() != 1 || conflicts.Load() != 250 {
-		t.Fatalf("originals=%d conflicts=%d", originals.Load(), conflicts.Load())
-	}
-	requireAllowed(t, l, contentionRule("q", 10, 10-winningCost.Load()))
-	requireDenied(t, l, contentionRule("q", 10, 1))
-}
-
-func testContentionPolicy(t *testing.T, f *contentionFixture) {
-	l := f.limiter(t)
-	var mismatches, admitted, winningBurst atomic.Int64
-	contentionWave(t, 200, func(ctx context.Context, i int) {
-		burst := int64(10 * (i%2 + 1))
-		d, err := f.caller(l, i).Allow(ctx, contentionRule("q", burst, 1), contentionRule(fmt.Sprintf("side%d", i), 1, 1))
-		if errors.Is(err, ErrPolicyMismatch) && OutcomeOf(err) == NotCharged {
-			mismatches.Add(1)
-		} else if err != nil {
-			t.Error(err)
-		} else if d.Allowed {
-			admitted.Add(1)
-			winningBurst.Store(burst)
-			return
-		}
-		if n, err := f.clients[0].Exists(ctx, l.key(fmt.Sprintf("side%d", i))).Result(); err != nil || n != 0 {
-			t.Errorf("failed request wrote side quota: %d %v", n, err)
-		}
-	})
-	if mismatches.Load() != 100 || admitted.Load() != winningBurst.Load() || admitted.Load() == 0 {
-		t.Fatalf("mismatches=%d admitted=%d burst=%d", mismatches.Load(), admitted.Load(), winningBurst.Load())
-	}
-}
-
 func testContentionWorkers(t *testing.T, f *contentionFixture) {
 	// Keep each worker active for multiple sequential calls. Half hit one hot
-	// domain; half spread over eight other domains. Both admission APIs contend
+	// domain; half spread over eight other domains. All workers contend
 	// on the same quotas. This is a bounded workload, not a long-duration soak.
 	limiters := make([]*Limiter, 9)
 	for i := range limiters {
 		limiters[i] = f.limiter(t)
+		publishRules(t, limiters[i], contentionRule("q", 200, 2))
 	}
 	var admitted [9]atomic.Int64
 	contentionWave(t, 64, func(ctx context.Context, worker int) {
@@ -519,18 +392,7 @@ func testContentionWorkers(t *testing.T, f *contentionFixture) {
 		current := f.caller(limiters[domain], worker)
 		for iteration := 0; iteration < 40; iteration++ {
 			r := contentionRule("q", 200, 2)
-			var d Decision
-			var err error
-			if iteration%2 == 0 {
-				d, err = current.Allow(ctx, r)
-			} else {
-				var receipt Receipt
-				receipt, err = current.AllowOnce(ctx, fmt.Sprintf("w%d-i%d", worker, iteration), time.Minute, r)
-				if receipt.Replayed {
-					t.Error("unique worker ID replayed")
-				}
-				d = receipt.Decision
-			}
+			d, err := current.admitRules(ctx, r)
 			if err != nil {
 				t.Error(err)
 				return

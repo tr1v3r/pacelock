@@ -61,13 +61,13 @@ func TestValidationBeforeRedis(t *testing.T) {
 	}
 	r := Rule{Name: "rpm", Policy: Policy{Rate: 1, Period: time.Second, Burst: 1}, Cost: 1}
 	for _, rules := range [][]Rule{nil, {r, r}, make([]Rule, MaxRules+1)} {
-		if _, err := l.Allow(context.Background(), rules...); !errors.Is(err, ErrInvalid) {
+		if _, err := l.admitRules(context.Background(), rules...); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("err=%v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := l.Allow(ctx, r); !errors.Is(err, context.Canceled) {
+	if _, err := l.admitRules(ctx, r); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	a, _ := New(client, "a", "bc")

@@ -4,23 +4,20 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 )
 
-// BenchmarkStaticAdmission isolates facade overhead with an always-allow driver;
+// BenchmarkDynamicAdmission isolates facade overhead with an always-allow driver;
 // it does not measure backend throughput or persistence cost.
-func BenchmarkStaticAdmission(b *testing.B) {
+func BenchmarkDynamicAdmission(b *testing.B) {
 	for _, n := range []int{1, 4, MaxRules} {
 		b.Run(fmt.Sprintf("quotas=%d", n), func(b *testing.B) {
-			driver := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
-			quotas := make([]Quota, n)
+			driver := &testDriver{result: Decision{Allowed: true}}
 			charges := make([]Charge, n)
-			for i := range quotas {
+			for i := range charges {
 				name := fmt.Sprint(i)
-				quotas[i] = Quota{Name: name, Policy: Policy{Rate: 1000, Period: time.Second, Burst: 1000}}
 				charges[n-1-i] = Charge{Name: name, Cost: 1}
 			}
-			limiter, err := NewStatic(driver, "benchmark", "static", quotas...)
+			limiter, err := New(driver, "benchmark", "dynamic")
 			if err != nil {
 				b.Fatal(err)
 			}

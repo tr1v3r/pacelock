@@ -49,7 +49,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	r := rule("quota", 4, 4)
 	r.Policy.Revision = 1
 	req := managedRequest(r.Name, 4)
-	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, pacelock.ErrPolicyMissing) || OutcomeOf(err) != NotCharged {
+	if _, err := l.Admit(ctx, req); !errors.Is(err, pacelock.ErrPolicyMissing) || OutcomeOf(err) != NotCharged {
 		t.Fatalf("missing: %v", err)
 	}
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
@@ -58,7 +58,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if c.Exists(ctx, l.key(r.Name)).Val() != 0 {
 		t.Fatal("update created debt")
 	}
-	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Allowed {
+	if d, err := l.Admit(ctx, req); err != nil || !d.Allowed {
 		t.Fatalf("initial: %+v %v", d, err)
 	}
 	debt := c.Get(ctx, l.key(r.Name)).Val()
@@ -74,11 +74,11 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
 		t.Fatal("update changed debt")
 	}
-	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, ErrInvalid) {
+	if _, err := l.Admit(ctx, req); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("over-burst: %v", err)
 	}
 	req.Charges[0].Cost = 1
-	if d, err := l.AdmitManaged(ctx, req); err != nil || d.Allowed || d.RetryAfter < 3*time.Hour {
+	if d, err := l.Admit(ctx, req); err != nil || d.Allowed || d.RetryAfter < 3*time.Hour {
 		t.Fatalf("shrink: %+v %v", d, err)
 	}
 	equivalent := r
@@ -110,20 +110,12 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	req.ID = "paused"
-	req.Retention = time.Hour
 	req.Charges[0].Cost = 4
-	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, pacelock.ErrPaused) || OutcomeOf(err) != NotCharged {
+	if _, err := l.Admit(ctx, req); !errors.Is(err, pacelock.ErrPaused) || OutcomeOf(err) != NotCharged {
 		t.Fatalf("paused: %v", err)
 	}
-	if c.Exists(ctx, l.attemptKey(req.ID)).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != debt {
+	if c.Get(ctx, l.key(r.Name)).Val() != debt {
 		t.Fatal("pause mutated state")
-	}
-	if _, err := l.Allow(ctx, rule(r.Name, 4, 1)); !errors.Is(err, ErrPolicyMismatch) {
-		t.Fatalf("static bypass: %v", err)
-	}
-	if _, err := l.Allow(ctx, r); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("old managed API accepted: %v", err)
 	}
 	// Expired debt is reclaimable, policy/paused state remains.
 	c.Set(ctx, l.key(r.Name), "D3|0", 0)
@@ -150,8 +142,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 		t.Fatal(err)
 	}
 	req.Charges[0].Cost = 1
-	req.ID = "resumed"
-	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Allowed {
+	if d, err := l.Admit(ctx, req); err != nil || !d.Allowed {
 		t.Fatalf("resume: %+v %v", d, err)
 	}
 	r.Policy.Revision = 5
@@ -159,11 +150,8 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Replayed || !d.Allowed {
-		t.Fatalf("replay latest policy: %+v %v", d, err)
-	}
-	if _, err := l.AllowOnce(ctx, req.ID, req.Retention, rule(r.Name, 1, 1)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("static/managed conflict: %v", err)
+	if _, err := l.Admit(ctx, req); !errors.Is(err, pacelock.ErrPaused) || OutcomeOf(err) != NotCharged {
+		t.Fatalf("latest policy: %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -172,14 +160,18 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 }
 
-func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
+func TestRedisManagedLegacyTupleDebt(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("legacy", 2, 1)
-	if d, e := l.AllowOnce(ctx, "old", time.Hour, r); e != nil || !d.Allowed {
-		t.Fatalf("%+v %v", d, e)
+	now, err := c.Time(ctx).Result()
+	if err != nil {
+		t.Fatal(err)
 	}
-	debt := c.Get(ctx, l.key(r.Name)).Val()
+	debt := fmt.Sprintf("%d:3600000000:2", now.UnixMicro()+int64(time.Hour/time.Microsecond))
+	if err := c.Set(ctx, l.key(r.Name), debt, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
 	r.Policy.Revision = 1
 	r.Policy.Rate = 0
 	if e := l.UpdateQuotas(ctx, quotaOf(r)); e != nil {
@@ -188,16 +180,8 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
 		t.Fatal("legacy debt touched")
 	}
-	static := r
-	static.Policy.Revision = 0
-	static.Policy.Rate = 1
-	if d, e := l.AllowOnce(ctx, "old", time.Hour, static); e != nil || !d.Replayed {
-		t.Fatalf("static replay: %+v %v", d, e)
-	}
 	req := managedRequest(r.Name, 1)
-	req.ID = "old"
-	req.Retention = time.Hour
-	if _, e := l.AdmitManaged(ctx, req); !errors.Is(e, ErrConflict) {
+	if _, e := l.Admit(ctx, req); !errors.Is(e, pacelock.ErrPaused) {
 		t.Fatal(e)
 	}
 	r.Policy.Revision = 2
@@ -206,8 +190,7 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	if e := l.UpdateQuotas(ctx, quotaOf(r)); e != nil {
 		t.Fatal(e)
 	}
-	req.ID = "new"
-	if d, e := l.AdmitManaged(ctx, req); e != nil || d.Allowed {
+	if d, e := l.Admit(ctx, req); e != nil || d.Allowed {
 		t.Fatalf("legacy debt reset: %+v %v", d, e)
 	}
 }
@@ -222,7 +205,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 		if err := l.UpdateQuotas(ctx, quotaOf(r)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s update: %v", raw, err)
 		}
-		if _, err := l.AdmitManaged(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
+		if _, err := l.Admit(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s admit: %v", raw, err)
 		}
 		// SCAN may return an empty first page even with matching keys present.
@@ -244,7 +227,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	}
 	for _, raw := range []string{"D3|-1", "D3|9007199254740991", "D3|bad", "Q2|1:1:1", "P3|1:1:1", "E2|1|C1|removed"} {
 		c.Set(ctx, l.key(r.Name), raw, 0)
-		if _, err := l.AdmitManaged(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
+		if _, err := l.Admit(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s debt: %v", raw, err)
 		}
 	}

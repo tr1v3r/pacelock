@@ -1,7 +1,7 @@
 // Package redisdriver implements Pacelock atomic admission using Redis Lua.
-// It commits quotas and complete receipts in one MSET, with logical expiry and
-// caller-scheduled bounded cleanup. Static quotas and receipts use unversioned
-// formats; managed policies and debt use P3 and D3 respectively. One domain
+// It commits quotas in one MSET, with logical expiry and
+// caller-scheduled bounded cleanup. Policies and debt use P3 and D3
+// respectively; legacy tuple debt remains readable for upgrades. One domain
 // occupies one Redis Cluster hash slot; transport commands prevent ambiguous replay.
 package redisdriver
 
@@ -21,25 +21,21 @@ type Driver struct{ client redis.Scripter }
 
 var _ pacelock.Driver = (*Driver)(nil)
 var _ pacelock.QuotaDriver = (*Driver)(nil)
-var _ pacelock.StaticDriver = (*Driver)(nil)
 
 // Admit reads authoritative policies and atomically admits named costs.
-func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Receipt, error) {
+func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (pacelock.Decision, error) {
 	op := "allow"
-	if request.ID != "" {
-		op = "allow_once"
-	}
 	if err := request.Validate(); err != nil {
-		return pacelock.Receipt{}, inputError(op, err)
+		return pacelock.Decision{}, inputError(op, err)
 	}
 	if d == nil {
-		return pacelock.Receipt{}, inputError(op, pacelock.ErrInvalid)
+		return pacelock.Decision{}, inputError(op, pacelock.ErrInvalid)
 	}
 	l, err := engine.New(d.client, request.Namespace, request.Domain)
 	if err != nil {
-		return pacelock.Receipt{}, inputError(op, err)
+		return pacelock.Decision{}, inputError(op, err)
 	}
-	return l.AdmitManaged(ctx, request)
+	return l.Admit(ctx, request)
 }
 
 // UpdateQuotas atomically changes managed policies while preserving all debt.
@@ -69,47 +65,6 @@ func New(client redis.Scripter) (*Driver, error) {
 	return &Driver{client: client}, nil
 }
 
-// AdmitStatic executes all dimensions and optional retained deduplication in one Lua
-// operation with one final MSET. Command rejection does not debit; lost responses
-// and other ambiguous failures retain Unknown. Malformed receipts are rejected.
-func (d *Driver) AdmitStatic(ctx context.Context, request pacelock.StaticAdmission) (pacelock.Receipt, error) {
-	op := "allow_static"
-	if request.ID != "" {
-		op = "allow_static_once"
-	}
-	if err := request.Validate(); err != nil {
-		return pacelock.Receipt{}, inputError(op, err)
-	}
-	if d == nil {
-		return pacelock.Receipt{}, inputError(op, pacelock.ErrInvalid)
-	}
-	l, err := engine.New(d.client, request.Namespace, request.Domain)
-	if err != nil {
-		return pacelock.Receipt{}, inputError(op, err)
-	}
-	if request.ID != "" {
-		return l.AllowOnce(ctx, request.ID, request.Retention, request.Rules...)
-	}
-	decision, err := l.Allow(ctx, request.Rules...)
-	return pacelock.Receipt{Decision: decision}, err
-}
-
-// Lookup reads the authoritative primary without debiting or extending retention.
-// A missing result does not establish that the original operation did not debit.
-func (d *Driver) Lookup(ctx context.Context, request pacelock.LookupRequest) (pacelock.Decision, bool, error) {
-	if err := request.Validate(); err != nil {
-		return pacelock.Decision{}, false, inputError("lookup", err)
-	}
-	if d == nil {
-		return pacelock.Decision{}, false, inputError("lookup", pacelock.ErrInvalid)
-	}
-	l, err := engine.New(d.client, request.Namespace, request.Domain)
-	if err != nil {
-		return pacelock.Decision{}, false, inputError("lookup", err)
-	}
-	return l.Lookup(ctx, request.ID)
-}
-
 func inputError(op string, err error) error {
 	return &pacelock.Error{Op: op, Outcome: pacelock.NotCharged, Err: err}
 }
@@ -128,7 +83,7 @@ type PruneResult = engine.PruneResult
 // on the scope's current primary. Limit must be 1..MaxPruneKeys. SCAN COUNT is a
 // hint, so discovery has no hard latency bound and overflow is buffered in Cursor.
 // Logically expired values are deleted only after an atomic recheck. Malformed
-// candidates abort the batch; active debt and live decisions are preserved. The application schedules
+// candidates abort the batch; active debt and legacy records are preserved. The application schedules
 // repeated cycles; constructors and admissions never start cleanup goroutines.
 func (d *Driver) Prune(ctx context.Context, scope pacelock.Scope, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := scope.Validate(); err != nil {
