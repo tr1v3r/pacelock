@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
 	"github.com/redis/go-redis/v9"
 	"github.com/tr1v3r/pacelock"
+	"strconv"
 )
 
 // Driver is concurrency-safe when its caller-owned Scripter is concurrency-safe.
@@ -283,4 +285,250 @@ func decodeDecision(values []int64, names []string) (Decision, error) {
 		return Decision{}, fmt.Errorf("%w: inconsistent script response", ErrState)
 	}
 	return d, nil
+}
+
+//go:embed update.lua
+var updateSource string
+
+var updateScript = redis.NewScript(protocolSource + updateSource)
+
+// UpdateQuotas atomically installs managed policies without resetting debt.
+// Transport ambiguity is Unknown; no implicit retries are performed.
+func (l *limiter) UpdateQuotas(ctx context.Context, quotas ...pacelock.Quota) error {
+	const op = "update_quotas"
+	if err := l.ready(ctx); err != nil {
+		return failure(op, NotCharged, err)
+	}
+	// Scope was already validated by construction; validate the quota contract here.
+	request := pacelock.QuotaUpdate{Scope: pacelock.Scope{Namespace: "validated", Domain: "validated"}, Quotas: quotas}
+	if err := request.Validate(); err != nil {
+		return failure(op, NotCharged, err)
+	}
+	keys := make([]string, len(quotas))
+	args := make([]interface{}, 0, 3*len(quotas))
+	for i, q := range quotas {
+		step, _ := (Rule{Name: q.Name, Policy: q.Policy, Cost: 1}).Interval()
+		keys[i] = l.policyKey(q.Name)
+		args = append(args, step.Microseconds(), q.Policy.Burst, q.Policy.Revision)
+	}
+	cmd := updateScript.Run(ctx, l.client, keys, args...)
+	if err := cmd.Err(); err != nil {
+		return scriptFailure(op, err)
+	}
+	reply, err := cmd.Int64()
+	if err != nil || reply != 1 {
+		return failure(op, Unknown, fmt.Errorf("%w: invalid policy update reply", ErrState))
+	}
+	return nil
+}
+
+// MaxPruneKeys is the maximum number of candidate values read by one cleanup call.
+const MaxPruneKeys = 64
+
+// PruneCursor is an opaque, caller-owned scan position. Start with its zero value.
+// Keep returned values between calls; cursors are scope-bound and not serializable.
+// Restart from zero after topology changes or process restarts. Concurrent changes
+// make discovery best effort, so applications must schedule repeated full cycles.
+type PruneCursor struct {
+	// scope prevents using a cursor with a different namespace/domain.
+	scope string
+	// position is the SCAN position on the domain's current primary.
+	position string
+	// pending buffers overflow because SCAN COUNT is not a hard bound.
+	pending []string
+	// done distinguishes a completed cycle from the initial zero cursor.
+	done bool
+}
+
+// Done reports completion of the scan cycle and any buffered candidates.
+func (c PruneCursor) Done() bool { return c.done }
+
+// PruneResult describes one cleanup step. Ignore it on error.
+type PruneResult struct {
+	// Cursor is the next position; repeat until Cursor.Done().
+	Cursor PruneCursor
+	// Examined is the number of candidate values checked, at most the requested limit.
+	Examined int
+	// Deleted is the number of logically expired values physically removed.
+	Deleted int64
+}
+
+// scanScript routes discovery to the domain's primary using a same-slot anchor.
+// It does not access values or derive keys for a mutation inside the script.
+var scanScript = redis.NewScript(`return redis.call('SCAN', ARGV[1], 'MATCH', KEYS[1] .. '*', 'COUNT', ARGV[2])`)
+
+// pruneSource rechecks candidate expiry before its only deletion command.
+//
+//go:embed prune.lua
+var pruneSource string
+
+// pruneScript shares the admission protocol's clock and expiry readers.
+var pruneScript = redis.NewScript(protocolSource + pruneSource)
+
+// Prune performs at most one SCAN page and checks at most limit candidate values,
+// with 1 <= limit <= MaxPruneKeys. SCAN COUNT is only a discovery-work hint;
+// overflow is buffered in the cursor. This is not a hard Redis latency bound.
+// Active debt, permanent policy fences, and keys outside the owned key grammar
+// are preserved. Malformed candidates abort the batch without deleting any keys.
+// The caller owns scheduling; no worker is started.
+func (l *limiter) Prune(ctx context.Context, cursor PruneCursor, limit int) (PruneResult, error) {
+	if err := l.ready(ctx); err != nil {
+		return PruneResult{}, failure("prune", NotCharged, err)
+	}
+	if limit < 1 || limit > MaxPruneKeys || (cursor.scope != "" && cursor.scope != l.prefix) {
+		return PruneResult{}, failure("prune", NotCharged, fmt.Errorf("%w: cleanup limit or cursor scope", ErrInvalid))
+	}
+	if cursor.done {
+		return PruneResult{Cursor: cursor}, nil
+	}
+
+	next := cursor
+	next.scope = l.prefix
+	// Discovery: at most one SCAN page, buffering overflow into pending.
+	if len(next.pending) == 0 {
+		position := next.position
+		if position == "" {
+			position = "0"
+		}
+		cmd := scanScript.Run(ctx, l.client, []string{l.prefix}, position, limit)
+		if err := cmd.Err(); err != nil {
+			return PruneResult{}, scriptFailure("prune", err)
+		}
+		values, err := cmd.Slice()
+		if err != nil || len(values) != 2 {
+			return PruneResult{}, failure("prune", Unknown, ErrState)
+		}
+		position, ok := values[0].(string)
+		if _, err := strconv.ParseUint(position, 10, 64); !ok || err != nil {
+			return PruneResult{}, failure("prune", Unknown, ErrState)
+		}
+		keys, ok := values[1].([]interface{})
+		if !ok {
+			return PruneResult{}, failure("prune", Unknown, ErrState)
+		}
+		next.position = position
+		next.pending = nil
+		for _, value := range keys {
+			key, ok := value.(string)
+			if !ok {
+				return PruneResult{}, failure("prune", Unknown, ErrState)
+			}
+			if l.ownedKey(key) {
+				next.pending = append(next.pending, key)
+			}
+		}
+	}
+
+	// Consumption: take at most limit buffered candidates for this step.
+	n := len(next.pending)
+	if n > limit {
+		n = limit
+	}
+	candidates := next.pending[:n]
+	next.pending = next.pending[n:]
+	next.done = next.position == "0" && len(next.pending) == 0
+	result := PruneResult{Cursor: next, Examined: n}
+	if n == 0 {
+		return result, nil
+	}
+
+	cmd := pruneScript.Run(ctx, l.client, candidates)
+	if err := cmd.Err(); err != nil {
+		return PruneResult{}, scriptFailure("prune", err)
+	}
+	deleted, err := cmd.Int64()
+	if err != nil || deleted < 0 || deleted > int64(n) {
+		return PruneResult{}, failure("prune", Unknown, ErrState)
+	}
+	result.Deleted = deleted
+	return result, nil
+}
+
+// ownedKey recognizes only SDK-generated quota and policy keys in this scope.
+func (l *limiter) ownedKey(key string) bool {
+	suffix, ok := strings.CutPrefix(key, l.prefix)
+	if !ok {
+		return false
+	}
+	suffix = strings.TrimPrefix(suffix, "policy:")
+	if len(suffix) != 64 {
+		return false
+	}
+	for _, c := range suffix {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// validateTransport checks normalized options, not the values originally passed
+// to go-redis constructors. It must not connect, instantiate Cluster nodes, or
+// change caller-owned options. Wrappers, hooks and custom node factories remain
+// the caller's responsibility: redis.Scripter cannot expose their replay policy.
+func validateTransport(client redis.Scripter) error {
+	switch c := client.(type) {
+	case *redis.Ring:
+		return fmt.Errorf("%w: redis.Ring is unsupported; use redis.Client or redis.ClusterClient", ErrInvalid)
+	case *redis.Client:
+		// NoRetry protects script commands independently of the client retry budget.
+		// Negative normalized values are invalid (input -1 normalizes to zero).
+		if c.Options() == nil || c.Options().MaxRetries < 0 {
+			return fmt.Errorf("%w: redis.Client requires a nonnegative normalized retry budget", ErrInvalid)
+		}
+	case *redis.ClusterClient:
+		// NoRetry suppresses ambiguous replay, while the redirect budget permits
+		// safe MOVED/ASK recovery. Only reject unsupported negative budgets.
+		options := c.Options()
+		if options == nil || options.MaxRedirects < 0 || options.MaxRetries < -1 {
+			return fmt.Errorf("%w: redis.ClusterClient requires MaxRetries >= -1 and a nonnegative normalized redirect budget", ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// noRetryScripter adapts Pacelock's internal EVAL/EVALSHA calls for the supported
+// go-redis clients. It retains Script.Run cache-miss handling and safe MOVED/ASK
+// redirects while preventing ambiguous replay, including within ASK pipelines.
+type noRetryScripter struct {
+	redis.Scripter
+	process func(context.Context, redis.Cmder) error
+}
+
+// noRetryCmd changes only the command replay policy. Routing and execution
+// remain owned by go-redis.
+type noRetryCmd struct{ *redis.Cmd }
+
+func (noRetryCmd) NoRetry() bool { return true }
+
+// safeScripter deliberately recognizes concrete clients: a custom transport
+// exposing Process is not necessarily guaranteed to honor NoRetry.
+func safeScripter(c redis.Scripter) redis.Scripter {
+	switch c := c.(type) {
+	case *redis.Client:
+		return noRetryScripter{c, c.Process}
+	case *redis.ClusterClient:
+		return noRetryScripter{c, c.Process}
+	default:
+		return c // Custom transports own their replay policy.
+	}
+}
+func (s noRetryScripter) send(ctx context.Context, command, script string, keys []string, args ...interface{}) *redis.Cmd {
+	values := make([]interface{}, 0, 3+len(keys)+len(args))
+	values = append(values, command, script, len(keys))
+	for _, key := range keys {
+		values = append(values, key)
+	}
+	values = append(values, args...)
+	cmd := redis.NewCmd(ctx, values...)
+	cmd.SetFirstKeyPos(3)
+	err := s.process(ctx, noRetryCmd{cmd})
+	cmd.SetErr(err)
+	return cmd
+}
+func (s noRetryScripter) Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd {
+	return s.send(ctx, "eval", script, keys, args...)
+}
+func (s noRetryScripter) EvalSha(ctx context.Context, hash string, keys []string, args ...interface{}) *redis.Cmd {
+	return s.send(ctx, "evalsha", hash, keys, args...)
 }
