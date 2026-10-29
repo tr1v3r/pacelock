@@ -342,7 +342,7 @@ func TestPruneOnlyRecoveredDebt(t *testing.T) {
 			if commitFails {
 				failure = errors.New("lost commit response")
 			}
-			steps := append(lockedSteps(), sqlStep{kind: "exec", contains: "FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2 AND tat_us<=$2", check: func(args []driver.NamedValue) {
+			steps := append(lockedSteps(), sqlStep{kind: "exec", contains: "FROM pacelock_quotas WHERE scope_id=$1 AND GREATEST(expires_us,tat_us)<=$2", check: func(args []driver.NamedValue) {
 				if args[1].Value != testNow || args[2].Value != int64(100) {
 					t.Fatalf("prune args: %+v", args)
 				}

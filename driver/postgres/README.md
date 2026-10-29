@@ -155,3 +155,12 @@ run `(cd examples/postgres && go run .)` against the Compose PostgreSQL fixture.
 The core, both runtime drivers, the optional pgx example and integration-test
 modules require Go 1.26+. Production applications should use a maintained Go
 release with its latest patches.
+
+Prune uses an index on `(scope_id, GREATEST(expires_us, tat_us), quota_id)` and
+orders candidates by that recovery time, skipping active debt instead of scanning
+all quota IDs while holding the domain lock. LIMIT bounds recovered candidates;
+it is not a hard latency bound (MVCC visibility, locks and storage still matter).
+Run `Migrate` during controlled setup to add the index to an existing current-schema
+database. Index creation can block writes and consume disk; schedule it before
+serving traffic or provision the equivalent index concurrently outside Migrate.
+The extra index adds maintenance cost to debt writes; measure that tradeoff.

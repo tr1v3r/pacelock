@@ -206,6 +206,13 @@ if err := limiter.Wait(waitCtx, charges...); err != nil {
 
 Wait 在调用方 goroutine 中使用私有等待循环，休眠期间不持有后端锁或连接，不增加队列、worker 或后台 goroutine。策略更新不会主动唤醒休眠者：先前的 `RetryAfter` 可能延迟使用放宽后的策略。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
 
+热点额度存在大量并发等待者时，可用 `NewWithOptions(driver, namespace, domain,
+Options{WaitBackoff: 250 * time.Millisecond})` 启用随机指数退避。`WaitBackoff`
+限制在后端 `RetryAfter` 之外的**附加**等待，取值为零至 `MaxHorizon`；零保持原有
+精确等待行为。随机窗口从 `min(RetryAfter, WaitBackoff)` 开始，每次普通拒绝后
+翻倍，直到上限。它以更长完成延迟换取更少的竞争重试，不保证公平性或消除最坏情况。
+取消仍可立即中断等待，错误仍不重试；观察事件的 `RetryAfter` 仍是后端建议值，不含抖动。
+
 ## 准入边界
 
 准入不具备幂等性，不保留结果或请求身份，不提供结果恢复接口。**不要盲目重试 Unknown**。

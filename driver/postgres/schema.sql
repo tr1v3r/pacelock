@@ -20,3 +20,7 @@ CREATE TABLE IF NOT EXISTS pacelock_policies (
     revision bigint NOT NULL CHECK (revision >= 1 AND revision <= 9007199254740991),
     PRIMARY KEY (scope_id, quota_id)
 );
+
+-- Both times must have recovered. This index skips active debt during pruning.
+CREATE INDEX IF NOT EXISTS pacelock_quotas_recovered_idx
+ ON pacelock_quotas (scope_id, (GREATEST(expires_us, tat_us)), quota_id);
