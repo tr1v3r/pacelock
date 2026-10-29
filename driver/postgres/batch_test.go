@@ -109,7 +109,7 @@ func TestBatchMissingPolicyAndBadScanRollBack(t *testing.T) {
 }
 
 func TestUpdateBatchOnlyChangedRows(t *testing.T) {
-	u := pacelock.QuotaUpdate{Scope: testScope}
+	u := pacelock.QuotaBatch{Scope: testScope}
 	pr := policyRead(pacelock.QuotaState{})
 	var changed []string
 	for i := 0; i < pacelock.MaxRules; i++ {
