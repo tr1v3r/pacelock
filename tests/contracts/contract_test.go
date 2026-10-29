@@ -82,9 +82,58 @@ func backends(t *testing.T) []backend {
 
 var sequence atomic.Int64
 
-func limiter(t *testing.T, b backend, index int, domain string) *pacelock.Limiter {
+// contractLimiter preserves a dynamic scope while low-level contracts vary fixed
+// policy sets between calls. Each static call uses the public constructor; main
+// StaticLimiter contracts below retain one instance for repeated admissions.
+type contractLimiter struct {
+	*pacelock.Limiter
+	driver pacelock.Driver
+	scope  pacelock.Scope
+}
+
+func newContractLimiter(driver pacelock.Driver, namespace, domain string) (*contractLimiter, error) {
+	l, err := pacelock.New(driver, namespace, domain)
+	if err != nil {
+		return nil, err
+	}
+	return &contractLimiter{Limiter: l, driver: driver, scope: pacelock.Scope{Namespace: namespace, Domain: domain}}, nil
+}
+
+func (l *contractLimiter) staticRules(rules ...pacelock.Rule) (*pacelock.StaticLimiter, []pacelock.Charge, error) {
+	quotas := make([]pacelock.Quota, len(rules))
+	charges := make([]pacelock.Charge, len(rules))
+	for i, r := range rules {
+		quotas[i] = pacelock.Quota{Name: r.Name, Policy: r.Policy}
+		charges[i] = pacelock.Charge{Name: r.Name, Cost: r.Cost}
+	}
+	static, err := pacelock.NewStatic(l.driver, l.scope.Namespace, l.scope.Domain, quotas...)
+	return static, charges, err
+}
+func (l *contractLimiter) allowRules(ctx context.Context, rules ...pacelock.Rule) (pacelock.Decision, error) {
+	static, charges, err := l.staticRules(rules...)
+	if err != nil {
+		return pacelock.Decision{}, err
+	}
+	return static.Allow(ctx, charges...)
+}
+func (l *contractLimiter) allowRulesOnce(ctx context.Context, id string, retention time.Duration, rules ...pacelock.Rule) (pacelock.Receipt, error) {
+	static, charges, err := l.staticRules(rules...)
+	if err != nil {
+		return pacelock.Receipt{}, err
+	}
+	return static.AllowOnce(ctx, id, retention, charges...)
+}
+func (l *contractLimiter) waitRules(ctx context.Context, rules ...pacelock.Rule) error {
+	static, charges, err := l.staticRules(rules...)
+	if err != nil {
+		return err
+	}
+	return static.Wait(ctx, charges...)
+}
+
+func limiter(t *testing.T, b backend, index int, domain string) *contractLimiter {
 	t.Helper()
-	l, err := pacelock.New(b.driver[index], "contract-"+domain, domain)
+	l, err := newContractLimiter(b.driver[index], "contract-"+domain, domain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,9 +143,9 @@ func freshDomain() string { return fmt.Sprintf("%d-%d", time.Now().UnixNano(), s
 func rule(name string, burst, cost int64) pacelock.Rule {
 	return pacelock.Rule{Name: name, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: burst}, Cost: cost}
 }
-func mustAllow(t *testing.T, l *pacelock.Limiter, rules ...pacelock.Rule) {
+func mustAllow(t *testing.T, l *contractLimiter, rules ...pacelock.Rule) {
 	t.Helper()
-	d, err := l.AllowStatic(context.Background(), rules...)
+	d, err := l.allowRules(context.Background(), rules...)
 	if err != nil || !d.Allowed {
 		t.Fatalf("allow: %+v %v", d, err)
 	}
@@ -108,7 +157,7 @@ func TestDriverContract(t *testing.T) {
 			t.Run("joint denial is uncharged", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("blocked", 1, 1))
-				d, err := l.AllowStatic(context.Background(), rule("fresh", 5, 2), rule("blocked", 1, 1))
+				d, err := l.allowRules(context.Background(), rule("fresh", 5, 2), rule("blocked", 1, 1))
 				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"blocked"}) || d.RetryAfter <= 0 {
 					t.Fatal(d, err)
 				}
@@ -121,7 +170,7 @@ func TestDriverContract(t *testing.T) {
 				fast.Name = "fast"
 				fast.Policy.Period = 10 * time.Second
 				mustAllow(t, l, slow, fast)
-				d, err := l.AllowStatic(context.Background(), fast, slow)
+				d, err := l.allowRules(context.Background(), fast, slow)
 				if err != nil || d.Allowed || !reflect.DeepEqual(d.Limited, []string{"fast", "slow"}) || d.RetryAfter < 50*time.Second || d.RetryAfter > time.Minute {
 					t.Fatal(d, err)
 				}
@@ -130,7 +179,7 @@ func TestDriverContract(t *testing.T) {
 				domain := freshDomain()
 				a := limiter(t, b, 0, domain)
 				mustAllow(t, a, rule("q", 1, 1))
-				other, _ := pacelock.New(b.driver[1], "other-app", domain)
+				other, _ := newContractLimiter(b.driver[1], "other-app", domain)
 				mustAllow(t, other, rule("q", 1, 1))
 				mustAllow(t, limiter(t, b, 1, domain+"-other"), rule("q", 1, 1))
 			})
@@ -138,14 +187,14 @@ func TestDriverContract(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("q", 5, 1))
 				changed := rule("q", 6, 1)
-				if _, err := l.AllowStatic(context.Background(), rule("fresh", 1, 1), changed); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if _, err := l.allowRules(context.Background(), rule("fresh", 1, 1), changed); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				mustAllow(t, l, rule("fresh", 1, 1))
 			})
 			t.Run("weighted cross client contention", func(t *testing.T) {
 				domain := freshDomain()
-				limiters := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+				limiters := []*contractLimiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
 				var allowed atomic.Int64
 				var wg sync.WaitGroup
 				start := make(chan struct{})
@@ -156,7 +205,7 @@ func TestDriverContract(t *testing.T) {
 						<-start
 						ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 						defer cancel()
-						d, err := limiters[i%2].AllowStatic(ctx, rule("q", 31, 3))
+						d, err := limiters[i%2].allowRules(ctx, rule("q", 31, 3))
 						if err != nil {
 							t.Error(err)
 						} else if d.Allowed {
@@ -173,14 +222,14 @@ func TestDriverContract(t *testing.T) {
 			})
 			t.Run("retained same ID contention and conflict", func(t *testing.T) {
 				domain := freshDomain()
-				ls := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+				ls := []*contractLimiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
 				var first atomic.Int64
 				var wg sync.WaitGroup
 				for i := range 64 {
 					wg.Add(1)
 					go func(i int) {
 						defer wg.Done()
-						r, err := ls[i%2].AllowStaticOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
+						r, err := ls[i%2].allowRulesOnce(context.Background(), "same", time.Minute, rule("q", 1, 1))
 						if err != nil || !r.Allowed {
 							t.Errorf("%+v %v", r, err)
 						} else if !r.Replayed {
@@ -196,10 +245,10 @@ func TestDriverContract(t *testing.T) {
 				if err != nil || !found || !d.Allowed {
 					t.Fatal(d, found, err)
 				}
-				if _, err := ls[1].AllowStaticOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
+				if _, err := ls[1].allowRulesOnce(context.Background(), "same", 2*time.Minute, rule("q", 1, 1)); !errors.Is(err, pacelock.ErrConflict) {
 					t.Fatal(err)
 				}
-				d, err = ls[0].AllowStatic(context.Background(), rule("q", 1, 1))
+				d, err = ls[0].allowRules(context.Background(), rule("q", 1, 1))
 				if err != nil || d.Allowed {
 					t.Fatal(d, err)
 				}
@@ -207,11 +256,11 @@ func TestDriverContract(t *testing.T) {
 			t.Run("denial replay preserves original wait", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				mustAllow(t, l, rule("q", 1, 1))
-				first, err := l.AllowStaticOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				first, err := l.allowRulesOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
 				if err != nil || first.Allowed {
 					t.Fatal(first, err)
 				}
-				again, err := l.AllowStaticOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
+				again, err := l.allowRulesOnce(context.Background(), "denied", time.Minute, rule("q", 1, 1))
 				if err != nil || !again.Replayed || !reflect.DeepEqual(first.Decision, again.Decision) {
 					t.Fatal(first, again, err)
 				}
@@ -223,16 +272,16 @@ func TestDriverContract(t *testing.T) {
 			t.Run("ordered and equivalent policy fingerprints", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				rules := []pacelock.Rule{rule("a", 3, 1), rule("b", 3, 1)}
-				if _, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); err != nil {
+				if _, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); err != nil {
 					t.Fatal(err)
 				}
 				rules[0].Policy.Rate = 60
 				rules[0].Policy.Period = time.Hour
-				if r, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
+				if r, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); err != nil || !r.Replayed {
 					t.Fatal(r, err)
 				}
 				rules[0], rules[1] = rules[1], rules[0]
-				if _, err := l.AllowStaticOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
+				if _, err := l.allowRulesOnce(context.Background(), "id", time.Minute, rules...); !errors.Is(err, pacelock.ErrConflict) {
 					t.Fatal(err)
 				}
 			})
@@ -240,11 +289,11 @@ func TestDriverContract(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
 				r := rule("q", 1, 1)
 				r.Policy.Period = 20 * time.Millisecond
-				if _, err := l.AllowStaticOnce(context.Background(), "short", time.Second, r); err != nil {
+				if _, err := l.allowRulesOnce(context.Background(), "short", time.Second, r); err != nil {
 					t.Fatal(err)
 				}
 				time.Sleep(600 * time.Millisecond)
-				replay, err := l.AllowStaticOnce(context.Background(), "short", time.Second, r)
+				replay, err := l.allowRulesOnce(context.Background(), "short", time.Second, r)
 				if err != nil || !replay.Replayed {
 					t.Fatal(replay, err)
 				}
@@ -263,7 +312,7 @@ func TestDriverContract(t *testing.T) {
 				}
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()
-				if _, err := l.AllowStatic(ctx, rules...); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if _, err := l.allowRules(ctx, rules...); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				mustAllow(t, l, rules...)
@@ -299,13 +348,13 @@ func TestWaitDriverContract(t *testing.T) {
 				fresh := rule("fresh", 5, 3)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if err := l.WaitStatic(ctx, fresh, slow); err != nil {
+				if err := l.waitRules(ctx, fresh, slow); err != nil {
 					t.Fatal(err)
 				}
 				fresh.Cost = 2
 				mustAllow(t, l, fresh)
 				fresh.Cost = 1
-				decision, err := l.AllowStatic(ctx, fresh)
+				decision, err := l.allowRules(ctx, fresh)
 				if err != nil || decision.Allowed {
 					t.Fatal("wait must charge fresh quota exactly once", decision, err)
 				}
@@ -315,14 +364,14 @@ func TestWaitDriverContract(t *testing.T) {
 				first := limiter(t, b, 0, domain)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				second, err := pacelock.New(cancelOnDenialDriver{b.driver[1], cancel}, "contract-"+domain, domain)
+				second, err := newContractLimiter(cancelOnDenialDriver{b.driver[1], cancel}, "contract-"+domain, domain)
 				if err != nil {
 					t.Fatal(err)
 				}
 				blocked := rule("blocked", 1, 1)
 				mustAllow(t, first, blocked)
 				fresh := rule("fresh", 5, 3)
-				if err := second.WaitStatic(ctx, fresh, blocked); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+				if err := second.waitRules(ctx, fresh, blocked); !errors.Is(err, context.Canceled) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatal(err)
 				}
 				fresh.Cost = fresh.Policy.Burst
@@ -330,7 +379,7 @@ func TestWaitDriverContract(t *testing.T) {
 			})
 			t.Run("concurrent cross client waits", func(t *testing.T) {
 				domain := freshDomain()
-				ls := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+				ls := []*contractLimiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
 				r := rule("weighted", 2, 2)
 				r.Policy.Period = 10 * time.Millisecond
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -344,7 +393,7 @@ func TestWaitDriverContract(t *testing.T) {
 					go func(i int) {
 						defer wg.Done()
 						<-start
-						errs <- ls[i%len(ls)].WaitStatic(ctx, r)
+						errs <- ls[i%len(ls)].waitRules(ctx, r)
 					}(i)
 				}
 				close(start)

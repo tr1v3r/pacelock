@@ -7,11 +7,23 @@
   `UpdateQuotas`; request nodes do not refresh policies or carry revisions.
 - Former dynamic `AllowManaged` / `AllowManagedOnce` become `Allow` / `AllowOnce`;
   `NamedCharge` becomes public name/cost `Charge`. The old names are removed.
-- Former static `Allow` / `AllowOnce` become `AllowStatic` / `AllowStaticOnce`;
-  `Wait` becomes `WaitStatic`. `Rule` remains the low-level caller-policy value.
-- `Bind` becomes `BindStatic` and returns `StaticLimiter` (formerly `BoundLimiter`).
-  Its methods remain `Allow` / `AllowOnce` / `Lookup`; `q.Charge(cost)` becomes
-  `q.StaticCharge(cost)` returning encapsulated `StaticCharge`. Static revisions are 0.
+- Static admission now uses standalone constructors:
+  `NewStatic(driver, namespace, domain, quotas...)` or
+  `NewStaticWithOptions(driver, namespace, domain, options, quotas...)`.
+  They validate/copy fixed Revision-0 quotas without backend I/O or a parent limiter.
+  `StaticLimiter` provides `Allow`, `AllowOnce`, `Wait`, `Lookup`.
+- Remove former `Bind` / `BindStatic` construction and captured-policy
+  `Quota.Charge` / `Quota.StaticCharge` / `StaticCharge` use. Pass public
+  `Charge{Name, Cost}` to static admission instead. The former rule-taking
+  `Limiter.AllowStatic`, `AllowStaticOnce`, `WaitStatic` methods are removed;
+  migrate to the corresponding `StaticLimiter` methods. `Rule` remains for
+  low-level `StaticAdmission` and pure `Validate` / `Evaluate` helpers.
+- Static calls preserve nonempty-subset semantics: selected names must be unique,
+  known and have `0 < Cost <= Burst`; omitted quotas are not checked or charged.
+  Selected quotas retain construction/binding order for decisions and fingerprints.
+  Fingerprints bind selected names/order/effective policies/costs/retention only;
+  unchanged effective calls preserve retained results. `Wait` snapshots charges,
+  retries ordinary denial only, stops on every error and emits one observation.
 - Dynamic `Driver.Admit(Admission)` is mandatory (`ManagedAdmission` → `Admission`).
   Static support moves to optional `StaticDriver.AdmitStatic(StaticAdmission)`;
   `Lookup` is shared. Update custom drivers too.
@@ -53,7 +65,8 @@ caller. No background goroutines, queues, implicit retry loop or package-global
 quota configuration are introduced.
 
 The public API is pre-v1. Construct a Redis or PostgreSQL `Driver` explicitly,
-then pass it to `New` or `NewWithOptions`. The core has no backend dependency.
+then pass it to `New` / `NewWithOptions` for dynamic admission or `NewStatic` /
+`NewStaticWithOptions` for fixed policies. The core has no backend dependency.
 Typed-nil clients and nil contexts return `ErrInvalid`. Check errors with
 `errors.Is/As` and accounting certainty with `OutcomeOf`, not string matching.
 

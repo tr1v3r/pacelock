@@ -11,32 +11,38 @@ import (
 	"time"
 )
 
-func bindForTest(t *testing.T, l *Limiter, quotas ...Quota) *StaticLimiter {
+func staticForTest(t *testing.T, l *Limiter, quotas ...Quota) *StaticLimiter {
 	t.Helper()
-	b, err := l.BindStatic(quotas...)
+	b, err := NewStaticWithOptions(l.core.driver, l.core.scope.Namespace, l.core.scope.Domain, Options{Observer: l.core.observer}, quotas...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
 }
 
-func boundTestQuotas() []Quota {
+func staticTestQuotas() []Quota {
 	return []Quota{
 		{Name: "rpm", Policy: Policy{Rate: 1, Period: time.Hour, Burst: 2}},
 		{Name: "tokens", Policy: Policy{Rate: 1, Period: time.Hour, Burst: 5}},
 	}
 }
 
-func TestBindValidation(t *testing.T) {
+func TestNewStaticValidation(t *testing.T) {
 	s := &testDriver{}
 	l, _ := New(s, "test", "bind")
-	for _, current := range []*Limiter{nil, {}} {
-		if b, err := current.BindStatic(boundTestQuotas()...); b != nil || !errors.Is(err, ErrInvalid) {
-			t.Fatalf("uninitialized limiter: %v %v", b, err)
+	var typedNil *testDriver
+	for _, driver := range []Driver{nil, typedNil} {
+		if b, err := NewStatic(driver, "test", "static", staticTestQuotas()...); b != nil || !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid driver: %v %v", b, err)
 		}
 	}
-	for _, quotas := range [][]Quota{nil, make([]Quota, MaxRules+1), {boundTestQuotas()[0], boundTestQuotas()[0]}} {
-		if b, err := l.BindStatic(quotas...); b != nil || !errors.Is(err, ErrInvalid) {
+	for _, scope := range []Scope{{}, {Namespace: "test"}, {Domain: "static"}, {Namespace: strings.Repeat("n", 257), Domain: "static"}, {Namespace: "test", Domain: strings.Repeat("d", 257)}} {
+		if b, err := NewStatic(s, scope.Namespace, scope.Domain, staticTestQuotas()...); b != nil || !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid scope: %v %v", b, err)
+		}
+	}
+	for _, quotas := range [][]Quota{nil, make([]Quota, MaxRules+1), {staticTestQuotas()[0], staticTestQuotas()[0]}} {
+		if b, err := NewStatic(s, "test", "static", quotas...); b != nil || !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid set: %v %v", b, err)
 		}
 	}
@@ -57,22 +63,22 @@ func TestBindValidation(t *testing.T) {
 		{"overflow", func(q *Quota) { q.Policy.Burst = 1 << 62 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q := boundTestQuotas()[0]
+			q := staticTestQuotas()[0]
 			tc.change(&q)
-			if b, err := l.BindStatic(q); b != nil || !errors.Is(err, ErrInvalid) {
+			if b, err := NewStatic(s, "test", "static", q); b != nil || !errors.Is(err, ErrInvalid) {
 				t.Fatalf("invalid policy: %v %v", b, err)
 			}
 		})
 	}
 	quotas := make([]Quota, MaxRules)
-	charges := make([]StaticCharge, MaxRules)
+	charges := make([]Charge, MaxRules)
 	for i := range quotas {
 		quotas[i] = Quota{Name: fmt.Sprint(i), Policy: Policy{Rate: 1, Period: time.Nanosecond, Burst: 1}}
-		charges[MaxRules-1-i] = quotas[i].StaticCharge(1)
+		charges[MaxRules-1-i] = Charge{Name: quotas[i].Name, Cost: 1}
 	}
-	b := bindForTest(t, l, quotas...)
+	b := staticForTest(t, l, quotas...)
 	if s.calls != 0 {
-		t.Fatal("binding or local validation contacted Driver")
+		t.Fatal("construction or local validation contacted Driver")
 	}
 	s.result = Receipt{Decision: Decision{Allowed: true}}
 	if d, err := b.Allow(context.Background(), charges...); err != nil || !d.Allowed {
@@ -80,28 +86,28 @@ func TestBindValidation(t *testing.T) {
 	}
 }
 
-func TestBoundValidationBeforeDriver(t *testing.T) {
+func TestStaticValidationBeforeDriver(t *testing.T) {
 	s := &testDriver{}
 	var events []Event
 	l, _ := NewWithOptions(s, "test", "validation", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	quotas := boundTestQuotas()
+	quotas := staticTestQuotas()
 	rpm, tokens := quotas[0], quotas[1]
-	b := bindForTest(t, l, quotas...)
-	invalid := [][]StaticCharge{
+	b := staticForTest(t, l, quotas...)
+	invalid := [][]Charge{
 		nil,
-		{rpm.StaticCharge(0)},
-		{rpm.StaticCharge(-1)},
-		{rpm.StaticCharge(3)},
-		{(Quota{Name: "unknown", Policy: rpm.Policy}).StaticCharge(1)},
+		{Charge{Name: rpm.Name, Cost: 0}},
+		{Charge{Name: rpm.Name, Cost: -1}},
+		{Charge{Name: rpm.Name, Cost: 3}},
+		{Charge{Name: "unknown", Cost: 1}},
 		{{}},
-		{rpm.StaticCharge(1), tokens.StaticCharge(1), (Quota{Name: "extra", Policy: rpm.Policy}).StaticCharge(1)},
-		{rpm.StaticCharge(1), rpm.StaticCharge(1)},
-		{rpm.StaticCharge(1), (Quota{Name: "unknown", Policy: tokens.Policy}).StaticCharge(1)},
-		{rpm.StaticCharge(1), (Quota{Policy: tokens.Policy}).StaticCharge(1)},
-		{rpm.StaticCharge(0), tokens.StaticCharge(1)},
-		{rpm.StaticCharge(-1), tokens.StaticCharge(1)},
-		{rpm.StaticCharge(3), tokens.StaticCharge(1)},
-		{rpm.StaticCharge(1), {}},
+		{Charge{Name: rpm.Name, Cost: 1}, Charge{Name: tokens.Name, Cost: 1}, Charge{Name: "extra", Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 1}, Charge{Name: rpm.Name, Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 1}, Charge{Name: "unknown", Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 1}, Charge{Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 0}, Charge{Name: tokens.Name, Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: -1}, Charge{Name: tokens.Name, Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 3}, Charge{Name: tokens.Name, Cost: 1}},
+		{Charge{Name: rpm.Name, Cost: 1}, {}},
 	}
 	for _, charges := range invalid {
 		for _, op := range []string{"allow_static", "allow_static_once"} {
@@ -136,10 +142,10 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 		}
 	}
 	for _, current := range []*StaticLimiter{nil, {}} {
-		if _, err := current.Allow(context.Background(), rpm.StaticCharge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+		if _, err := current.Allow(context.Background(), Charge{Name: rpm.Name, Cost: 1}); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 			t.Fatal(err)
 		}
-		if _, err := current.AllowOnce(context.Background(), "id", time.Minute, rpm.StaticCharge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+		if _, err := current.AllowOnce(context.Background(), "id", time.Minute, Charge{Name: rpm.Name, Cost: 1}); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 			t.Fatal(err)
 		}
 		if _, err := current.Allow(context.Background()); !errors.Is(err, ErrInvalid) {
@@ -152,7 +158,7 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	charges := []StaticCharge{rpm.StaticCharge(1), tokens.StaticCharge(1)}
+	charges := []Charge{Charge{Name: rpm.Name, Cost: 1}, Charge{Name: tokens.Name, Cost: 1}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := b.Allow(ctx, charges...); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
@@ -180,8 +186,8 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 	}
 	opaque := string([]byte{255})
 	opaqueQuota := Quota{Name: opaque, Policy: rpm.Policy}
-	other := bindForTest(t, l, opaqueQuota)
-	if _, err := other.AllowOnce(context.Background(), "id", time.Minute, opaqueQuota.StaticCharge(1)); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+	other := staticForTest(t, l, opaqueQuota)
+	if _, err := other.AllowOnce(context.Background(), "id", time.Minute, Charge{Name: opaqueQuota.Name, Cost: 1}); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if s.calls != 0 {
@@ -189,19 +195,19 @@ func TestBoundValidationBeforeDriver(t *testing.T) {
 	}
 }
 
-func TestQuotaStaticChargeSnapshot(t *testing.T) {
+func TestStaticQuotaSnapshot(t *testing.T) {
 	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 	l, _ := New(s, "test", "snapshot")
-	q := boundTestQuotas()[0]
-	original := q
-	b := bindForTest(t, l, q)
-	charge := q.StaticCharge(1)
+	quotas := staticTestQuotas()[:1]
+	original := quotas[0]
+	b := staticForTest(t, l, quotas...)
+	charge := Charge{Name: original.Name, Cost: 1}
 	if s.calls != 0 {
-		t.Fatal("binding or charge construction contacted Driver")
+		t.Fatal("limiter or charge construction contacted Driver")
 	}
-	q.Name = "changed"
-	q.Policy.Rate++
-	q.Policy.Burst++
+	quotas[0].Name = "changed"
+	quotas[0].Policy.Rate++
+	quotas[0].Policy.Burst++
 	for _, once := range []bool{false, true} {
 		var err error
 		if once {
@@ -218,101 +224,49 @@ func TestQuotaStaticChargeSnapshot(t *testing.T) {
 	}
 }
 
-func TestBoundStaticChargePolicyValidation(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(*Quota)
-	}{
-		{"different interval", func(q *Quota) { q.Policy.Rate++ }},
-		{"different burst", func(q *Quota) { q.Policy.Burst++ }},
-		{"zero rate", func(q *Quota) { q.Policy.Rate = 0 }},
-		{"negative rate", func(q *Quota) { q.Policy.Rate = -1 }},
-		{"zero period", func(q *Quota) { q.Policy.Period = 0 }},
-		{"negative period", func(q *Quota) { q.Policy.Period = -1 }},
-		// This has the same effective interval, but the policy is itself invalid.
-		{"invalid equivalent period", func(q *Quota) { q.Policy.Rate = 25; q.Policy.Period = 25 * time.Hour }},
-		{"zero burst", func(q *Quota) { q.Policy.Burst = 0 }},
-		{"negative burst", func(q *Quota) { q.Policy.Burst = -1 }},
-		{"refill horizon", func(q *Quota) { q.Policy.Burst = 25 }},
-		{"burst overflow", func(q *Quota) { q.Policy.Burst = 1 << 62 }},
+// Equivalent construction policies preserve the driver protocol fingerprint.
+func TestStaticEquivalentPolicyFingerprints(t *testing.T) {
+	for _, policies := range [][2]Policy{
+		{{Rate: 1, Period: time.Minute, Burst: 2}, {Rate: 2, Period: 2 * time.Minute, Burst: 2}},
+		{{Rate: 1, Period: 1001 * time.Nanosecond, Burst: 2}, {Rate: 1, Period: 1999 * time.Nanosecond, Burst: 2}},
+		{{Rate: 2, Period: time.Nanosecond, Burst: 2}, {Rate: 1, Period: time.Microsecond, Burst: 2}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &testDriver{}
-			l, _ := New(s, "test", "policy-validation")
-			quotas := boundTestQuotas()
-			b := bindForTest(t, l, quotas...)
-			changed := quotas[0]
-			tc.change(&changed)
-			charges := []StaticCharge{changed.StaticCharge(1)}
-			for _, once := range []bool{false, true} {
-				var err error
-				if once {
-					_, err = b.AllowOnce(context.Background(), "id", time.Minute, charges...)
-				} else {
-					_, err = b.Allow(context.Background(), charges...)
-				}
-				if !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
-					t.Fatalf("once=%t: %v", once, err)
-				}
+		d := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
+		var fingerprint string
+		for i, policy := range policies {
+			l, err := NewStatic(d, "test", "equivalent", Quota{Name: "q", Policy: policy})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if s.calls != 0 {
-				t.Fatal("invalid or mismatched policy contacted Driver")
+			if _, err := l.AllowOnce(context.Background(), "id", time.Minute, sampleCharge()); err != nil {
+				t.Fatal(err)
 			}
-		})
+			if i == 0 {
+				fingerprint = d.request.Fingerprint()
+			} else if fingerprint != d.request.Fingerprint() {
+				t.Fatal("equivalent policy changed fingerprint")
+			}
+		}
 	}
 }
 
-func TestBoundEquivalentStaticChargePolicies(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		bound   Policy
-		charged Policy
-	}{
-		{"scaled rate and period", Policy{Rate: 1, Period: time.Minute, Burst: 2}, Policy{Rate: 2, Period: 2 * time.Minute, Burst: 2}},
-		{"microsecond rounding", Policy{Rate: 1, Period: 1001 * time.Nanosecond, Burst: 2}, Policy{Rate: 1, Period: 1999 * time.Nanosecond, Burst: 2}},
-		{"submicrosecond floor", Policy{Rate: 2, Period: time.Nanosecond, Burst: 2}, Policy{Rate: 1, Period: time.Microsecond, Burst: 2}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
-			l, _ := New(s, "test", "equivalent-policy")
-			q := Quota{Name: "rpm", Policy: tc.bound}
-			b := bindForTest(t, l, q)
-			equivalent := Quota{Name: q.Name, Policy: tc.charged}
-			for _, once := range []bool{false, true} {
-				var err error
-				if once {
-					_, err = b.AllowOnce(context.Background(), "id", time.Minute, equivalent.StaticCharge(1))
-				} else {
-					_, err = b.Allow(context.Background(), equivalent.StaticCharge(1))
-				}
-				if err != nil {
-					t.Fatalf("once=%t: equivalent policy rejected: %v", once, err)
-				}
-				if !reflect.DeepEqual(s.request.Rules, []Rule{q.rule(1)}) {
-					t.Fatalf("charge replaced bound policy: %+v", s.request.Rules)
-				}
-			}
-		})
-	}
-}
-
-func TestBoundSubsetNormalization(t *testing.T) {
+func TestStaticSubsetNormalization(t *testing.T) {
 	var events []Event
 	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 	l, _ := NewWithOptions(s, "test", "subsets", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	quotas := append(boundTestQuotas(), Quota{Name: "third", Policy: boundTestQuotas()[0].Policy})
-	b := bindForTest(t, l, quotas...)
+	quotas := append(staticTestQuotas(), Quota{Name: "third", Policy: staticTestQuotas()[0].Policy})
+	b := staticForTest(t, l, quotas...)
 	beforeRules := append([]Rule(nil), b.rules...)
 	beforeIndex := make(map[string]int)
 	for name, i := range b.index {
 		beforeIndex[name] = i
 	}
-	for _, selected := range [][]StaticCharge{
-		{quotas[1].StaticCharge(3)},
-		{quotas[2].StaticCharge(2), quotas[0].StaticCharge(1)},
-		{quotas[0].StaticCharge(1), quotas[2].StaticCharge(2)},
+	for _, selected := range [][]Charge{
+		{Charge{Name: quotas[1].Name, Cost: 3}},
+		{Charge{Name: quotas[2].Name, Cost: 2}, Charge{Name: quotas[0].Name, Cost: 1}},
+		{Charge{Name: quotas[0].Name, Cost: 1}, Charge{Name: quotas[2].Name, Cost: 2}},
 	} {
-		before := append([]StaticCharge(nil), selected...)
+		before := append([]Charge(nil), selected...)
 		want := []Rule{quotas[1].rule(3)}
 		if len(selected) == 2 {
 			want = []Rule{quotas[0].rule(1), quotas[2].rule(2)}
@@ -341,14 +295,14 @@ func TestBoundSubsetNormalization(t *testing.T) {
 	}
 }
 
-func TestBoundObservationAndUnknownOutcome(t *testing.T) {
+func TestStaticObservationAndUnknownOutcome(t *testing.T) {
 	var events []Event
 	s := &testDriver{result: Receipt{Decision: Decision{Allowed: true}}}
 	l, _ := NewWithOptions(s, "test", "observation", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	quotas := boundTestQuotas()
-	b := bindForTest(t, l, quotas...)
-	charges := []StaticCharge{quotas[1].StaticCharge(2), quotas[0].StaticCharge(1)}
-	before := append([]StaticCharge(nil), charges...)
+	quotas := staticTestQuotas()
+	b := staticForTest(t, l, quotas...)
+	charges := []Charge{Charge{Name: quotas[1].Name, Cost: 2}, Charge{Name: quotas[0].Name, Cost: 1}}
+	before := append([]Charge(nil), charges...)
 	if d, err := b.Allow(context.Background(), charges...); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}

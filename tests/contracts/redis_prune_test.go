@@ -24,13 +24,14 @@ func TestRedisPublicPruneCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := pacelock.Scope{Namespace: "pacelock-public-prune", Domain: fmt.Sprint(time.Now().UnixNano())}
-	limiter, err := pacelock.New(driver, scope.Namespace, scope.Domain)
+	quota := pacelock.Quota{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: 20 * time.Millisecond, Burst: 1}}
+	limiter, err := pacelock.NewStatic(driver, scope.Namespace, scope.Domain, quota)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if r, err := limiter.AllowStaticOnce(ctx, "id", 20*time.Millisecond, pacelock.Rule{Name: "q", Policy: pacelock.Policy{Rate: 1, Period: 20 * time.Millisecond, Burst: 1}, Cost: 1}); err != nil || !r.Allowed {
+	if r, err := limiter.AllowOnce(ctx, "id", 20*time.Millisecond, pacelock.Charge{Name: quota.Name, Cost: 1}); err != nil || !r.Allowed {
 		t.Fatal(r, err)
 	}
 	time.Sleep(30 * time.Millisecond)

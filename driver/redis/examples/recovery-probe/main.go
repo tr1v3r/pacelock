@@ -27,11 +27,12 @@ func main() {
 	}
 	c := redis.NewClient(&redis.Options{Addr: *addr, MaxRetries: -1, ContextTimeoutEnabled: true, DialTimeout: time.Second, ReadTimeout: time.Second})
 	defer c.Close()
-	l, err := newLimiter(c, "deployment-probe", *domain)
+	quota := pacelock.Quota{Name: "quota", Policy: pacelock.Policy{Rate: 1, Period: time.Hour, Burst: 10}}
+	l, err := newLimiter(c, "deployment-probe", *domain, quota)
 	if err != nil {
 		panic(err)
 	}
-	r := pacelock.Rule{Name: "quota", Policy: pacelock.Policy{Rate: 1, Period: time.Hour, Burst: 10}, Cost: 1}
+	charge := pacelock.Charge{Name: quota.Name, Cost: 1}
 	out := map[string]int{"allowed": 0, "denied": 0, "unknown": 0, "errors": 0, "found": 0, "missing": 0}
 	if *action == "check" {
 		for i := 0; i < 10; i++ {
@@ -49,7 +50,7 @@ func main() {
 	}
 	for i := 0; i < 10; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		d, err := l.AllowStaticOnce(ctx, fmt.Sprintf("%s-%d", *action, i), time.Hour, r)
+		d, err := l.AllowOnce(ctx, fmt.Sprintf("%s-%d", *action, i), time.Hour, charge)
 		cancel()
 		if err != nil {
 			out["errors"]++
@@ -66,15 +67,15 @@ func main() {
 }
 
 // newLimiter constructs a Redis driver and the shared admission facade.
-func newLimiter(client redis.Scripter, namespace, domain string) (*pacelock.Limiter, error) {
-	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{})
+func newLimiter(client redis.Scripter, namespace, domain string, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
+	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{}, quotas...)
 }
 
 // newLimiterWithOptions attaches application observation to the common facade.
-func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options) (*pacelock.Limiter, error) {
+func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
 	driver, err := redisdriver.New(client)
 	if err != nil {
 		return nil, err
 	}
-	return pacelock.NewWithOptions(driver, namespace, domain, options)
+	return pacelock.NewStaticWithOptions(driver, namespace, domain, options, quotas...)
 }

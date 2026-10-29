@@ -218,10 +218,7 @@ func TestManagedFacade(t *testing.T) {
 	if decision, err := l.Allow(ctx, c); err != nil || !decision.Allowed {
 		t.Fatal(decision, err)
 	}
-	if _, err := l.AllowStatic(ctx, q.rule(1)); !errors.Is(err, ErrInvalid) || d.calls != 0 {
-		t.Fatal(err)
-	}
-	if _, err := l.BindStatic(q); !errors.Is(err, ErrInvalid) {
+	if _, err := NewStatic(d, "ns", "d", q); !errors.Is(err, ErrInvalid) || d.calls != 0 {
 		t.Fatal(err)
 	}
 	if _, err := l.AllowOnce(ctx, "", time.Minute, c); !errors.Is(err, ErrInvalid) {

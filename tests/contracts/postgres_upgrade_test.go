@@ -125,19 +125,19 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 			t.Fatal("migration changed retained receipt")
 		}
 	}
-	l, err := pacelock.New(d, scope.Namespace, scope.Domain)
+	l, err := newContractLimiter(d, scope.Namespace, scope.Domain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	replay := func() {
 		t.Helper()
-		r, err := l.AllowStaticOnce(ctx, a.ID, a.Retention, rule)
+		r, err := l.allowRulesOnce(ctx, a.ID, a.Retention, rule)
 		if err != nil || !r.Allowed || !r.Replayed {
 			t.Fatalf("legacy replay: %+v %v", r, err)
 		}
 	}
 	replay()
-	if decision, err := l.AllowStatic(ctx, rule); err != nil || !decision.Allowed {
+	if decision, err := l.allowRules(ctx, rule); err != nil || !decision.Allowed {
 		t.Fatalf("static admission after migration: %+v %v", decision, err)
 	}
 	beforeUpdate := readDebt()
@@ -148,7 +148,7 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	if got := readDebt(); got != beforeUpdate {
 		t.Fatalf("activation changed debt: %+v, want %+v", got, beforeUpdate)
 	}
-	if _, err = l.AllowStatic(ctx, rule); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+	if _, err = l.allowRules(ctx, rule); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 		t.Fatalf("static bypass after activation: %v", err)
 	}
 	if decision, err := l.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1}); err != nil || !decision.Allowed {

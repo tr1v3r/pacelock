@@ -3,7 +3,7 @@
 // context-aware static waits support caller-owned policies.
 // Drivers own backend time, atomic persistence and retained admission records.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
-// BindStatic separates fixed quota policies from per-attempt static costs.
+// NewStatic separates fixed quota policies from per-attempt costs.
 package pacelock
 
 import (
@@ -59,8 +59,8 @@ type Policy struct {
 
 // Rule charges Cost units to the quota named by Name under a caller-owned Policy.
 // Burst is total instantaneous capacity, including the first unit. Rule is the
-// low-level static admission and math format; use Limiter.BindStatic to separate
-// fixed policies from static costs, or Charge for default dynamic admission.
+// low-level driver and math format; use NewStatic to fix caller-owned policies.
+// Both public limiter types accept Charge values for per-attempt costs.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
@@ -130,15 +130,23 @@ type Receipt struct {
 	Replayed bool
 }
 
-// Limiter validates and observes operations on a caller-owned, concurrency-safe
-// Driver. It does not connect, close the driver or create background goroutines.
+// Limiter admits charges using current backend-owned dynamic policies.
+// It is safe for concurrent use with a concurrency-safe Driver. It does not
+// connect, close the driver or create background goroutines. Construct with New
+// or NewWithOptions; nil and zero receivers return ErrInvalid.
 type Limiter struct {
+	core *limiterCore
+}
+
+// limiterCore shares transport, scope and observation without exposing either
+// public limiter's policy ownership or admission methods to the other.
+type limiterCore struct {
 	driver   Driver
 	scope    Scope
 	observer Observer
 }
 
-// New constructs a limiter in a namespace/domain scope without backend access.
+// New constructs a dynamic limiter in a namespace/domain scope without backend access.
 // Namespace isolates applications; domain groups quotas for atomic admission.
 func New(driver Driver, namespace, domain string) (*Limiter, error) {
 	return NewWithOptions(driver, namespace, domain, Options{})
@@ -146,6 +154,14 @@ func New(driver Driver, namespace, domain string) (*Limiter, error) {
 
 // NewWithOptions constructs a limiter with optional synchronous observation.
 func NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error) {
+	core, err := newLimiterCore(driver, namespace, domain, options)
+	if err != nil {
+		return nil, err
+	}
+	return &Limiter{core: core}, nil
+}
+
+func newLimiterCore(driver Driver, namespace, domain string, options Options) (*limiterCore, error) {
 	scope := Scope{Namespace: namespace, Domain: domain}
 	if isNil(driver) {
 		return nil, fmt.Errorf("%w: driver is required", ErrInvalid)
@@ -153,7 +169,7 @@ func NewWithOptions(driver Driver, namespace, domain string, options Options) (*
 	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
-	return &Limiter{driver: driver, scope: scope, observer: options.Observer}, nil
+	return &limiterCore{driver: driver, scope: scope, observer: options.Observer}, nil
 }
 
 func isNil(v any) bool {
@@ -168,77 +184,21 @@ func isNil(v any) bool {
 	return false
 }
 
-func (l *Limiter) ready(ctx context.Context) error {
+func (l *Limiter) engine() *limiterCore {
+	if l == nil {
+		return nil
+	}
+	return l.core
+}
+
+func (l *limiterCore) ready(ctx context.Context) error {
 	if ctx == nil || l == nil || isNil(l.driver) {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
 }
 
-// AllowStatic immediately attempts all charges; a normal denial debits none. It does
-// not wait for quota recovery. Backend synchronization may wait until ctx expires.
-// It never retries an uncertain operation. On any error ignore Decision.
-func (l *Limiter) AllowStatic(ctx context.Context, rules ...Rule) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow_static", len(rules))
-	defer func() { finish(decision, false, err) }()
-	r, err := l.admitStatic(ctx, "", 0, rules)
-	return r.Decision, err
-}
-
-// WaitStatic blocks until all charges are atomically accepted or an error occurs.
-// A nil error means quota was consumed once, including if ctx was canceled after
-// a successful dispatch. Business failure does not refund that consumption.
-//
-// Only ordinary quota denials are retried, after their advisory RetryAfter.
-// Every backend error stops waiting, including NotCharged errors; Unknown must
-// not be blindly retried. Cancellation between attempts is NotCharged, while
-// cancellation during dispatch preserves the driver's accounting outcome.
-//
-// WaitStatic uses a snapshot of rules, an empty admission ID and the calling goroutine.
-// It creates no queue, reservation or background goroutine and guarantees no
-// fairness between callers. Contention can delay admission indefinitely; use a
-// context deadline to bound waiting. WaitStatic is not idempotent or recoverable with
-// Lookup. AllowStaticOnce retains denials and cannot be polled with one ID to wait.
-func (l *Limiter) WaitStatic(ctx context.Context, rules ...Rule) (err error) {
-	finish := l.observe(ctx, "wait_static", len(rules))
-	var decision Decision
-	defer func() { finish(decision, false, err) }()
-
-	rules = append([]Rule(nil), rules...)
-	for {
-		receipt, attemptErr := l.admitStatic(ctx, "", 0, rules)
-		if attemptErr != nil {
-			return failure("wait_static", OutcomeOf(attemptErr), attemptErr)
-		}
-		decision = receipt.Decision
-		if decision.Allowed {
-			return nil
-		}
-
-		timer := time.NewTimer(decision.RetryAfter)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return failure("wait_static", NotCharged, ctx.Err())
-		case <-timer.C:
-		}
-	}
-}
-
-// AllowStaticOnce retains both allow and deny results for an ID. Retention is whole
-// milliseconds in [1ms,24h]; replay never extends it. Rules are ordered and their
-// names must be UTF-8. Persist the attempt ID before dispatch. Each genuinely new
-// business attempt needs a new ID. On errors ignore Receipt and inspect OutcomeOf.
-func (l *Limiter) AllowStaticOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (receipt Receipt, err error) {
-	finish := l.observe(ctx, "allow_static_once", len(rules))
-	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
-	if id == "" {
-		return Receipt{}, failure("allow_static_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
-	}
-	return l.admitStatic(ctx, id, retention, rules)
-}
-
-func (l *Limiter) admitStatic(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
+func (l *limiterCore) admitStatic(ctx context.Context, id string, retention time.Duration, rules []Rule) (Receipt, error) {
 	op := "allow_static"
 	if id != "" {
 		op = "allow_static_once"
@@ -271,7 +231,11 @@ func (l *Limiter) admitStatic(ctx context.Context, id string, retention time.Dur
 // retention. A missing result does not prove no debit: the original operation may
 // still be in flight or its record may have expired or been lost. Drivers route
 // recovery to the authoritative primary. Use Decision only when found and err==nil.
-func (l *Limiter) Lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
+func (l *Limiter) Lookup(ctx context.Context, id string) (Decision, bool, error) {
+	return l.engine().lookup(ctx, id)
+}
+
+func (l *limiterCore) lookup(ctx context.Context, id string) (decision Decision, found bool, err error) {
 	finish := l.observe(ctx, "lookup", 0)
 	defer func() { finish(decision, found, err) }()
 	if err := l.ready(ctx); err != nil {

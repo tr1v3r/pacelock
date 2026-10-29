@@ -12,7 +12,7 @@ type Options struct {
 }
 
 // Observer receives one synchronous event per dynamic or static admission and
-// Lookup call. BindStatic and UpdateQuotas emit no event. The callback must be
+// Lookup call. Constructors and UpdateQuotas emit no event. The callback must be
 // fast and concurrency-safe.
 // Panics propagate; no background work is created.
 type Observer func(context.Context, Event)
@@ -21,7 +21,7 @@ type Observer func(context.Context, Event)
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
 	// Operation is allow, allow_once, allow_static, allow_static_once,
-	// wait_static or lookup. WaitStatic emits one event for the whole call.
+	// wait_static or lookup. StaticLimiter.Wait emits one event for the whole call.
 	Operation string
 	// Duration excludes the observer callback execution time.
 	Duration time.Duration
@@ -37,7 +37,7 @@ type Event struct {
 	Err error
 }
 
-func (l *Limiter) observe(ctx context.Context, op string, count int) func(Decision, bool, error) {
+func (l *limiterCore) observe(ctx context.Context, op string, count int) func(Decision, bool, error) {
 	if l == nil || l.observer == nil {
 		return func(Decision, bool, error) {}
 	}

@@ -7,10 +7,11 @@
 - Backend-authoritative dynamic admission is the default: publish versioned
   policies with `UpdateQuotas`, then call `Allow` / `AllowOnce` with names/costs.
   Rate 0 pauses fresh admissions; updates preserve absolute debt and retained replay.
-- Explicit static `BindStatic` / `StaticLimiter` bindings and snapshot-based
-  `Quota.StaticCharge(cost)` values validate nonempty subsets before dispatch.
-  Rule-based `AllowStatic` / `AllowStaticOnce` / `WaitStatic` remain available. Omitted bound quotas are neither checked nor
-  charged; selected quotas are atomic within each call, not across separate calls.
+- Standalone `NewStatic` / `NewStaticWithOptions` validate and copy fixed
+  Revision-0 quotas locally, without a parent limiter or backend I/O.
+  `StaticLimiter.Allow` / `AllowOnce` / `Wait` take public name/cost `Charge`
+  values; `Lookup` shares scope-based receipt recovery. Omitted fixed quotas are
+  neither checked nor charged; selected quotas are atomic within each call, not across separate calls.
   Idempotency fingerprints include only selected quotas in binding order; changing
   the subset with the same retained ID conflicts.
 - Redis keys use `pacelock:{scope_hash}:`, static quotas use `tat:interval:burst`,
@@ -37,7 +38,16 @@ Update errors now report operation `update_quotas` instead of `update_policies`.
 rename: quota configuration changes never refill capacity or reset/rescale debt;
 absolute TAT and retained receipts remain unchanged.
 
-Breaking change: bound admission no longer rejects omitted quotas. Callers that
+Breaking static API change: `BindStatic`, `StaticCharge`, `Quota.StaticCharge` and
+rule-taking `Limiter.AllowStatic` / `AllowStaticOnce` / `WaitStatic` are removed.
+Construct `NewStatic(driver, namespace, domain, quotas...)` (or
+`NewStaticWithOptions(driver, namespace, domain, options, quotas...)`) and pass
+`Charge{Name, Cost}` to its admission methods instead. `Rule`, `StaticAdmission`,
+`StaticDriver` and the pure evaluation helpers remain available. `Wait` snapshots
+charges, retries only ordinary denial, stops on every error and emits one observation;
+a confirmed debit remains success even if cancellation races with the response.
+
+Breaking change: static admission no longer rejects omitted quotas. Callers that
 relied on complete-set enforcement must validate required quotas themselves or
 submit them together explicitly. Full-set calls retain their existing ordering
 and idempotency fingerprints.

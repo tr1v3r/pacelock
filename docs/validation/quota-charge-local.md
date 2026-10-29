@@ -1,6 +1,6 @@
 # Quota.Charge local verification — 2026-10-28
 
-> Historical snapshot: measurements and API names refer to the pinned source revision, before the dynamic-default rename. Former static Allow/AllowOnce/Wait/Bind now map to AllowStatic/AllowStaticOnce/WaitStatic/BindStatic; Quota.Charge is now Quota.StaticCharge. This is not a current default dynamic API example.
+> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `AllowOnce` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
 
 > Archived measurement of the tree identified below, not validation of the current
 > Redis key prefix, quota/receipt encoding or fingerprint. API measurements remain
@@ -12,7 +12,7 @@ results, a release certification or production throughput measurements.
 
 This historical run predates nonempty-subset bound admission. Its complete-set
 validation results describe the earlier contract, not the current API; see the
-[current policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+[current policy and cost contracts](../../README.md#explicit-static-alternative-fixed-policies-and-costs).
 
 ## Environment and correctness checks
 

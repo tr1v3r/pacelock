@@ -8,8 +8,10 @@ Core Driver contracts are documented [separately](driver.md).
 Default admission is dynamic: publish trusted `Quota` policies with positive
 revisions before sending `Charge{Name, Cost}` requests. Upgrade every writer and
 maintenance process before activation; run PostgreSQL `Migrate` before upgraded
-binaries handle even static traffic. Static opt-in uses `AllowStatic` /
-`AllowStaticOnce` / `WaitStatic` or `BindStatic`. There is no dynamic Wait or SDK
+binaries handle even static traffic. Static opt-in uses standalone `NewStatic` /
+`NewStaticWithOptions`, validating and copying fixed Revision-0 quotas locally.
+`StaticLimiter.Allow` / `AllowOnce` / `Wait` take name/cost `Charge` values; `Lookup`
+recovers scope-based receipts. There is no dynamic Wait or SDK
 configuration watcher. Publication/polling belongs to the application.
 
 Keep configuration/revision fences permanent: `Prune` never deletes them. Updates
@@ -52,7 +54,8 @@ SDK. Environment variables in this repository configure examples/tests only.
 
 Clients must be initialized with go-redis constructors; zero-value client structs
 are unsupported. For these initialized concrete `*redis.Client` and
-`*redis.ClusterClient` instances, `New` and `NewWithOptions` inspect options locally.
+`*redis.ClusterClient` instances, limiter constructors (`New` / `NewWithOptions`
+and `NewStatic` / `NewStaticWithOptions`) inspect options locally.
 Unsupported negative budgets (`MaxRetries < -1` or `MaxRedirects < -1` at client
 construction) return `ErrInvalid` and a nil limiter, without a network request
 or changing caller-owned settings. Configure the client before construction;

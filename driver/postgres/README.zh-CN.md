@@ -32,7 +32,7 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；没有默认动态 Wait。
 
 ## 默认动态策略
 
@@ -70,7 +70,7 @@ _ = receipt
 
 已有保留记录在当前策略检查**之前**重放，不因暂停或更新改变。托管请求的名称/消耗不变时，
 跨版本重试仍重放原决策。静态与托管请求复用同一 ID 会冲突。历史允许记录重放不代表可以再次执行上游。
-静态 Rule/BindStatic 请求在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
+静态构造函数在本地拒绝托管 Revision；对已配置额度发起新的静态准入返回
 `ErrPolicyMismatch`，但旧静态记录仍先于该防绕过检查重放。
 
 更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。
@@ -82,18 +82,16 @@ _ = receipt
 共享数据库的全部二进制升级完成后，才能发布托管配置。旧 PostgreSQL 代码无法与动态策略共存：
 它不检查独立配置表，会绕过托管限额。Migrate 应在受控初始化阶段运行，避免并发迁移；DDL 会持有表锁。
 
-公共 `BindStatic` 接口在本地校验并复制固定额度。通过值接收者方法 `q.StaticCharge(cost)` 将完整额度和消耗
-捕获到私有字段，不校验、不做 I/O；不要使用 StaticCharge 字段字面量。`Quota.Name` / `Policy` 仍公开，
-之后修改 Quota 不影响已有 StaticCharge 或绑定，变更策略需新建 binding。`Allow` / `AllowOnce` 仍接收
-`...StaticCharge`，每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`。
-未传入额度既不检查也不扣减。选中 StaticCharge 按绑定顺序整理，幂等指纹只包含选中额度的名称、
-整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集返回 `ErrConflict`，
-调整传入 StaticCharge 顺序不改变指纹。多次独立调用合起来不具备原子性。
-捕获的完整策略必须合法，且名称、有效间隔（向上取整到微秒）和 Burst 须与
-绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 StaticCharge 在准入前本地返回
-`ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待
-通过 `limiter.WaitStatic` 传入规则，不提供绑定等待方法。
-详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
+且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
+幂等指纹只包含选中名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID
+改变子集返回 `ErrConflict`，调整 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+空调用、重复或未知名称、无效消耗在准入前本地返回 `ErrInvalid` / `NotCharged`。
+策略在构造时校验并复制，不由 Charge 携带；策略变更需新建 `StaticLimiter`，不能绕过
+后端活跃策略或债务检查。`static.Wait(ctx, charges...)` 快照 Charge，仅重试普通额度拒绝，
+所有错误（包括 `Unknown`）立即停止等待；确认扣减成功不会因并发取消变为失败。
+等待不提供退款、队列或 worker，整次等待仅产生一次观测。
+详见[策略与消耗契约](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。
 
 ## 事务与故障契约
 
