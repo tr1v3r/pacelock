@@ -15,7 +15,7 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 注释覆盖包、类型、接口、函数、方法、字段、常量和变量，说明参数约束、并发与生命周期规则，以及错误处理方式。
 集成时，请结合示例阅读所固定版本的源码注释。
 
-可从[默认动态 API](managed.go)、[Rule 与纯计算工具](pacelock.go)、[Driver 契约](driver.go)和[错误结果](errors.go)开始。
+可从[默认动态 API](managed.go)、[Rule 与政策工具](policy.go)、[Driver 契约](driver.go)和[错误结果](pacelock.go)开始。
 
 也可查看[历史交互式准入流程图](docs/workflows/README.zh-CN.md)，分别展开公共 API、PostgreSQL 事务和 Redis Lua 的具体操作。
 

@@ -23,7 +23,7 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [default dynamic API](managed.go), [Rule and pure math helpers](pacelock.go), [driver contract](driver.go), and [error outcomes](errors.go).
+Start with the [default dynamic API](managed.go), [Rule and policy helpers](policy.go), [driver contract](driver.go), and [error outcomes](pacelock.go).
 
 For a visual walkthrough, see the [historical interactive admission workflows](docs/workflows/README.md)
 for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplified Chinese).

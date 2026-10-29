@@ -3,7 +3,76 @@ package pacelock
 import (
 	"context"
 	"fmt"
+	"time"
 )
+
+// Policy defines replenishment and total burst capacity independently of a
+// charge. The same named quota must use the same effective policy throughout
+// a domain.
+type Policy struct {
+	// Revision is 1..MaxRevision for policies installed by UpdateQuotas.
+	// Revisions never expire. Zero is supported only by offline math helpers.
+	Revision int64
+	// Rate is units replenished per Period. Zero pauses a managed policy.
+	Rate int64
+	// Period is positive and at most MaxHorizon; unit intervals round up to microseconds.
+	Period time.Duration
+	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
+	Burst int64
+}
+
+// Rule charges Cost units to the quota named by Name under a caller-owned Policy.
+// Burst is total instantaneous capacity, including the first unit. Rule is the
+// offline math format, not a backend admission request. Limiter accepts Charge
+// values and resolves policies from the backend.
+type Rule struct {
+	// Name identifies a quota within a scope; it contains 1..256 bytes.
+	Name string
+	// Policy specifies how the named quota replenishes and how much it can accumulate.
+	Policy Policy
+	// Cost is the known charge for this attempt, from 1 through Burst.
+	Cost int64
+}
+
+// Interval validates the rule and returns its per-unit recovery interval, rounded
+// upward to whole microseconds. Drivers must use this effective interval.
+func (r Rule) Interval() (time.Duration, error) {
+	p := r.Policy
+	if r.Name == "" || len(r.Name) > 256 || p.Revision < 0 || p.Revision > MaxRevision || p.Rate < 0 || (p.Rate == 0 && p.Revision == 0) || p.Period <= 0 || p.Period > MaxHorizon || p.Burst <= 0 || p.Burst > MaxHorizon.Microseconds() || r.Cost <= 0 || r.Cost > p.Burst {
+		return 0, fmt.Errorf("%w: invalid quota %q", ErrInvalid, r.Name)
+	}
+	if p.Rate == 0 {
+		return 0, nil // A managed pause has no finite refill interval.
+	}
+	us := (p.Period.Nanoseconds() + 999) / 1000
+	step := us / p.Rate
+	if us%p.Rate != 0 {
+		step++
+	}
+	if p.Burst > MaxHorizon.Microseconds()/step {
+		return 0, fmt.Errorf("%w: burst refill horizon exceeds 24 hours for %q", ErrInvalid, r.Name)
+	}
+	return time.Duration(step) * time.Microsecond, nil
+}
+
+// Validate checks 1..MaxRules rules with unique names without backend access.
+// It cannot detect conflicts with active backend policies.
+func Validate(rules ...Rule) error {
+	if len(rules) == 0 || len(rules) > MaxRules {
+		return fmt.Errorf("%w: require 1..%d rules", ErrInvalid, MaxRules)
+	}
+	seen := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		if _, err := r.Interval(); err != nil {
+			return err
+		}
+		if seen[r.Name] {
+			return fmt.Errorf("%w: duplicate quota %q", ErrInvalid, r.Name)
+		}
+		seen[r.Name] = true
+	}
+	return nil
+}
 
 // Quota associates an independent quota name with its backend-owned policy.
 // UpdateQuotas requires a positive revision.
