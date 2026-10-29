@@ -19,6 +19,7 @@ type sqlStep struct {
 	kind, contains string
 	rows           [][]driver.Value
 	err            error
+	rowsErr        error
 	check          func([]driver.NamedValue)
 }
 type scriptConn struct {
@@ -60,21 +61,28 @@ func (c *scriptConn) ExecContext(_ context.Context, q string, a []driver.NamedVa
 }
 func (c *scriptConn) QueryContext(_ context.Context, q string, a []driver.NamedValue) (driver.Rows, error) {
 	s := c.take("query", q, a)
-	return &scriptRows{rows: s.rows}, s.err
+	n := 1
+	if len(s.rows) > 0 {
+		n = len(s.rows[0])
+	}
+	return &scriptRows{rows: s.rows, err: s.rowsErr, columns: make([]string, n)}, s.err
 }
 
-type scriptRows struct{ rows [][]driver.Value }
+type scriptRows struct {
+	rows    [][]driver.Value
+	err     error
+	columns []string
+}
 
 func (r *scriptRows) Columns() []string {
-	n := 1
-	if len(r.rows) > 0 {
-		n = len(r.rows[0])
-	}
-	return make([]string, n)
+	return r.columns
 }
 func (r *scriptRows) Close() error { return nil }
 func (r *scriptRows) Next(dest []driver.Value) error {
 	if len(r.rows) == 0 {
+		if r.err != nil {
+			return r.err
+		}
 		return io.EOF
 	}
 	copy(dest, r.rows[0])
@@ -120,16 +128,16 @@ func lockedSteps() []sqlStep {
 	}
 }
 func policyRead(s pacelock.QuotaState) sqlStep {
-	x := sqlStep{kind: "query", contains: "SELECT interval_us,burst,revision FROM pacelock_policies"}
+	x := sqlStep{kind: "query", contains: "SELECT quota_id,interval_us,burst,revision FROM pacelock_policies"}
 	if s != (pacelock.QuotaState{}) {
-		x.rows = [][]driver.Value{{s.Interval, s.Burst, s.Revision}}
+		x.rows = [][]driver.Value{{itemID("requests"), s.Interval, s.Burst, s.Revision}}
 	}
 	return x
 }
 func debtRead(s pacelock.QuotaState) sqlStep {
-	x := sqlStep{kind: "query", contains: "SELECT tat_us,interval_us,burst,expires_us FROM pacelock_quotas"}
+	x := sqlStep{kind: "query", contains: "SELECT quota_id,tat_us,interval_us,burst,expires_us FROM pacelock_quotas"}
 	if s != (pacelock.QuotaState{}) {
-		x.rows = [][]driver.Value{{s.TAT, s.Interval, s.Burst, s.ExpiresAt}}
+		x.rows = [][]driver.Value{{itemID("requests"), s.TAT, s.Interval, s.Burst, s.ExpiresAt}}
 	}
 	return x
 }
@@ -202,10 +210,10 @@ func TestUpdateAtomicValidationAndWriteFailure(t *testing.T) {
 			steps := append(lockedSteps(), policyRead(pacelock.QuotaState{}))
 			want := pacelock.ErrPolicyMismatch
 			if mode == "write failure" {
-				want = errors.New("second write rejected")
-				steps = append(steps, policyRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies"}, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies", err: want})
+				want = errors.New("batch write rejected")
+				steps = append(steps, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies", err: want})
 			} else {
-				steps = append(steps, policyRead(old))
+				steps[len(steps)-1].rows = [][]driver.Value{{itemID("other"), old.Interval, old.Burst, old.Revision}}
 			}
 			steps = append(steps, sqlStep{kind: "rollback"})
 			err := scripted(t, steps).UpdateQuotas(context.Background(), update(q, other))
@@ -363,9 +371,11 @@ func TestMigrateCreatesCurrentSchema(t *testing.T) {
 }
 
 func TestAdmissionWriteFailureRollsBack(t *testing.T) {
-	failure := errors.New("second debt write failed")
+	failure := errors.New("batch debt write failed")
 	policy := pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}
-	steps := append(lockedSteps(), policyRead(policy), debtRead(pacelock.QuotaState{}), policyRead(policy), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas", err: failure}, sqlStep{kind: "rollback"})
+	read := policyRead(policy)
+	read.rows = append(read.rows, []driver.Value{itemID("other"), policy.Interval, policy.Burst, policy.Revision})
+	steps := append(lockedSteps(), read, debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas", err: failure}, sqlStep{kind: "rollback"})
 	a := managed(1)
 	a.Charges = append(a.Charges, pacelock.Charge{Name: "other", Cost: 1})
 	_, err := scripted(t, steps).Admit(context.Background(), a)
