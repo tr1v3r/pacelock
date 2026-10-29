@@ -163,20 +163,22 @@ func run() error {
 		return err
 	}
 	namespace := fmt.Sprintf("pacelock-load-%d", time.Now().UnixNano())
-	limiters := make([]*pacelock.Limiter, *domains)
+	limiters := make([]*pacelock.StaticLimiter, *domains)
 	prefixes := make([]string, *domains)
-	rules := make([]pacelock.Rule, *dimensions)
-	for i := range rules {
-		rules[i] = pacelock.Rule{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000}, Cost: 1}
+	quotas := make([]pacelock.Quota, *dimensions)
+	charges := make([]pacelock.Charge, *dimensions)
+	for i := range quotas {
+		quotas[i] = pacelock.Quota{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000}}
+		charges[i] = pacelock.Charge{Name: quotas[i].Name, Cost: 1}
 		if *mode == "deny" || *mode == "once-deny" {
-			rules[i].Policy.Rate = 1
-			rules[i].Policy.Period = 24 * time.Hour
-			rules[i].Policy.Burst = 1
+			quotas[i].Policy.Rate = 1
+			quotas[i].Policy.Period = 24 * time.Hour
+			quotas[i].Policy.Burst = 1
 		}
 	}
 	for i := range limiters {
 		domain := fmt.Sprint(i)
-		l, err := newLimiter(c, namespace, domain)
+		l, err := newLimiter(c, namespace, domain, quotas...)
 		if err != nil {
 			return err
 		}
@@ -184,12 +186,12 @@ func run() error {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
 		prefixes[i] = fmt.Sprintf("pacelock:{%x}:*", digest)
 		if *mode == "deny" || *mode == "once-deny" {
-			if _, err := l.AllowStatic(ctx, rules...); err != nil {
+			if _, err := l.Allow(ctx, charges...); err != nil {
 				return err
 			}
 		}
 		if *mode == "replay" || *mode == "lookup" {
-			if _, err := l.AllowStaticOnce(ctx, "seed", 24*time.Hour, rules...); err != nil {
+			if _, err := l.AllowOnce(ctx, "seed", 24*time.Hour, charges...); err != nil {
 				return err
 			}
 		}
@@ -268,18 +270,18 @@ func run() error {
 					var err error
 					switch *mode {
 					case "allow", "deny":
-						d, err = l.AllowStatic(call, rules...)
+						d, err = l.Allow(call, charges...)
 					case "once", "once-deny", "replay":
 						if *mode == "replay" {
 							id = "seed"
 						}
 						var receipt pacelock.Receipt
-						receipt, err = l.AllowStaticOnce(call, id, func() time.Duration {
+						receipt, err = l.AllowOnce(call, id, func() time.Duration {
 							if *mode == "replay" {
 								return 24 * time.Hour
 							}
 							return *retention
-						}(), rules...)
+						}(), charges...)
 						d = receipt.Decision
 						replayed = receipt.Replayed
 					case "lookup":
@@ -334,15 +336,15 @@ func run() error {
 }
 
 // newLimiter constructs a Redis driver and the shared admission facade.
-func newLimiter(client redis.Scripter, namespace, domain string) (*pacelock.Limiter, error) {
-	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{})
+func newLimiter(client redis.Scripter, namespace, domain string, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
+	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{}, quotas...)
 }
 
 // newLimiterWithOptions attaches application observation to the common facade.
-func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options) (*pacelock.Limiter, error) {
+func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
 	driver, err := redisdriver.New(client)
 	if err != nil {
 		return nil, err
 	}
-	return pacelock.NewWithOptions(driver, namespace, domain, options)
+	return pacelock.NewStaticWithOptions(driver, namespace, domain, options, quotas...)
 }

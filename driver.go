@@ -60,9 +60,9 @@ type StaticAdmission struct {
 	Scope
 	// Rules contains ordered, uniquely named charges.
 	Rules []Rule
-	// ID is empty for AllowStatic or contains 1..256 bytes for retained admission.
+	// ID is empty for StaticLimiter.Allow or contains 1..256 bytes for retained admission.
 	ID string
-	// Retention is zero for AllowStatic or whole milliseconds in [1ms,24h].
+	// Retention is zero for StaticLimiter.Allow or whole milliseconds in [1ms,24h].
 	Retention time.Duration
 }
 

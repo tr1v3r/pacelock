@@ -23,7 +23,7 @@ import (
 // retention bounds Redis receipts and the application's automatic recovery window.
 const retention = 10 * time.Minute
 
-// policyVersion pins trusted quota rules for all retained attempts in this example.
+// policyVersion pins trusted fixed quotas for all retained attempts in this example.
 const policyVersion = 1
 
 // attempt is the application-owned durable admission/execution journal entry.
@@ -34,7 +34,7 @@ type attempt struct {
 	Tenant string
 	// Tokens is the known input cost, frozen before submission.
 	Tokens int64
-	// Policy selects the trusted version needed to reconstruct identical ordered rules.
+	// Policy selects the trusted version needed to reconstruct identical ordered quotas.
 	Policy int
 	// Created bounds recovery and detects backward local-clock movement.
 	Created time.Time
@@ -44,24 +44,29 @@ type attempt struct {
 	Decision pacelock.Decision
 }
 
-// rules reconstructs the pinned policy from trusted application code, never request-supplied rules.
-// Keep this version available for the lifetime of its retained attempts.
-func rules(a attempt) ([]pacelock.Rule, error) {
+// admissionConfig reconstructs fixed quotas from trusted application code and
+// the frozen attempt costs. Keep each version for its retained attempts' lifetime.
+func admissionConfig(a attempt) ([]pacelock.Quota, []pacelock.Charge, error) {
 	if a.Policy != policyVersion || a.Tenant == "" || len(a.Tenant) > 128 || a.Tokens <= 0 || a.Tokens > 1000 {
-		return nil, errors.New("unsupported policy, tenant or known input cost")
+		return nil, nil, errors.New("unsupported policy, tenant or known input cost")
 	}
-	r := []pacelock.Rule{
-		{Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
-		{Name: "model:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: a.Tokens},
-		{Name: "tenant:" + a.Tenant + ":input-tpm", Policy: pacelock.Policy{Rate: 6000, Period: time.Minute, Burst: 1000}, Cost: a.Tokens},
+	quotas := []pacelock.Quota{
+		{Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
+		{Name: "model:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
+		{Name: "tenant:" + a.Tenant + ":input-tpm", Policy: pacelock.Policy{Rate: 6000, Period: time.Minute, Burst: 1000}},
 	}
-	return r, pacelock.Validate(r...)
+	charges := []pacelock.Charge{
+		{Name: quotas[0].Name, Cost: 1},
+		{Name: quotas[1].Name, Cost: a.Tokens},
+		{Name: quotas[2].Name, Cost: a.Tokens},
+	}
+	return quotas, charges, nil
 }
 
 // admission is the SDK surface used by the journal, allowing recovery tests without Redis.
 type admission interface {
-	// AllowStaticOnce records one admission decision for the persisted ID and fixed policy.
-	AllowStaticOnce(context.Context, string, time.Duration, ...pacelock.Rule) (pacelock.Receipt, error)
+	// AllowOnce records one admission decision using the constructed fixed policy.
+	AllowOnce(context.Context, string, time.Duration, ...pacelock.Charge) (pacelock.Receipt, error)
 	// Lookup recovers a retained decision without debiting; missing does not prove no prior debit.
 	Lookup(context.Context, string) (pacelock.Decision, bool, error)
 }
@@ -142,7 +147,7 @@ func advance(ctx context.Context, j journal, l admission, action, fault string, 
 	if err != nil {
 		return err
 	}
-	r, err := rules(a)
+	_, charges, err := admissionConfig(a)
 	if err != nil {
 		return err
 	}
@@ -181,7 +186,7 @@ func advance(ctx context.Context, j journal, l admission, action, fault string, 
 		if err = j.save(a); err != nil {
 			return err
 		}
-		receipt, callErr := l.AllowStaticOnce(ctx, a.ID, retention, r...)
+		receipt, callErr := l.AllowOnce(ctx, a.ID, retention, charges...)
 		if fault == "after-admission" {
 			return errors.New("injected lost admission response; journal remains admitting")
 		}
@@ -256,7 +261,7 @@ func run() error {
 			return err
 		}
 		a := attempt{ID: hex.EncodeToString(id[:]), Tenant: *tenant, Tokens: *tokens, Policy: policyVersion, Created: time.Now(), State: "prepared"}
-		if _, err := rules(a); err != nil {
+		if _, _, err := admissionConfig(a); err != nil {
 			return err
 		}
 		return j.save(a)
@@ -276,7 +281,17 @@ func run() error {
 	}
 	c := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1, ContextTimeoutEnabled: true})
 	defer c.Close()
-	l, err := newLimiter(c, "durable-example", "provider-account")
+	// Reconstruct the trusted policy version before creating the static entry.
+	// Keep old versions available throughout their receipt retention windows.
+	a, err := j.load()
+	if err != nil {
+		return err
+	}
+	quotas, _, err := admissionConfig(a)
+	if err != nil {
+		return err
+	}
+	l, err := newLimiter(c, "durable-example", "provider-account", quotas...)
 	if err != nil {
 		return err
 	}
@@ -297,15 +312,15 @@ func main() {
 }
 
 // newLimiter constructs a Redis driver and the shared admission facade.
-func newLimiter(client redis.Scripter, namespace, domain string) (*pacelock.Limiter, error) {
-	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{})
+func newLimiter(client redis.Scripter, namespace, domain string, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
+	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{}, quotas...)
 }
 
 // newLimiterWithOptions attaches application observation to the common facade.
-func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options) (*pacelock.Limiter, error) {
+func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
 	driver, err := redisdriver.New(client)
 	if err != nil {
 		return nil, err
 	}
-	return pacelock.NewWithOptions(driver, namespace, domain, options)
+	return pacelock.NewStaticWithOptions(driver, namespace, domain, options, quotas...)
 }

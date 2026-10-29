@@ -23,7 +23,7 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [default dynamic API](managed.go), [explicit static binding API](bound.go), [static Rule API](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
+Start with the [default dynamic API](managed.go), [standalone static API](static.go), [Rule and pure math helpers](pacelock.go), [driver and recovery contract](driver.go), and [error outcomes](errors.go).
 
 For a visual walkthrough, see the [historical interactive admission workflows](docs/workflows/README.md)
 for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplified Chinese).
@@ -36,7 +36,7 @@ for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplifie
 - Redis Lua with one MSET commit; bounded, application-scheduled `Driver.Prune`.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
-- Context-aware blocking `WaitStatic` for weighted, multidimensional admission.
+- Context-aware blocking `StaticLimiter.Wait` for weighted, multidimensional admission.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
@@ -134,70 +134,67 @@ inferred. Different namespaces/domains are independent.
 
 ## Explicit static alternative: fixed policies and costs
 
-This is the **explicit static alternative**, requiring `Revision == 0`; default
-admission uses backend-authoritative dynamic policies as described below.
+Construct a standalone `StaticLimiter` when policies are fixed in application code.
+The default `New(driver, namespace, domain)` still returns a dynamic `*Limiter`.
+Static construction does not require a parent limiter or publish backend policies:
 
-`Policy` contains `Revision`, `Rate`, `Period` and `Burst` and is embedded by the low-level
-`Rule` as well, so policy fields are declared exactly once; `Quota` retains its
-public `Name` and `Policy` fields. Construct each `StaticCharge` with `q.StaticCharge(cost)`: this
-value-receiver method captures a copy of the entire quota and the known cost in
-private fields. It performs no validation or I/O; bound admission validates them.
-Do not construct `StaticCharge` with field literals; default dynamic `Charge`
-values are public name/cost literals.
+```go
+NewStatic(driver Driver, namespace, domain string, quotas ...Quota) (*StaticLimiter, error)
+NewStaticWithOptions(driver Driver, namespace, domain string, options Options, quotas ...Quota) (*StaticLimiter, error)
+```
 
-- `limiter.BindStatic(quotas...)` validates and copies 1–32 uniquely named quotas locally.
-  It performs no backend I/O and does not register or update server-side policies.
-  Invalid definitions return an error wrapping `ErrInvalid`.
-- A `StaticLimiter` is immutable and safe to share across concurrent calls under the
-  parent's driver contract. Changing the original quota slice, quota or policy
-  afterward affects neither the binding nor previously constructed charges. Each
-  call assembles its own rules without mutating inputs.
-- `bound.Allow(ctx, charges...)` and `bound.AllowOnce(ctx, id, retention, charges...)`
-  accept any nonempty subset of bound quotas as `...StaticCharge`, each selected quota
-  exactly once, constructed with `q.StaticCharge(cost)`, with `0 < cost <= Burst`.
-  Omitted quotas are neither checked nor charged. An empty call, duplicate,
-  unknown, zero-value or otherwise invalid charges return `ErrInvalid` with
-  `NotCharged` before dispatch. There are no default costs or zero-cost exemptions.
-  Each call is atomic only across its selected quotas; separate calls are not atomic
-  together. Submit every quota that must pass together in the same call.
-- Each charge's captured policy must be fully valid, and its name, effective
-  `Interval` (rounded upward to microseconds), `Burst` and `Revision` must match the binding.
-  Different valid `Rate` / `Period` expressions with the same effective interval
-  are accepted. An invalid or nonmatching captured policy is a local `ErrInvalid` /
-  `NotCharged`, not the backend's `ErrPolicyMismatch`.
-- Charge order is arbitrary. Selected quotas are normalized to binding order for
-  `Decision.Limited` and idempotency. Fingerprints include only the selected quota
-  names, their normalized order, effective policies, costs and retention. Reordering
-  charges preserves a replay; changing the subset or the selected quotas' relative
-  binding order with the same retained ID returns `ErrConflict`. Unselected quotas
-  do not affect the fingerprint.
-- Build quota names from trusted application identity and select policies in
-  application code. For dynamic tenants/models, create a binding for the applicable
-  set; binding is local and needs no prior registration or mandatory cache.
-- To change a policy, create a new binding. Binding does not migrate existing debt
-  or bypass `ErrPolicyMismatch` against active backend state. Keep the original
-  binding, costs and retention available for retained-attempt recovery.
-- `bound.Lookup` delegates to the parent's namespace/domain lookup. It can return
-  a receipt created by another binding or the low-level API; it does not filter
-  results by the bound quota set.
+`Policy` contains `Revision`, `Rate`, `Period` and `Burst` and is embedded by the
+low-level `Rule`; `Quota` has public `Name` and `Policy` fields. Both dynamic and
+static admission take public `Charge{Name, Cost}` values, never per-call policies.
+
+- Construction validates and copies 1–32 uniquely named quotas, all with
+  `Revision == 0`. It performs no backend I/O or policy publication. Invalid
+  definitions return an error wrapping `ErrInvalid`.
+- A `StaticLimiter` is immutable and concurrency-safe under its driver's contract.
+  Changing the original quota slice, quota or policy does not change its fixed
+  policies. Each call assembles its own rules without mutating inputs.
+  A driver without `StaticDriver` may be constructed; admission then returns
+  `ErrUnsupported` / `NotCharged`, while `Lookup` remains available.
+- `static.Allow(ctx, charges...)`, `static.AllowOnce(ctx, id, retention, charges...)`
+  and `static.Wait(ctx, charges...)` accept any nonempty subset of fixed quotas as
+  `...Charge`, each selected name exactly once with `0 < Cost <= Burst`.
+  Omitted quotas are neither checked nor charged. Empty calls, duplicate or unknown
+  names and invalid costs fail locally with `ErrInvalid` / `NotCharged` before
+  dispatch. There are no default costs or zero-cost exemptions. Each call is atomic
+  only across its selected quotas; separate calls are not atomic together.
+- Charge order is arbitrary. Selected quotas are normalized to construction
+  (binding) order for `Decision.Limited` and idempotency. Fingerprints include only
+  selected names, normalized order, effective policies, costs and retention.
+  Reordering charges preserves replay; changing the subset or selected quotas'
+  relative binding order with the same retained ID returns `ErrConflict`.
+  Unselected quotas do not affect the fingerprint.
+- Build quota names from trusted identity and choose the applicable set in
+  application code. The SDK cannot infer omitted applicable quotas.
+- Policy changes require a new `StaticLimiter`; construction neither migrates debt
+  nor bypasses backend `ErrPolicyMismatch` checks. Keep the original fixed policies,
+  costs and retention available for retained-attempt recovery.
+- `static.Lookup(ctx, id)` queries its namespace/domain, not just its fixed quota
+  set. It can recover results created by another limiter in the same scope.
 
 ```go
 // Use a distinct static name with no published dynamic configuration.
 q := pacelock.Quota{Name: "static:rpm", Policy: pacelock.Policy{
     Rate: 60, Period: time.Minute, Burst: 10, // Revision defaults to 0
 }}
-bound, err := limiter.BindStatic(q)
+static, err := pacelock.NewStatic(driver, "llm-service", "provider-account-a", q)
 if err != nil { return err }
-decision, err := bound.Allow(ctx, q.StaticCharge(1))
+decision, err := static.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1})
 if err != nil { return err }
 if !decision.Allowed { /* reject */ }
 ```
 
-### Explicit low-level static API
+### Low-level driver and pure helpers
 
-`Rule` remains the caller-policy path: use `AllowStatic(ctx, rules...)`, `AllowStaticOnce(ctx, id, retention, rules...)` and `WaitStatic(ctx, rules...)`, with policy Revision 0. `Validate` / `Evaluate` are pure helpers; `EvaluateManaged` also remains pure. Static admission cannot bypass configured dynamic quotas.
-
-Neither static API detects an applicable quota omitted by the caller.
+`Rule` remains the low-level caller-policy value used by
+`StaticDriver.AdmitStatic(StaticAdmission)` and the pure `Validate` / `Evaluate`
+helpers. `EvaluateManaged` also remains pure. Public static admission is through
+`StaticLimiter`, not rule-taking methods on `Limiter`. Static admission cannot
+bypass configured dynamic quotas.
 
 ## PostgreSQL and the Driver boundary
 
@@ -211,7 +208,9 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers share `UpdateQuotas`, `Allow`, `AllowOnce`, `BindStatic`, `WaitStatic`, `Lookup`, outcomes and observers. PostgreSQL
+Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `AllowOnce`, `Lookup`)
+and standalone `StaticLimiter` (`Allow`, `AllowOnce`, `Wait`, `Lookup`), with shared
+outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota and retained result in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
@@ -287,10 +286,10 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 - `Prune` may reclaim expired debt and receipts, but never configuration/revisions.
   Plan configuration cardinality accordingly; deleting a config loses its version
   fence. All dynamic updates must use the SDK/version-check script, not raw SET.
-- Static `AllowStatic`/`WaitStatic`/`BindStatic` continue to use Revision=0 rules. Once a backend
+- `NewStatic` / `NewStaticWithOptions` require Revision-0 fixed policies. Once a backend
   configuration exists, fresh static admission for that name fails closed with
   `ErrPolicyMismatch`; old static receipts remain recoverable. A managed policy
-  cannot be passed to these static APIs. Use name/cost admission instead.
+  cannot be passed to these static constructors. Use dynamic name/cost admission instead.
 - For PostgreSQL, run explicit `Migrate` to add the policies table BEFORE upgraded
   request binaries serve traffic, including static traffic. Deploy protocol-capable
   binaries everywhere BEFORE enabling managed policies. Unmodified old writers
@@ -306,20 +305,26 @@ Runnable SDK example: [managed admission](driver/redis/examples/managed/main.go)
 
 ## Blocking admission
 
-`limiter.WaitStatic(ctx, rules...) error` uses the existing low-level `Rule` API;
-there is no `StaticLimiter.Wait`. It tries immediately, sleeps for `RetryAfter`
-after ordinary denials, and rechecks every quota atomically until admitted or an
-error occurs:
+`static.Wait(ctx, charges...) error` uses the fixed policies of a standalone
+`StaticLimiter`. It snapshots and validates the supplied name/cost charges before
+waiting, tries immediately, sleeps for `RetryAfter` only after ordinary denials,
+and rechecks the selected quotas atomically until admitted or an error occurs:
 
 ```go
-rules := []pacelock.Rule{
-    {Name: "account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},
-    {Name: "model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}, Cost: 1500},
+quotas := []pacelock.Quota{
+    {Name: "static:account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
+    {Name: "static:model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
+}
+static, err := pacelock.NewStatic(driver, "llm-service", "provider-account-a", quotas...)
+if err != nil { return err }
+charges := []pacelock.Charge{
+    {Name: quotas[0].Name, Cost: 1},
+    {Name: quotas[1].Name, Cost: 1500},
 }
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()
-if err := limiter.WaitStatic(waitCtx, rules...); err != nil {
-    // All errors stop waiting. Unknown may have charged: do not blindly retry.
+if err := static.Wait(waitCtx, charges...); err != nil {
+    // All errors stop waiting. Unknown may have charged: never retry automatically.
     return err
 }
 // Quota was consumed once. Execute this business attempt.
@@ -332,12 +337,12 @@ even if cancellation arrives concurrently. Every backend error stops waiting,
 including `NotCharged` errors. Use `errors.Is` and `OutcomeOf` on returned errors;
 `Error.Op` is `wait_static`.
 
-Waiting uses the calling goroutine and a snapshot of the supplied rules. It holds
+Waiting uses the calling goroutine and a snapshot of the supplied charges. It holds
 no backend lock or connection while sleeping and adds no queue or background
 worker. `RetryAfter` reserves no capacity: competing callers can win repeatedly,
 so there is no FIFO or starvation guarantee. Bound waiting with a context deadline.
 
-`WaitStatic` is non-idempotent and creates no retained ID for `Lookup`. A denied
+`StaticLimiter.Wait` is non-idempotent and creates no retained ID for `Lookup`. A denied
 `AllowOnce` ID replays its original denial, so polling one retained ID cannot
 implement blocking admission. Use the explicit recovery flow below when durable
 attempt identity is required.
@@ -362,10 +367,10 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 - An ID is scoped to namespace/domain. Default dynamic fingerprints bind **ordered
   names, costs and retention**, not policy versions. Static fingerprints additionally
-  bind effective intervals and bursts, preserving the effective-rule encoding. Bound static
-  calls normalize order. Cross-mode reuse conflicts through the fingerprint discriminator.
+  bind effective intervals and bursts, preserving the effective-rule encoding. Static
+  calls normalize to construction order. Cross-mode reuse conflicts through the fingerprint discriminator.
   Names must be valid UTF-8 for retained admissions; IDs contain 1–256 bytes.
-  Static binding fingerprints contain only selected quotas, normalized to binding
+  Static fingerprints contain only selected quotas, normalized to construction
   order; changing the subset conflicts, while omitted quotas do not affect identity.
 - Retention is an explicit whole number of milliseconds from 1 ms to 24 h. Choose
   a value covering your recovery window. Replays and queries never extend it.
@@ -403,11 +408,11 @@ error, ignore the decision. `ErrState` alone does not mean no debit: a malformed
 reply after a debit also returns it. Check `OutcomeOf(err)`; it is conservative for
 unrecognized errors.
 
-`Validate(rules...)` checks static bounds offline. `NewWithOptions` accepts a
-synchronous `Observer`: one event per dynamic/static admission or `Lookup`;
-`BindStatic` and `UpdateQuotas` emit none. Operation names are `allow`, `allow_once`,
+`Validate(rules...)` checks static bounds offline. `NewWithOptions` and
+`NewStaticWithOptions` accept a synchronous `Observer`: one event per
+dynamic/static admission or `Lookup`; constructors and `UpdateQuotas` emit none. Operation names are `allow`, `allow_once`,
 `allow_static`, `allow_static_once`, `wait_static` and `lookup`. `StaticLimiter.Allow`
-/ `.AllowOnce` emit static operations. `WaitStatic` emits one event for the whole
+/ `.AllowOnce` emit static operations. `StaticLimiter.Wait` emits one event for the whole
 wait, not each internal attempt. Events expose counts, duration, result, replay,
 delay and error without raw names/IDs as fields. Errors can contain identifiers:
 never use them as metric labels. Callbacks must be fast and concurrency-safe;

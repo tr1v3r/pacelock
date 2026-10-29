@@ -57,7 +57,8 @@ func TestDefaultDynamicDoesNotFallBackToStatic(t *testing.T) {
 	if d.calls != 0 || d.managedCalls != 2 {
 		t.Fatalf("default admission dispatched static=%d dynamic=%d", d.calls, d.managedCalls)
 	}
-	if decision, err := l.AllowStatic(ctx, sampleRule()); err != nil || !decision.Allowed || d.calls != 1 {
+	static, _ := NewStaticWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }}, sampleQuota())
+	if decision, err := static.Allow(ctx, sampleCharge()); err != nil || !decision.Allowed || d.calls != 1 {
 		t.Fatalf("explicit static alternative: %+v %v", decision, err)
 	}
 	if len(events) != 3 || events[0].Operation != "allow" || events[1].Operation != "allow_once" || events[2].Operation != "allow_static" {
@@ -76,7 +77,7 @@ func TestOptionalStaticDriverUnsupportedBeforeDispatch(t *testing.T) {
 		t.Fatalf("mandatory dynamic admission: %+v %v", decision, err)
 	}
 	q := Quota{Name: "q", Policy: sampleRule().Policy}
-	bound, err := l.BindStatic(q)
+	bound, err := NewStatic(d, "app", "domain", q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +85,9 @@ func TestOptionalStaticDriverUnsupportedBeforeDispatch(t *testing.T) {
 		op   string
 		call func() error
 	}{
-		{"allow_static", func() error { _, err := l.AllowStatic(ctx, sampleRule()); return err }},
-		{"allow_static_once", func() error { _, err := l.AllowStaticOnce(ctx, "attempt", time.Minute, sampleRule()); return err }},
-		{"wait_static", func() error { return l.WaitStatic(ctx, sampleRule()) }},
-		{"allow_static", func() error { _, err := bound.Allow(ctx, q.StaticCharge(1)); return err }},
-		{"allow_static_once", func() error { _, err := bound.AllowOnce(ctx, "attempt", time.Minute, q.StaticCharge(1)); return err }},
+		{"allow_static", func() error { _, err := bound.Allow(ctx, sampleCharge()); return err }},
+		{"allow_static_once", func() error { _, err := bound.AllowOnce(ctx, "attempt", time.Minute, sampleCharge()); return err }},
+		{"wait_static", func() error { return bound.Wait(ctx, sampleCharge()) }},
 	} {
 		err := tc.call()
 		var typed *Error

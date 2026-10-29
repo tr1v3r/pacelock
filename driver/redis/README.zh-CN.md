@@ -22,16 +22,18 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域和名称，动态策略以后端配置为准；
 每次准入必须包含全部适用额度。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；没有默认动态 Wait。
 
-每次静态绑定调用接受已绑定额度的任意非空子集，
-每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。
-选中 StaticCharge 按绑定顺序整理，幂等指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；
-同一仍保留的 ID 改变子集返回 `ErrConflict`，调整传入 StaticCharge 顺序不改变指纹。多次独立调用合起来不具备原子性。
-捕获的完整策略必须合法，且名称、向上取整到微秒的有效间隔和 Burst
-须与绑定一致；合法且有效策略相同的不同写法可接受。空调用、重复、未知、无效或不匹配的 StaticCharge 在准入前
-本地返回 `ErrInvalid` / `NotCharged`，不是后端 `ErrPolicyMismatch`。Rule API 与绑定接口共用 Driver 和存储，等待仍通过 `limiter.WaitStatic` 传入规则，不提供绑定等待方法。
-详见[策略与消耗契约](../../README.zh-CN.md#固定策略与单次消耗)。
+每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
+且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
+幂等指纹只包含选中名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID
+改变子集返回 `ErrConflict`，调整 Charge 顺序不改变指纹。多次独立调用合起来不具备原子性。
+空调用、重复或未知名称、无效消耗在准入前本地返回 `ErrInvalid` / `NotCharged`。
+策略在构造时校验并复制，不由 Charge 携带；策略变更需新建 `StaticLimiter`，不能绕过
+后端活跃策略或债务检查。`static.Wait(ctx, charges...)` 快照 Charge，仅重试普通额度拒绝，
+所有错误（包括 `Unknown`）立即停止等待；确认扣减成功不会因并发取消变为失败。
+等待不提供退款、队列或 worker，整次等待仅产生一次观测。
+详见[策略与消耗契约](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。
 
 ## 单命令提交与恢复
 
@@ -63,12 +65,12 @@ Lua 读取准入记录及本次涉及的额度，校验策略、计算 GCRA，�
 数据面只传名称和消耗：`limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})`，
 或 `AllowOnce(ctx, id, retention, charges...)`。驱动的必需 `Admit(Admission)` 接口在同一次
 Lua 准入中读取后端最新策略，调用方无需刷新 binding 或传递 revision。配置缺失返回
-`ErrPolicyMissing` / `NotCharged`。静态 Rule/BindStatic 接口在本地拒绝正 revision；对已配置额度
+`ErrPolicyMissing` / `NotCharged`。静态构造函数在本地拒绝正 revision；对已配置额度
 使用静态准入返回 `ErrPolicyMismatch`，即使空闲或清理后也不能绕过策略。
 
 托管 `Rate=0` 返回 `ErrPaused` / `NotCharged`，不扣减、不写结果；即使消耗超过暂停额度的
 burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。用更高 revision 恢复，债务
-随时间自然恢复。不提供动态 Wait；仅提供 `WaitStatic`。结果先于当前策略校验重放，跨更新、暂停也不变；
+随时间自然恢复。不提供动态 Wait；仅提供 `StaticLimiter.Wait`。结果先于当前策略校验重放，跨更新、暂停也不变；
 历史允许结果**不代表可以再次执行上游请求**。托管 fingerprint 绑定有序名称、消耗和保留期，
 不包含策略版本。静态 fingerprint 编码有效规则，同 ID 的静态与托管请求冲突。
 

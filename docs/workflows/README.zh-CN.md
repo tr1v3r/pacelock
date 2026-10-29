@@ -1,6 +1,6 @@
 # 准入流程图
 
-> 历史快照：本文图示、测量和 API 名称对应文中固定源码版本，早于 dynamic-default 改名；原静态 Allow/AllowOnce/Wait/Bind 现对应 AllowStatic/AllowStaticOnce/WaitStatic/BindStatic，原 Quota.Charge 现为 Quota.StaticCharge。不是当前默认动态 API 用法。
+> 历史快照：下文图示、测量和 API 名称对应固定源码版本，不是当前 API。当前静态路径直接用 `NewStatic` / `NewStaticWithOptions` 构造独立对象，再向 `StaticLimiter.Allow` / `AllowOnce` / `Wait` 传公开的 `Charge{Name, Cost}`；默认 `New` 返回动态 `Limiter`。详见[当前 API](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。历史生成产物有意保持不变。
 
 [English](README.md)
 

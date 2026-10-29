@@ -25,24 +25,22 @@ New(driver Driver, namespace, domain string) (*Limiter, error)
 (*Limiter).Allow(ctx context.Context, charges ...Charge) (Decision, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
-(*Limiter).BindStatic(quotas ...Quota) (*StaticLimiter, error)
-(Quota).StaticCharge(cost int64) StaticCharge
-(*StaticLimiter).Allow(ctx context.Context, charges ...StaticCharge) (Decision, error)
-(*StaticLimiter).AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...StaticCharge) (Receipt, error)
+NewStatic(driver Driver, namespace, domain string, quotas ...Quota) (*StaticLimiter, error)
+NewStaticWithOptions(driver Driver, namespace, domain string, options Options, quotas ...Quota) (*StaticLimiter, error)
+(*StaticLimiter).Allow(ctx context.Context, charges ...Charge) (Decision, error)
+(*StaticLimiter).AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (Receipt, error)
+(*StaticLimiter).Wait(ctx context.Context, charges ...Charge) error
 (*StaticLimiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
-(*Limiter).AllowStatic(ctx context.Context, rules ...Rule) (Decision, error)
-(*Limiter).AllowStaticOnce(ctx context.Context, id string, retention time.Duration, rules ...Rule) (Receipt, error)
-(*Limiter).WaitStatic(ctx context.Context, rules ...Rule) error
 NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error)
 ```
 
 默认路径是控制面用 `UpdateQuotas` 发布 `Quota{Name, Policy{Revision>0, ...}}`，数据面仅调用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce`。后端在同一原子边界读取最新策略与债务；请求节点不用携带 revision、刷新 binding 或轮询配置。Revision 为正且单调递增，最大 9007199254740991；同版本同有效策略只读成功，旧版本或冲突返回 `ErrPolicyMismatch`。更新永久配置，不读写、不重标定、不重置绝对 TAT；缩小 burst 后超过容量的债务仍自然恢复。`Rate=0` 暂停并返回 `ErrPaused` / `NotCharged`，更高 revision 恢复；缺失策略返回 `ErrPolicyMissing`，不是无限额度。没有默认动态 Wait，也没有后台轮询。
 
-显式静态路径要求 Revision=0。`BindStatic` 在本地校验并复制固定额度集合，返回 `StaticLimiter`，不访问后端。通过 `q.StaticCharge(cost)` 捕获额度快照和消耗。`Allow` / `AllowOnce` 每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性。空调用、重复、未知额度、零值 StaticCharge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 StaticCharge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 StaticCharge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
+显式静态路径通过 `NewStatic` / `NewStaticWithOptions` 直接构造独立 `StaticLimiter`，不需要父 Limiter。构造时在本地校验并复制 1～32 个名称唯一、Revision=0 的固定额度，不访问后端、不发布策略。`Allow` / `AllowOnce` / `Wait` 统一接收公开的 `Charge{Name, Cost}`，不从每次调用捕获策略。每次接受固定额度的任意非空子集，每个选中名称仅出现一次且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性。空调用、重复或未知名称、无效消耗在派发前本地返回 `ErrInvalid` / `NotCharged`。
 
-Charge 顺序不影响结果，选中额度按绑定顺序整理，用于阻塞额度和幂等参数。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集或选中额度的相对绑定顺序返回 `ErrConflict`，未选中额度不影响指纹。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 StaticCharge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
+Charge 顺序不影响结果，选中额度按构造（绑定）顺序整理，用于阻塞额度和幂等参数。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集或选中额度的相对绑定顺序返回 `ErrConflict`，未选中额度不影响指纹。静态对象不可变且可并发复用；修改原 Quota 不影响已复制的固定策略。修改策略需创建新 `StaticLimiter`，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按固定额度集合过滤。
 
-底层调用方策略保留 `Rule`，使用 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`。动态 `Driver.Admit(Admission)` 是必需契约；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 与 `QuotaDriver` 分别提供静态准入和配置发布，缺少可选能力时返回 `ErrUnsupported`。`Lookup` 共享。已配置动态策略的名称拒绝新静态准入，历史回执仍先重放。`Validate` / `Evaluate` / `EvaluateManaged` 保持纯计算。
+底层调用方策略保留 `Rule`，用于 `StaticAdmission` 与纯计算工具，不再提供接收 Rule 的公开 Limiter 准入方法。动态 `Driver.Admit(Admission)` 是必需契约；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 与 `QuotaDriver` 分别提供静态准入和配置发布，缺少可选能力时返回 `ErrUnsupported`。`Lookup` 共享。已配置动态策略的名称拒绝新静态准入，历史回执仍先重放。`Validate` / `Evaluate` / `EvaluateManaged` 保持纯计算。
 
 本次真实后端、模糊测试与准入热路径基准结果见[本地验证记录](validation/quota-charge-local.md)。
 
@@ -59,9 +57,9 @@ Charge 顺序不影响结果，选中额度按绑定顺序整理，用于阻塞�
 
 ## 已实现：阻塞等待封装
 
-`WaitStatic` 在调用方 goroutine 中立即尝试普通准入，仅在正常额度拒绝后按 `RetryAfter` 休眠并重新判定。所有后端错误立即返回，保留原始扣减确定性；两次尝试之间取消为 `NotCharged`，已确认扣减则返回 nil，不因并发取消而伪装成未扣减。错误的 `Op` 为 `wait_static`，Observer 为整次等待发出一个事件。
+`StaticLimiter.Wait` 在调用方 goroutine 中立即尝试普通准入，仅在正常额度拒绝后按 `RetryAfter` 休眠并重新判定。所有后端错误立即返回，保留原始扣减确定性；两次尝试之间取消为 `NotCharged`，已确认扣减则返回 nil，不因并发取消而伪装成未扣减。错误的 `Op` 为 `wait_static`，Observer 为整次等待发出一个事件。
 
-规则在调用开始时复制，支持原有多维与 Cost。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。没有幂等 Wait：同一个 `AllowOnce` ID 会保留拒绝，不能轮询等待恢复，`WaitStatic` 也不生成可恢复的 ID。
+名称/cost Charge 在调用开始时快照并校验，使用构造时固定的策略。休眠期间不持有后端事务、连接或锁；不增加队列、预留或公平性保证。调用方用 context deadline 限制等待。没有幂等 Wait：同一个 `AllowOnce` ID 会保留拒绝，不能轮询等待恢复，`StaticLimiter.Wait` 也不生成可恢复的 ID。
 
 ## GCRA 与加权消耗
 

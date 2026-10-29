@@ -9,11 +9,13 @@ import (
 	"unicode/utf8"
 )
 
-// Charge requests known cost against a backend-managed quota. It contains
-// no local policy or revision; the backend resolves current configuration during
-// atomic admission. The application must include every applicable quota.
+// Charge requests a known cost against a named quota. It contains no policy or
+// revision: Limiter resolves backend configuration atomically, while StaticLimiter
+// uses its immutable local policies. Include every applicable quota in one call.
 type Charge struct {
+	// Name identifies a quota within the limiter's scope.
 	Name string
+	// Cost is positive and must not exceed the effective policy's Burst.
 	Cost int64
 }
 
@@ -76,9 +78,10 @@ func (a Admission) Fingerprint() string {
 // no debit. Ordinary capacity denial returns Allowed=false and a RetryAfter.
 // A cost exceeding the current burst returns ErrInvalid, not a retryable denial.
 func (l *Limiter) Allow(ctx context.Context, charges ...Charge) (decision Decision, err error) {
-	finish := l.observe(ctx, "allow", len(charges))
+	core := l.engine()
+	finish := core.observe(ctx, "allow", len(charges))
 	defer func() { finish(decision, false, err) }()
-	receipt, err := l.admitManaged(ctx, "", 0, charges)
+	receipt, err := core.admitManaged(ctx, "", 0, charges)
 	return receipt.Decision, err
 }
 
@@ -87,15 +90,16 @@ func (l *Limiter) Allow(ctx context.Context, charges ...Charge) (decision Decisi
 // never authorize executing upstream work twice. Lookup reads either API's result.
 // Paused/missing-policy errors do not create a retained receipt.
 func (l *Limiter) AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (receipt Receipt, err error) {
-	finish := l.observe(ctx, "allow_once", len(charges))
+	core := l.engine()
+	finish := core.observe(ctx, "allow_once", len(charges))
 	defer func() { finish(receipt.Decision, receipt.Replayed, err) }()
 	if id == "" {
 		return Receipt{}, failure("allow_once", NotCharged, fmt.Errorf("%w: ID is required", ErrInvalid))
 	}
-	return l.admitManaged(ctx, id, retention, charges)
+	return core.admitManaged(ctx, id, retention, charges)
 }
 
-func (l *Limiter) admitManaged(ctx context.Context, id string, retention time.Duration, charges []Charge) (Receipt, error) {
+func (l *limiterCore) admitManaged(ctx context.Context, id string, retention time.Duration, charges []Charge) (Receipt, error) {
 	op := "allow"
 	if id != "" {
 		op = "allow_once"

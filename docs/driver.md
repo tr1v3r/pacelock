@@ -1,6 +1,10 @@
 # Atomic admission drivers
 
-`pacelock.New(driver, namespace, domain)` is the backend-independent constructor.
+`pacelock.New(driver, namespace, domain)` constructs the default dynamic `*Limiter`.
+`NewStatic(driver, namespace, domain, quotas...)` independently constructs a
+`*StaticLimiter`; `NewStaticWithOptions` adds `Options` before the quota arguments.
+Static constructors validate and copy fixed Revision-0 quotas without backend I/O
+or a parent limiter. Later input mutation does not change the fixed policies.
 Both Redis and PostgreSQL implement the same admission and recovery contract.
 Dynamic admission is the default; see the breaking pre-v1 [migration](compatibility.md).
 
@@ -15,16 +19,19 @@ Mandatory `Driver.Admit(Admission)` receives a scope, ordered name/cost charges 
 an optional ID/retention, resolving current backend policies atomically. Optional
 `StaticDriver.AdmitStatic(StaticAdmission)` receives caller-owned Revision-0 rules.
 Optional `QuotaDriver` publishes revisioned permanent configurations; missing optional
-capabilities return `ErrUnsupported` without mutation. `Lookup` is shared. The
+capabilities return `ErrUnsupported` without mutation when invoked. Static
+construction does not require `StaticDriver`; without it, admission returns
+`ErrUnsupported` / `NotCharged` while the shared `Lookup` remains available. The
 whole operation is the atomic boundary: all quotas pass together or an ordinary
 denial debits none. `Driver.Lookup` recovers a retained result on the authoritative
 primary without refreshing retention. The interface does not expose separate
 Get/Set calls or a network-spanning read/modify/write callback.
 
-`StaticLimiter.Allow` / `AllowOnce` accept any nonempty subset of bound quotas.
+`StaticLimiter.Allow` / `AllowOnce` / `Wait` accept public `Charge{Name, Cost}`
+values selecting any nonempty subset of fixed quotas. Charges contain no policy.
 The core validates selected charges and sends only those rules, normalized to
 binding order; omitted quotas are neither checked nor charged. Empty calls,
-duplicate or unknown quotas, invalid costs and captured policy mismatches fail
+duplicate or unknown quotas and invalid costs (`Cost <= 0` or `Cost > Burst`) fail
 locally with `ErrInvalid` / `NotCharged`. Separate calls are not atomic together.
 Idempotency fingerprints include only selected names, normalized order, effective
 policies, costs and retention; changing the subset with the same retained ID
@@ -38,12 +45,14 @@ decision. `NotCharged` on a later call cannot resolve an earlier unknown outcome
 
 ## Blocking wrapper
 
-`Limiter.WaitStatic` is implemented entirely in the core using `AdmitStatic` calls
-with an empty ID. Drivers remain immediate: the core sleeps for a validated
-`RetryAfter` only after a normal denial. Any error stops the loop and preserves
-its accounting certainty. No driver API, persistence protocol or backend-side
-queue is added. Sleeping holds no driver resources; the caller owns the context
-deadline. One `wait_static` observation covers the complete operation.
+`StaticLimiter.Wait` snapshots the charges and is implemented entirely in the core
+using the fixed policies and `AdmitStatic` calls with an empty ID. Drivers remain
+immediate: the core sleeps for a validated `RetryAfter` only after a normal denial.
+Any error stops the loop and preserves its accounting certainty. A confirmed
+successful debit remains success even if context cancellation races with the
+response. No driver API, persistence protocol or backend-side queue is added.
+Sleeping holds no driver resources; the caller owns the context deadline. One
+`wait_static` observation covers the complete operation.
 
 ## GCRA and policy identity
 

@@ -49,14 +49,15 @@ func (u QuotaUpdate) Validate() error {
 // revision for rollback: publish the old parameters at a higher revision.
 func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...Quota) error {
 	const op = "update_quotas"
-	if err := l.ready(ctx); err != nil {
+	core := l.engine()
+	if err := core.ready(ctx); err != nil {
 		return failure(op, NotCharged, err)
 	}
-	u := QuotaUpdate{Scope: l.scope, Quotas: append([]Quota(nil), quotas...)}
+	u := QuotaUpdate{Scope: core.scope, Quotas: append([]Quota(nil), quotas...)}
 	if err := u.Validate(); err != nil {
 		return failure(op, NotCharged, err)
 	}
-	driver, ok := l.driver.(QuotaDriver)
+	driver, ok := core.driver.(QuotaDriver)
 	if !ok {
 		return failure(op, NotCharged, ErrUnsupported)
 	}

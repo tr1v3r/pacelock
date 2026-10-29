@@ -34,7 +34,7 @@ and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
 schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. There is no default dynamic Wait.
 
 ## Default dynamic policies
 
@@ -79,7 +79,7 @@ no managed Wait API; caller retry/config polling remains outside the SDK.
 Existing retained receipts replay **before** current policy checks, unchanged by
 pauses or updates. Managed retries with the same names/costs replay across revisions.
 Static and managed requests sharing an ID conflict. A replayed historical allow is
-not permission to execute upstream again. Static Rule/BindStatic requests reject managed
+not permission to execute upstream again. Static constructors reject managed
 revision fields locally, and new static admissions to configured quotas return
 `ErrPolicyMismatch`; old static receipts still replay before this bypass guard.
 
@@ -98,23 +98,21 @@ Old PostgreSQL code cannot coexist with active dynamic policies: it does not che
 the separate configuration table and can bypass managed limits. Run Migrate during
 controlled setup with no concurrent migration runners; DDL takes table locks.
 
-The common `BindStatic` API validates and copies fixed quotas locally. Construct charges
-with `q.StaticCharge(cost)`, a value-receiver method that captures the complete quota and
-cost in private fields without validation or I/O; do not use charge field literals.
-`Quota.Name` / `Policy` remain public. Later quota mutation affects neither existing
-charges nor bindings; policy changes require a new binding. `Allow` / `AllowOnce`
-accept any nonempty subset of bound quotas as `...StaticCharge`, each selected quota
-exactly once with `0 < cost <= Burst`. Omitted quotas are neither checked nor charged.
-Selected charges are normalized to binding order. Idempotency fingerprints include
-only selected names, normalized order, effective policies, costs and retention;
-changing the subset with the same retained ID returns `ErrConflict`. Reordering
-input charges does not change the fingerprint. Separate calls are not atomic together.
-Each captured policy must be fully valid, and its name, effective interval (rounded upward
-to microseconds) and burst must match the binding. Equivalent valid policy
-expressions are accepted. Empty calls, duplicate, unknown, invalid or mismatched charges return local
-`ErrInvalid` / `NotCharged` before admission, not backend `ErrPolicyMismatch`.
-Rule APIs share the same Driver and storage; blocking admission uses `limiter.WaitStatic` with rules, not a bound wait method.
-See [policy and cost contracts](../../README.md#fixed-policies-and-per-attempt-costs).
+Each static call accepts any nonempty subset of fixed quotas as `...Charge`, each
+selected name exactly once with `0 < Cost <= Burst`; omitted quotas are neither
+checked nor charged. Selected charges are normalized to construction (binding)
+order. Idempotency fingerprints include only selected names, normalized order,
+effective policies, costs and retention; changing the subset with the same retained
+ID returns `ErrConflict`. Reordering charges preserves the fingerprint. Separate
+calls are not atomic together. Empty calls, duplicate or unknown names and invalid
+costs fail locally with `ErrInvalid` / `NotCharged` before admission. Policies are
+validated/copied at construction, not carried in charges; policy changes require a
+new `StaticLimiter` and cannot bypass active backend policy/debt checks.
+`static.Wait(ctx, charges...)` snapshots charges and retries only ordinary denial;
+all errors stop waiting, including `Unknown`. A confirmed debit remains success
+even if cancellation races with its response. Waiting adds no refunds, queue or
+workers and emits one observation for the whole operation.
+See [policy and cost contracts](../../README.md#explicit-static-alternative-fixed-policies-and-costs).
 
 ## Transactions and failure contract
 

@@ -16,7 +16,7 @@ type fakeAdmission struct {
 	err      error
 }
 
-func (f *fakeAdmission) AllowStaticOnce(_ context.Context, _ string, _ time.Duration, r ...pacelock.Rule) (pacelock.Receipt, error) {
+func (f *fakeAdmission) AllowOnce(_ context.Context, _ string, _ time.Duration, r ...pacelock.Charge) (pacelock.Receipt, error) {
 	f.calls++
 	if len(r) != 3 {
 		panic("missing quota")
@@ -130,14 +130,14 @@ func TestDenialAndNotChargedTerminal(t *testing.T) {
 		}
 	}
 }
-func TestTrustedRulesAndExclusiveJournal(t *testing.T) {
+func TestTrustedConfigAndExclusiveJournal(t *testing.T) {
 	a := attempt{Policy: 1, Tenant: "tenant-a", Tokens: 123}
-	r, err := rules(a)
-	if err != nil || len(r) != 3 || r[0].Name != "account:rpm" || r[1].Name != "model:input-tpm" || r[2].Name != "tenant:tenant-a:input-tpm" || r[0].Cost != 1 || r[1].Cost != 123 || r[2].Cost != 123 {
-		t.Fatalf("incomplete rules: %+v %v", r, err)
+	quotas, charges, err := admissionConfig(a)
+	if err != nil || len(quotas) != 3 || len(charges) != 3 || quotas[0].Name != "account:rpm" || quotas[1].Name != "model:input-tpm" || quotas[2].Name != "tenant:tenant-a:input-tpm" || charges[0].Name != quotas[0].Name || charges[1].Name != quotas[1].Name || charges[2].Name != quotas[2].Name || charges[0].Cost != 1 || charges[1].Cost != 123 || charges[2].Cost != 123 {
+		t.Fatalf("incomplete fixed admission: quotas=%+v charges=%+v err=%v", quotas, charges, err)
 	}
 	a.Policy = 2
-	if _, err = rules(a); err == nil {
+	if _, _, err = admissionConfig(a); err == nil {
 		t.Fatal("unknown policy accepted")
 	}
 	dir := t.TempDir()

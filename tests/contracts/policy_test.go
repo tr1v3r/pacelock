@@ -15,7 +15,7 @@ import (
 func dynamicQuota(rev, rate, burst int64) pacelock.Quota {
 	return pacelock.Quota{Name: "dynamic", Policy: pacelock.Policy{Revision: rev, Rate: rate, Period: time.Minute, Burst: burst}}
 }
-func updateQuota(t *testing.T, l *pacelock.Limiter, q pacelock.Quota) {
+func updateQuota(t *testing.T, l *contractLimiter, q pacelock.Quota) {
 	t.Helper()
 	if err := l.UpdateQuotas(context.Background(), q); err != nil {
 		t.Fatal(err)
@@ -77,9 +77,9 @@ func TestDefaultDynamicFailClosed(t *testing.T) {
 			for _, once := range []bool{false, true} {
 				var err error
 				if once {
-					_, err = l.AllowStaticOnce(ctx, "static-bypass", time.Minute, rule(c.Name, 3, 1))
+					_, err = l.allowRulesOnce(ctx, "static-bypass", time.Minute, rule(c.Name, 3, 1))
 				} else {
-					_, err = l.AllowStatic(ctx, rule(c.Name, 3, 1))
+					_, err = l.allowRules(ctx, rule(c.Name, 3, 1))
 				}
 				if !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 					t.Fatalf("static bypass: %v", err)
@@ -161,7 +161,7 @@ func TestDynamicIdlePruneAndAtomicUpdate(t *testing.T) {
 				t.Fatal("prune lost pause", err)
 			}
 			static := pacelock.Rule{Name: c.Name, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: 2}, Cost: 1}
-			if _, err := l.AllowStatic(ctx, static); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if _, err := l.allowRules(ctx, static); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("static bypass", err)
 			}
 			other := dynamicQuota(3, 1, 2)
@@ -213,7 +213,7 @@ func TestDynamicStaticUpgradeAndReplay(t *testing.T) {
 			l := limiter(t, b, 0, freshDomain())
 			c := managedCharge()
 			r := pacelock.Rule{Name: c.Name, Cost: 1, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: 1}}
-			saved, err := l.AllowStaticOnce(ctx, "static-id", time.Minute, r)
+			saved, err := l.allowRulesOnce(ctx, "static-id", time.Minute, r)
 			if err != nil || !saved.Allowed {
 				t.Fatal(saved, err)
 			}
@@ -221,14 +221,14 @@ func TestDynamicStaticUpgradeAndReplay(t *testing.T) {
 			if d, err := l.Allow(ctx, c); err != nil || d.Allowed {
 				t.Fatal("upgrade forgot debt", d, err)
 			}
-			saved, err = l.AllowStaticOnce(ctx, "static-id", time.Minute, r)
+			saved, err = l.allowRulesOnce(ctx, "static-id", time.Minute, r)
 			if err != nil || !saved.Replayed || !saved.Allowed {
 				t.Fatal(saved, err)
 			}
 			if _, err = l.AllowOnce(ctx, "static-id", time.Minute, c); !errors.Is(err, pacelock.ErrConflict) {
 				t.Fatal("cross API id", err)
 			}
-			if _, err = l.AllowStatic(ctx, r); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if _, err = l.allowRules(ctx, r); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("static bypass", err)
 			}
 		})
@@ -274,7 +274,7 @@ func TestDynamicConcurrentUpdates(t *testing.T) {
 		t.Run(b.name, func(t *testing.T) {
 			ctx := context.Background()
 			domain := freshDomain()
-			ls := []*pacelock.Limiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
+			ls := []*contractLimiter{limiter(t, b, 0, domain), limiter(t, b, 1, domain)}
 			c := managedCharge()
 			updateQuota(t, ls[0], dynamicQuota(1, 1, 100))
 			var wg sync.WaitGroup
