@@ -2,6 +2,15 @@
 
 # Local fixture observations
 
+## Dynamic debt-format experiment (2026-10-29)
+
+[Dynamic D3 vs numeric debt comparison](dynamic-debt-format-local.md): report,
+raw 21-round samples and a pinned-source reproduction script. Measured on
+`bcc67d5`, before the dynamic-only/cost-only refactor; not a current-version
+capacity claim. Full dynamic admission saved about 2–4% of Redis server time.
+
+## Earlier native-TTL/Pending observations
+
 Historical native-TTL/Pending protocol measurements, not benchmarks of the new
 MSET/logical-expiry protocol. Current physical memory drain requires scheduled cleanup.
 The [MSET verification record](redis-mset-local.md) is also archived: it predates
