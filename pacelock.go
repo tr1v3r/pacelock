@@ -39,72 +39,52 @@ var (
 	ErrUnsupported = errors.New("pacelock: operation is unsupported")
 )
 
-// Policy defines replenishment and total burst capacity independently of a
-// charge. The same named quota must use the same effective policy throughout
-// a domain.
-type Policy struct {
-	// Revision is 1..MaxRevision for policies installed by UpdateQuotas.
-	// Revisions never expire. Zero is supported only by offline math helpers.
-	Revision int64
-	// Rate is units replenished per Period. Zero pauses a managed policy.
-	Rate int64
-	// Period is positive and at most MaxHorizon; unit intervals round up to microseconds.
-	Period time.Duration
-	// Burst is positive total capacity; its effective refill time must not exceed MaxHorizon.
-	Burst int64
+// Outcome describes accounting certainty for a failed invocation. It does not
+// resolve uncertainty from an earlier invocation of the same admission.
+type Outcome string
+
+const (
+	// NotCharged means this invocation is known not to have debited quota.
+	NotCharged Outcome = "not_charged"
+	// Unknown means a debit cannot be ruled out, including backend-specific partial writes.
+	Unknown Outcome = "unknown"
+)
+
+// Error preserves the underlying error chain and reports operation/accounting context.
+type Error struct {
+	// Op identifies allow, wait or update_quotas (and driver maintenance operations).
+	Op string
+	// Outcome reports accounting certainty for this invocation.
+	Outcome Outcome
+	// Err preserves the underlying cause for errors.Is and errors.As.
+	Err error
 }
 
-// Rule charges Cost units to the quota named by Name under a caller-owned Policy.
-// Burst is total instantaneous capacity, including the first unit. Rule is the
-// offline math format, not a backend admission request. Limiter accepts Charge
-// values and resolves policies from the backend.
-type Rule struct {
-	// Name identifies a quota within a scope; it contains 1..256 bytes.
-	Name string
-	// Policy specifies how the named quota replenishes and how much it can accumulate.
-	Policy Policy
-	// Cost is the known charge for this attempt, from 1 through Burst.
-	Cost int64
+// Error formats operation, outcome and underlying cause.
+func (e *Error) Error() string { return fmt.Sprintf("pacelock: %s (%s): %v", e.Op, e.Outcome, e.Err) }
+
+// Unwrap exposes the underlying error chain.
+func (e *Error) Unwrap() error { return e.Err }
+
+// OutcomeOf returns Unknown for untyped errors and nil; call only on actual errors.
+func OutcomeOf(err error) Outcome {
+	var e *Error
+	if errors.As(err, &e) && e != nil && e.Outcome == NotCharged {
+		return NotCharged
+	}
+	return Unknown
 }
 
-// Interval validates the rule and returns its per-unit recovery interval, rounded
-// upward to whole microseconds. Drivers must use this effective interval.
-func (r Rule) Interval() (time.Duration, error) {
-	p := r.Policy
-	if r.Name == "" || len(r.Name) > 256 || p.Revision < 0 || p.Revision > MaxRevision || p.Rate < 0 || (p.Rate == 0 && p.Revision == 0) || p.Period <= 0 || p.Period > MaxHorizon || p.Burst <= 0 || p.Burst > MaxHorizon.Microseconds() || r.Cost <= 0 || r.Cost > p.Burst {
-		return 0, fmt.Errorf("%w: invalid quota %q", ErrInvalid, r.Name)
-	}
-	if p.Rate == 0 {
-		return 0, nil // A managed pause has no finite refill interval.
-	}
-	us := (p.Period.Nanoseconds() + 999) / 1000
-	step := us / p.Rate
-	if us%p.Rate != 0 {
-		step++
-	}
-	if p.Burst > MaxHorizon.Microseconds()/step {
-		return 0, fmt.Errorf("%w: burst refill horizon exceeds 24 hours for %q", ErrInvalid, r.Name)
-	}
-	return time.Duration(step) * time.Microsecond, nil
+func failure(op string, outcome Outcome, err error) error {
+	return &Error{Op: op, Outcome: outcome, Err: err}
 }
 
-// Validate checks 1..MaxRules rules with unique names without backend access.
-// It cannot detect conflicts with active backend policies.
-func Validate(rules ...Rule) error {
-	if len(rules) == 0 || len(rules) > MaxRules {
-		return fmt.Errorf("%w: require 1..%d rules", ErrInvalid, MaxRules)
+func driverFailure(op string, err error) error {
+	var typed *Error
+	if !errors.As(err, &typed) {
+		err = fmt.Errorf("%w: %w", ErrBackend, err)
 	}
-	seen := make(map[string]bool, len(rules))
-	for _, r := range rules {
-		if _, err := r.Interval(); err != nil {
-			return err
-		}
-		if seen[r.Name] {
-			return fmt.Errorf("%w: duplicate quota %q", ErrInvalid, r.Name)
-		}
-		seen[r.Name] = true
-	}
-	return nil
+	return failure(op, OutcomeOf(err), err)
 }
 
 // Decision describes one admission. On errors, ignore the returned decision.
@@ -115,6 +95,56 @@ type Decision struct {
 	RetryAfter time.Duration
 	// Limited lists every blocking quota in charge/rule order. It is empty on allowance.
 	Limited []string
+}
+
+// Options holds optional integrations; zero values are valid.
+type Options struct {
+	// Observer is nil to disable synchronous observation.
+	Observer Observer
+}
+
+// Observer receives one synchronous event per Allow or Wait call.
+// Constructors and UpdateQuotas emit no event. The callback must be fast and
+// concurrency-safe.
+// Panics propagate; no background work is created.
+type Observer func(context.Context, Event)
+
+// Event describes a call without exposing quota names as fields.
+// Err may contain identifiers and must not be used as a metric label.
+type Event struct {
+	// Operation is allow or wait.
+	// Each Wait emits one event for the whole call.
+	Operation string
+	// Duration excludes the observer callback execution time.
+	Duration time.Duration
+	// RuleCount includes invalid supplied rules or charges.
+	RuleCount int
+	// Result is allowed, denied or error.
+	Result string
+	// RetryAfter is the last decision advisory wait (zero after allowance).
+	RetryAfter time.Duration
+	// Err is the returned error; do not label metrics with its text.
+	Err error
+}
+
+func (l *limiterCore) observe(ctx context.Context, op string, count int) func(Decision, error) {
+	if l == nil || l.observer == nil {
+		return func(Decision, error) {}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	start := time.Now()
+	return func(d Decision, err error) {
+		result := "denied"
+		if d.Allowed {
+			result = "allowed"
+		}
+		if err != nil {
+			result = "error"
+		}
+		l.observer(ctx, Event{Operation: op, Duration: time.Since(start), RuleCount: count, Result: result, RetryAfter: d.RetryAfter, Err: err})
+	}
 }
 
 // Limiter admits charges using current backend-owned dynamic policies.
@@ -216,4 +246,56 @@ func validateDecision(d Decision, charges []Charge) error {
 		}
 	}
 	return nil
+}
+
+// Wait blocks until all charges are atomically accepted or an error occurs.
+// It snapshots the charges before dispatch, but each attempt uses the current
+// backend-owned policies. Policy updates do not wake a sleeping Wait; an earlier
+// RetryAfter may delay observing a relaxed policy.
+//
+// Only ordinary quota denials are retried, after their advisory RetryAfter.
+// Every error stops waiting, including missing or paused policies, a cost above
+// the current burst, and NotCharged backend errors. Unknown outcomes must not be
+// blindly retried. Cancellation between attempts is NotCharged; cancellation
+// during dispatch preserves the driver's accounting outcome. A nil error means
+// quota was consumed once, even if ctx was canceled after a confirmed debit.
+// Business failure does not refund that consumption.
+//
+// Wait uses the calling goroutine. It creates no queue,
+// reservation or background goroutine and guarantees no fairness. Contention
+// can delay admission indefinitely; use a deadline to bound waiting.
+// It emits one observer event.
+func (l *Limiter) Wait(ctx context.Context, charges ...Charge) (err error) {
+	core := l.engine()
+	finish := core.observe(ctx, "wait", len(charges))
+	var decision Decision
+	defer func() { finish(decision, err) }()
+	charges = append([]Charge(nil), charges...)
+	decision, err = waitAdmission(ctx, "wait", func() (Decision, error) {
+		return core.admitManaged(ctx, charges)
+	})
+	return err
+}
+
+// waitAdmission retries only validated denials. Attempts validate context before
+// dispatch and return a validated decision or an accounting-aware error. Keep
+// the last decision for whole-call observation, including a canceled delay.
+func waitAdmission(ctx context.Context, op string, attempt func() (Decision, error)) (decision Decision, err error) {
+	for {
+		result, attemptErr := attempt()
+		if attemptErr != nil {
+			return decision, failure(op, OutcomeOf(attemptErr), attemptErr)
+		}
+		decision = result
+		if decision.Allowed {
+			return decision, nil
+		}
+		timer := time.NewTimer(decision.RetryAfter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return decision, failure(op, NotCharged, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
