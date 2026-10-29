@@ -83,8 +83,10 @@ tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
 }}
 // Publish once from the control plane; requests send only names and costs.
 if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
-charges := []pacelock.Charge{{Name: rpm.Name, Cost: 1}, {Name: tokens.Name, Cost: 1500}}
-decision, err := limiter.Allow(ctx, charges...)
+decision, err := limiter.Allow(ctx,
+    pacelock.Use(rpm.Name, 1),
+    pacelock.Use(tokens.Name, 1500),
+)
 if err != nil {
     // Ignore decision. OutcomeOf(err) is NotCharged or Unknown.
     // Choose an explicit application failure policy; do not blindly retry.
@@ -95,6 +97,10 @@ if !decision.Allowed {
     // RetryAfter does not reserve future capacity.
 }
 ```
+
+`pacelock.Use(name, cost)` is shorthand for `pacelock.Charge{Name: name, Cost: cost}`
+for both `Allow` and `Wait`. Pass a different cost on each call as needed; the helper
+binds no policy and leaves validation to admission.
 
 `Allow` consumes capacity for this attempt and is **not idempotent**. Business
 failure after admission does not refund capacity. For the Redis driver, the limiter neither owns nor

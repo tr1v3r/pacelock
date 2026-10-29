@@ -4,6 +4,9 @@
 
 ### Dynamic-only admission
 
+- Add `Use(name, cost)` as shorthand for constructing a `Charge` for `Allow` and
+  `Wait`, without policy binding or changes to admission validation.
+
 - `New` / `NewWithOptions` construct the sole dynamic `Limiter`, exposing
   `Allow(ctx, ...Charge) (Decision, error)`, `Wait(ctx, ...Charge) error` and
   `UpdateQuotas`. Publish positive-revision quotas before requests.

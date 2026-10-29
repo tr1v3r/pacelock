@@ -37,14 +37,14 @@ jobs:
           PACELOCK_REQUIRED_REDIS_BACKENDS: standalone
           PACELOCK_REQUIRED_DRIVER_BACKENDS: redis
       - name: Repeat contention tests with randomized order
-        working-directory: driver/redis/internal/engine
+        working-directory: driver/redis
         run: go test -race -shuffle=on -count=3 -timeout=5m -run '^TestRedisConcurrency$' .
         env:
           PACELOCK_REDIS_ADDR: localhost:6379
           PACELOCK_REQUIRED_REDIS_BACKENDS: standalone
           PACELOCK_REQUIRED_DRIVER_BACKENDS: redis
       - run: go test -run '^$' -bench BenchmarkValidate -benchtime=100ms -benchmem .
-        working-directory: driver/redis/internal/engine
+        working-directory: driver/redis
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-go-${{ matrix.go }}-redis-${{ matrix.redis }}
@@ -70,7 +70,7 @@ jobs:
           PACELOCK_POSTGRES_DSN: postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable
           PACELOCK_REQUIRED_DRIVER_BACKENDS: redis,postgres
       - name: Repeat contention tests with randomized order
-        working-directory: driver/redis/internal/engine
+        working-directory: driver/redis
         run: go test -race -shuffle=on -count=3 -timeout=5m -run '^TestRedisConcurrency$' .
         env:
           PACELOCK_REDIS_ADDR: localhost:16379
@@ -93,7 +93,7 @@ jobs:
           cache: true
           cache-dependency-path: "**/go.sum"
       - run: go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .
-        working-directory: driver/redis/internal/engine
+        working-directory: driver/redis
   postgres:
     runs-on: ubuntu-latest
     timeout-minutes: 10
