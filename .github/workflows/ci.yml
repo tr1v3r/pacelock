@@ -23,8 +23,8 @@ jobs:
         ports: ['6379:6379']
         options: --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -45,7 +45,7 @@ jobs:
           PACELOCK_REQUIRED_DRIVER_BACKENDS: redis
       - run: go test -run '^$' -bench BenchmarkValidate -benchtime=100ms -benchmem .
         working-directory: driver/redis
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-go-${{ matrix.go }}-redis-${{ matrix.redis }}
           path: "**/coverage.out"
@@ -54,8 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: true
@@ -86,8 +86,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: true
@@ -114,8 +114,8 @@ jobs:
         ports: ['5432:5432']
         options: --health-cmd "pg_isready -U pacelock -d pacelock" --health-interval 2s --health-timeout 2s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           cache: true
