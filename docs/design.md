@@ -16,7 +16,7 @@ NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limit
 
 `Admission` 只包含 Scope 和 Charges；`Driver.Admit(ctx, Admission)` 返回 `(Decision, error)`。
 可选 `QuotaDriver` 发布动态配置；不支持的可选能力返回 `ErrUnsupported` / `NotCharged`。
-`Rule`、`Validate`、`Evaluate`、`EvaluateManaged` 和 `ApplyPolicies` 保持为离线纯计算工具。
+`Rule`、`Validate`、`Evaluate`、`EvaluateManaged` 和 `ApplyQuotas` 保持为离线纯计算工具。
 
 ## 后端权威策略
 

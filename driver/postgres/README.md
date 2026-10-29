@@ -61,7 +61,7 @@ _ = decision
 
 Publish positive, monotonically increasing revisions (at most 9007199254740991).
 Updates take the same scope lock as admission and validate the complete batch with
-`ApplyPolicies` before writing. Only the separate policy table is read or written:
+`ApplyQuotas` before writing. Only the separate policy table is read or written:
 TAT and debt expiry remain untouched, including during pause/resume. Higher revisions
 replace configuration; identical revisions with equal effective interval/burst are
 read-only successes. Older revisions or same-version conflicts return

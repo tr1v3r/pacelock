@@ -13,7 +13,7 @@ func managedQuota(rev, rate, burst int64) Quota {
 }
 func configs(t *testing.T, qs ...Quota) []QuotaState {
 	t.Helper()
-	p, err := ApplyPolicies(10000000, qs, make([]QuotaState, len(qs)))
+	p, err := ApplyQuotas(10000000, qs, make([]QuotaState, len(qs)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestManagedTransitions(t *testing.T) {
 	if err != nil || d.Allowed || next != nil || d.RetryAfter != 750*time.Millisecond {
 		t.Fatalf("shrunk capacity: %+v %+v %v", d, next, err)
 	}
-	paused, err := ApplyPolicies(now, []Quota{managedQuota(2, 0, 2)}, policies)
+	paused, err := ApplyQuotas(now, []Quota{managedQuota(2, 0, 2)}, policies)
 	if err != nil || debt[0] != old {
 		t.Fatal(paused, err)
 	}
@@ -39,7 +39,7 @@ func TestManagedTransitions(t *testing.T) {
 			t.Fatal(next, err)
 		}
 	}
-	resumed, err := ApplyPolicies(now+2000000, []Quota{managedQuota(3, 10, 2)}, paused)
+	resumed, err := ApplyQuotas(now+2000000, []Quota{managedQuota(3, 10, 2)}, paused)
 	if err != nil || debt[0] != old {
 		t.Fatal(resumed, err)
 	}
@@ -47,7 +47,7 @@ func TestManagedTransitions(t *testing.T) {
 	if d, _, err = EvaluateManaged(now+2000000, charges, resumed, debt); err != nil || !d.Allowed {
 		t.Fatal(d, err)
 	}
-	if _, err = ApplyPolicies(now+2000000, []Quota{managedQuota(1, 10, 2)}, resumed); !errors.Is(err, ErrPolicyMismatch) {
+	if _, err = ApplyQuotas(now+2000000, []Quota{managedQuota(1, 10, 2)}, resumed); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatal("fence expired", err)
 	}
 	// Fresh managed admission carries only names and costs, unchanged across updates.
@@ -62,12 +62,12 @@ func TestManagedUpdateAtomicAndFenced(t *testing.T) {
 	equal := q
 	equal.Policy.Rate = 20
 	equal.Policy.Period = 2 * time.Second
-	got, err := ApplyPolicies(10000000, []Quota{equal}, state)
+	got, err := ApplyQuotas(10000000, []Quota{equal}, state)
 	if err != nil || !reflect.DeepEqual(got, state) {
 		t.Fatal(got, err)
 	}
 	for _, bad := range []Quota{managedQuota(1, 10, 10), managedQuota(2, 20, 10)} {
-		if got, err = ApplyPolicies(10000000, []Quota{bad}, state); !errors.Is(err, ErrPolicyMismatch) || got != nil {
+		if got, err = ApplyQuotas(10000000, []Quota{bad}, state); !errors.Is(err, ErrPolicyMismatch) || got != nil {
 			t.Fatal(got, err)
 		}
 	}
@@ -75,7 +75,7 @@ func TestManagedUpdateAtomicAndFenced(t *testing.T) {
 	second.Name = "second"
 	states := []QuotaState{state[0], {Revision: 2, Interval: 100000, Burst: 10}}
 	snapshot := append([]QuotaState(nil), states...)
-	if got, err = ApplyPolicies(10000000, []Quota{managedQuota(3, 20, 10), second}, states); !errors.Is(err, ErrPolicyMismatch) || got != nil || !reflect.DeepEqual(states, snapshot) {
+	if got, err = ApplyQuotas(10000000, []Quota{managedQuota(3, 20, 10), second}, states); !errors.Is(err, ErrPolicyMismatch) || got != nil || !reflect.DeepEqual(states, snapshot) {
 		t.Fatal(got, err, states)
 	}
 }
@@ -90,7 +90,7 @@ func TestManagedValidation(t *testing.T) {
 	if interval, err := q.rule(1).Interval(); interval != 0 || err != nil {
 		t.Fatal(interval, err)
 	}
-	if _, err := ApplyPolicies(100, []Quota{q}, []QuotaState{{Revision: 1, Interval: 0, Burst: 10, TAT: 100, ExpiresAt: 100}}); !errors.Is(err, ErrState) {
+	if _, err := ApplyQuotas(100, []Quota{q}, []QuotaState{{Revision: 1, Interval: 0, Burst: 10, TAT: 100, ExpiresAt: 100}}); !errors.Is(err, ErrState) {
 		t.Fatal("debt accepted as config", err)
 	}
 	a := Admission{Scope: Scope{Namespace: "ns", Domain: "d"}, Charges: []Charge{{Name: "q", Cost: 1}}}
@@ -144,7 +144,7 @@ func (d *managedTestDriver) UpdateQuotas(ctx context.Context, u QuotaBatch) erro
 	for i, q := range u.Quotas {
 		states[i] = d.policies[q.Name]
 	}
-	next, err := ApplyPolicies(time.Now().UnixMicro(), u.Quotas, states)
+	next, err := ApplyQuotas(time.Now().UnixMicro(), u.Quotas, states)
 	if err != nil {
 		return failure("update_quotas", NotCharged, err)
 	}
