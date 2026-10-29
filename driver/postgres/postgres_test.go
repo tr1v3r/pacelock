@@ -136,8 +136,8 @@ func debtRead(s pacelock.QuotaState) sqlStep {
 func quota(rev, rate, burst int64) pacelock.Quota {
 	return pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Revision: rev, Rate: rate, Period: time.Second, Burst: burst}}
 }
-func update(q ...pacelock.Quota) pacelock.QuotaUpdate {
-	return pacelock.QuotaUpdate{Scope: testScope, Quotas: q}
+func update(q ...pacelock.Quota) pacelock.QuotaBatch {
+	return pacelock.QuotaBatch{Scope: testScope, Quotas: q}
 }
 func managed(cost int64) pacelock.Admission {
 	return pacelock.Admission{Scope: testScope, Charges: []pacelock.Charge{{Name: "requests", Cost: cost}}}

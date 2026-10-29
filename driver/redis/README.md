@@ -56,7 +56,7 @@ never an implicit replay. Retry/recovery decisions belong to the caller.
 
 All admission is backend-managed. Publish positive, monotonically
 increasing revisions and `limiter.UpdateQuotas(ctx, quotas...)` (or the driver's
-`UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`). Each batch
+`UpdateQuotas(ctx, pacelock.QuotaBatch{Scope: scope, Quotas: quotas})`). Each batch
 is atomic with admission, using one final MSET and the same NoRetry transport.
 Quota configuration changes do not refill capacity or reset/rescale debt.
 Updates preserve absolute TAT exactly, including debt above a reduced capacity.

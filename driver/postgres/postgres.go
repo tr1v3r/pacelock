@@ -187,7 +187,7 @@ func loadPolicy(ctx context.Context, tx *sql.Tx, scope, name string) (pacelock.Q
 // No automatic retry occurs. A commit error is Unknown: policies may have changed,
 // even though this control-plane operation never debits quota. Retry the identical
 // revisions explicitly to resolve uncertainty (a newer update may supersede them).
-func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error {
+func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaBatch) error {
 	uncharged := func(err error) error { return fail("update_quotas", pacelock.NotCharged, err) }
 	if err := u.Validate(); err != nil {
 		return uncharged(err)

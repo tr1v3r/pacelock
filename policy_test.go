@@ -136,7 +136,7 @@ type managedTestDriver struct {
 	override       *Decision
 }
 
-func (d *managedTestDriver) UpdateQuotas(ctx context.Context, u QuotaUpdate) error {
+func (d *managedTestDriver) UpdateQuotas(ctx context.Context, u QuotaBatch) error {
 	if err := ctx.Err(); err != nil {
 		return failure("update_quotas", NotCharged, err)
 	}

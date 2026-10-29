@@ -236,7 +236,7 @@ type cancelOnDenialDriver struct {
 	cancel context.CancelFunc
 }
 
-func (d cancelOnDenialDriver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error {
+func (d cancelOnDenialDriver) UpdateQuotas(ctx context.Context, u pacelock.QuotaBatch) error {
 	return d.Driver.(pacelock.QuotaDriver).UpdateQuotas(ctx, u)
 }
 
