@@ -136,8 +136,8 @@ inferred. Different namespaces/domains are independent.
 `New` / `NewWithOptions` return the sole `Limiter`, exposing `UpdateQuotas`,
 `Allow` and `Wait`. Configuration can remain in application code: publish `Quota`
 values with positive `Policy.Revision` explicitly, then send only `Charge{Name, Cost}`.
-Every admission reads backend-authoritative policy, so rolling pods share the
-latest policy even if their code carries different configuration revisions.
+Every admission reads the latest backend-authoritative policy, independently of
+configuration snapshots in request processes.
 Stale publication returns `ErrPolicyMismatch`: explicitly handle or surface it;
 do not silently treat every update failure as success. Rollback publishes the old
 parameters at a **higher revision**, never an older revision or renamed quota.
@@ -174,11 +174,7 @@ backends does not transfer quota debt and is not automatic failover.
 
 ## Default dynamic policies and pause
 
-This is a breaking pre-v1 rename: `UpdatePolicies` → `UpdateQuotas`,
-`PolicyDriver` → `QuotaDriver`, and `PolicyUpdate` → `QuotaUpdate`; the old public
-names are removed. `Policy` and the pure `ApplyPolicies` helper keep their names.
-See the [migration map](docs/compatibility.md#dynamic-default-api-migration-breaking-pre-v1)
-for former static `Allow` / dynamic `AllowManaged`, `NamedCharge`, `Bind` and custom Driver changes.
+See the [current API and storage contract](docs/compatibility.md).
 
 Use `UpdateQuotas` for the control plane and `Allow` for the data plane.
 Redis and PostgreSQL store persistent configuration separately from expiring TAT
@@ -219,23 +215,25 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
   not read, rescale, reset or shorten the lifetime of TAT. Admission
   reads current configuration and debt under the same atomic boundary. Outstanding
   debt exceeding a newly reduced burst is retained until natural recovery.
-- Redis uses one persistent P3 configuration key and one D3 debt key per managed
+- Redis uses one persistent P1 configuration key and one D1 debt key per managed
   quota, all explicit and in the same slot. `Allow` is one script roundtrip,
   not a client-side GET followed by a write. PostgreSQL uses a separate policies
   table and the existing scope transaction lock. No distributed-lock key is needed.
+- Redis accepts only exact D1 debt and P1 policy formats. Unknown, malformed or
+  wrong-role stored formats fail closed before mutation. Marker `1` is independent
+  of the positive, monotonic `Policy.Revision`. No upgrade, migration or historical
+  storage compatibility is guaranteed. See [Redis state](docs/compatibility.md#redis-state).
 - `Rate=0` requires positive Period and Burst. Fresh admission returns `ErrPaused`
   / `NotCharged` without a debit. Missing configuration returns
   `ErrPolicyMissing`, never unlimited admission. Cost above current burst is
   `ErrInvalid`. Dynamic `Wait` stops on these errors rather than waiting for a
   policy change. Applications own publication and configuration-source polling;
   the SDK starts no polling goroutine.
-- `Prune` may reclaim expired debt, but never configuration/revisions.
+- Redis `Prune` deletes only valid recovered D1 debt, never policy or unknown keys.
   Plan configuration cardinality accordingly; deleting a config loses its version
   fence. All dynamic updates must use the SDK/version-check script, not raw SET.
-- For PostgreSQL, run explicit `Migrate` before upgraded request binaries serve
-  traffic. Retire old static writers or stop their static path **before installing
-  policies**. Migration preserves existing debt and legacy receipt data; it does
-  not make old writers safe to mix with backend-authoritative admission.
+- For PostgreSQL, run explicit `Migrate` during setup before serving traffic;
+  only the current schema is supported.
 - Transport/commit errors may leave publication uncertain. No automatic retry is
   performed; explicitly retry the SAME revision/policy to converge. Optional
   `QuotaDriver` publishes configuration; dynamic `Driver.Admit(Admission)` is mandatory.
@@ -278,20 +276,11 @@ use of a relaxed policy. `RetryAfter` reserves no capacity; competing callers ca
 win repeatedly, so there is no FIFO or starvation guarantee. Bound waiting with a
 context deadline.
 
-## Breaking pre-v1 removal
+## Admission boundary
 
-Admission is non-idempotent. `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`,
-admission IDs/retention/fingerprints and `Event.Replayed` have been removed.
-The sole `Limiter` exposes `Allow(ctx, ...Charge) (Decision, error)`,
-`Wait(ctx, ...Charge) error` and `UpdateQuotas`. `Driver.Admit(ctx, Admission)`
-returns `(Decision, error)`. Static constructors, limiter, driver and admission
-interfaces are removed, with no compatibility aliases.
-There is no result recovery after an uncertain mutation: **do not blindly retry Unknown**.
-This is rate admission, not billing, refunds, business execution, queue or worker ownership.
-
-Upgrading does not automatically drop legacy receipt storage. Old Redis attempt
-keys and PostgreSQL admission tables/rows may remain; coordinate retirement of old
-writers, backups and explicit operator cleanup. See the [migration guide](docs/compatibility.md).
+Admission is non-idempotent, with no retained results, request identity or result
+recovery API. **Do not blindly retry Unknown.** This is rate admission, not billing,
+refunds, business execution, queue or worker ownership.
 
 ## Errors and observation
 

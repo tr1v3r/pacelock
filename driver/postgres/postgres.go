@@ -38,9 +38,9 @@ func New(db *sql.DB) (*Driver, error) {
 }
 
 // Migrate creates the fixed logged tables in the connection's search_path.
-// Use a controlled schema/search_path and migration role. Existing quota and
-// policy tables remain compatible. Legacy admission tables are left untouched.
-// Incompatible schemas are not supported. Constructors never execute schema changes.
+// Use a controlled schema/search_path and migration role. Repeated calls preserve
+// current quota debt, policies, and unrelated tables.
+// Constructors never execute schema changes.
 func (d *Driver) Migrate(ctx context.Context) error {
 	if err := d.ready(ctx); err != nil {
 		return err
@@ -266,7 +266,7 @@ func (d *Driver) Prune(ctx context.Context, s pacelock.Scope, limit int) (int64,
 	if err != nil {
 		return 0, err
 	}
-	// Require recovered TAT as well as expiry: a premature legacy expiry must
+	// Require recovered TAT as well as expiry: a premature expiry must
 	// never cause cleanup to erase active debt.
 	result, err := tx.ExecContext(ctx, `DELETE FROM pacelock_quotas WHERE scope_id=$1 AND quota_id IN (SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2 AND tat_us<=$2 ORDER BY quota_id LIMIT $3)`, id, now, limit)
 	if err != nil {

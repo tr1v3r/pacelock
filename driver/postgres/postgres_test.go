@@ -241,7 +241,7 @@ func TestManagedAdmissionUsesCurrentPolicyAndOriginalDebt(t *testing.T) {
 		allowed bool
 	}{
 		{"new", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 2}, pacelock.QuotaState{}, true},
-		{"legacy tuple-equivalent debt", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}, pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000999}, true},
+		{"current debt with conservative expiry", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}, pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000999}, true},
 		{"rate changed", pacelock.QuotaState{Interval: 500000, Burst: 3, Revision: 9}, pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000000}, true},
 		{"shrink preserves debt", pacelock.QuotaState{Interval: 1000000, Burst: 1, Revision: 9}, pacelock.QuotaState{TAT: testNow + 3000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 3000000}, false},
 		{"idle", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 9}, pacelock.QuotaState{TAT: testNow - 1000, Interval: 1000000, Burst: 3, ExpiresAt: testNow - 1000}, true},
@@ -346,7 +346,7 @@ func TestPruneOnlyRecoveredDebt(t *testing.T) {
 		})
 	}
 }
-func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
+func TestMigrateCreatesCurrentSchema(t *testing.T) {
 	steps := []sqlStep{{kind: "begin"}}
 	for _, s := range splitSchema() {
 		steps = append(steps, sqlStep{kind: "exec", contains: s})
@@ -354,9 +354,6 @@ func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
 	steps = append(steps, sqlStep{kind: "commit"})
 	if err := scripted(t, steps).Migrate(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	if strings.Contains(schema, "ALTER TABLE") || strings.Contains(schema, "DROP TABLE") || strings.Contains(schema, "pacelock_admissions") {
-		t.Fatal("legacy schema must not be changed; new installs must not create admission tables")
 	}
 	for _, s := range []string{"CREATE TABLE IF NOT EXISTS pacelock_policies", "interval_us >= 0", "revision >= 1 AND revision <= 9007199254740991"} {
 		if !strings.Contains(schema, s) {

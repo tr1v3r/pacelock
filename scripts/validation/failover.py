@@ -37,7 +37,7 @@ source = (engine / 'protocol.lua').read_text() + '\n' + (engine / 'gcra.lua').re
 
 def seed_policies(name, domain):
     # Fixture setup only; applications publish fenced policies through UpdateQuotas.
-    pairs = [item for i in range(10) for item in (f'{domain}:policy:{i}', 'P3|86400000000:1:1')]
+    pairs = [item for i in range(10) for item in (f'{domain}:policy:{i}', 'P1|86400000000:1:1')]
     assert redis(name, 'MSET', *pairs) == 'OK'
 
 def replicated(primary, replica):
@@ -50,6 +50,8 @@ def probe(name, domain):
     for i in range(10):
         reply = redis(name, 'EVAL', source, 2, f'{domain}:q:{i}', f'{domain}:policy:{i}', 1)
         first = reply.splitlines()[0]
+        if first == '1':
+            assert redis(name, 'GET', f'{domain}:q:{i}').startswith('D1|')
         result['allowed' if first == '1' else 'denied' if first == '0' else 'errors'] += 1
     return result
 for loss in (False, True):
@@ -100,7 +102,7 @@ for loss in (False, True):
             clock = 'local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])'
             now = int(time.time() * 1000000)
 
-            assert redis(replica, 'SET', 'synthetic-clock-policy', 'P3|1000000:1:1') == 'OK'
+            assert redis(replica, 'SET', 'synthetic-clock-policy', 'P1|1000000:1:1') == 'OK'
 
             def evaluate(ts):
                 return redis(replica, 'EVAL', source.replace(clock, f'local now = {ts}'), 2, 'synthetic-clock', 'synthetic-clock-policy', 1)

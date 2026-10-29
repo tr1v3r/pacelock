@@ -66,11 +66,8 @@ func (l *limiterCore) admitManaged(ctx context.Context, charges []Charge) (Decis
 	if err != nil {
 		return Decision{}, driverFailure(op, err)
 	}
-	rules := make([]Rule, len(charges))
-	for i, c := range charges {
-		rules[i].Name = c.Name
-	}
-	if err := validateDecision(decision, rules); err != nil {
+	// Validate against the dispatched snapshot, not the caller's original slice.
+	if err := validateDecision(decision, a.Charges); err != nil {
 		return Decision{}, failure(op, Unknown, err)
 	}
 	return decision, nil

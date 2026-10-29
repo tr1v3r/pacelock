@@ -281,7 +281,7 @@ func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 	}
 	// Both explicit keys must exist on the importing node for multi-key ASK.
 	// An absent policy key may instead return TRYAGAIN during resharding.
-	if err := source.MSet(ctx, l.key("q"), "D3|0", l.policyKey("q"), "P3|3600000000:2:1").Err(); err != nil {
+	if err := source.MSet(ctx, l.key("q"), "D1|0", l.policyKey("q"), "P1|3600000000:2:1").Err(); err != nil {
 		t.Fatal(err)
 	}
 	if err := target.Do(ctx, "cluster", "setslot", slot, "importing", sourceID).Err(); err != nil {

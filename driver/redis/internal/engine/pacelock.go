@@ -1,4 +1,4 @@
-// Package engine provides distributed, weighted GCRA rate admission using Redis.
+// Package engine implements the Redis driver's scoped Lua operations.
 //
 // Admit immediately admits known costs across named quotas. It never queues
 // work, owns concurrency, refunds capacity or bills usage.
@@ -32,20 +32,17 @@ var (
 )
 
 type Rule = pacelock.Rule
-type Policy = pacelock.Policy
 type Decision = pacelock.Decision
 
 // Limiter is safe for concurrent use when its Redis client is safe for concurrent use.
 // It neither owns nor closes the client. One domain is one Redis Cluster hash slot.
-// Construct it with New or NewWithOptions; nil/zero receivers and nil operation
-// contexts return ErrInvalid wrapped in Error before dispatch.
+// Construct it with New; nil/zero receivers and nil operation contexts return
+// ErrInvalid wrapped in Error before dispatch.
 type Limiter struct {
 	// client is the caller-owned transport, configured to avoid command replay.
 	client redis.Scripter
 	// prefix hashes namespace and domain into a shared Redis Cluster hash tag.
 	prefix string
-	// observer is an optional synchronous callback shared by concurrent invocations.
-	observer Observer
 }
 
 // New constructs a limiter. Namespace isolates applications; domain selects the
@@ -57,14 +54,8 @@ type Limiter struct {
 // be initialized with their constructors; their zero values are unsupported.
 // Custom Scripters, hooks and node factories must preserve the no-replay contract.
 // redis.Ring is unsupported and returns ErrInvalid.
+// New does not connect to Redis or change the supplied client's configuration.
 func New(client redis.Scripter, namespace, domain string) (*Limiter, error) {
-	return NewWithOptions(client, namespace, domain, Options{})
-}
-
-// NewWithOptions constructs a limiter with optional synchronous observation.
-// The client, namespace and domain requirements are the same as New.
-// It does not connect to Redis or change the supplied client's configuration.
-func NewWithOptions(client redis.Scripter, namespace, domain string, options Options) (*Limiter, error) {
 	if nilClient(client) || namespace == "" || domain == "" || len(namespace) > 256 || len(domain) > 256 {
 		return nil, fmt.Errorf("%w: client, namespace and domain are required (names <= 256 bytes)", ErrInvalid)
 	}
@@ -72,7 +63,7 @@ func NewWithOptions(client redis.Scripter, namespace, domain string, options Opt
 		return nil, err
 	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(namespace), namespace, domain)))
-	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:{%x}:", digest), observer: options.Observer}, nil
+	return &Limiter{client: safeScripter(client), prefix: fmt.Sprintf("pacelock:{%x}:", digest)}, nil
 }
 
 // nilClient detects nil interfaces and typed nil transports without invoking them.

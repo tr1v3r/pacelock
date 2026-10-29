@@ -2,47 +2,47 @@
 
 ## Unreleased
 
-### Breaking pre-v1 admission simplification
+### Dynamic-only admission
 
-- Remove `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`, admission
-  `ID`/`Retention`/`Fingerprint`, and `Event.Replayed`. Admission no longer retains
-  results, detects admission-ID conflicts or provides uncertain-result recovery.
 - `New` / `NewWithOptions` construct the sole dynamic `Limiter`, exposing
   `Allow(ctx, ...Charge) (Decision, error)`, `Wait(ctx, ...Charge) error` and
-  `UpdateQuotas`. Publish positive-revision quotas explicitly before requests.
-- Remove `StaticLimiter`, `NewStatic`, `NewStaticWithOptions`, `StaticDriver`,
-  `StaticAdmission`, `ValidateStatic` and all backend static admission paths.
-  `Rule`, `Validate` and `Evaluate` remain offline math helpers only.
-- `Driver.Admit(ctx, Admission) (Decision, error)` remains unchanged; `Admission`
-  is Scope + Charges. No compatibility aliases or deployment convenience APIs.
-- Policies may live in code, but execution is backend-authoritative across rolling
-  pods. Handle stale update rejection explicitly; rollback requires a higher revision.
-  Retire old static writers before installing policies, preserving debt and receipts.
-- Preserve dynamic Wait from dev #34: copy charges once, use current backend
-  policies on each attempt, retry only valid capacity denials after RetryAfter,
-  and stop on every error. Preserve in-flight accounting certainty and confirmed
-  success during cancellation. Emit one observation for the complete Wait call.
-- Preserve weighted multidimensional atomicity, policy revision fences, pause,
-  debt preservation, explicit pruning, and conservative Unknown classification.
-  Do not blindly retry Unknown: a mutation may have committed and there is no
-  recovery API. No billing, refunds, business execution, queue or worker ownership.
-- Legacy receipt storage is **not automatically dropped**. Existing Redis attempt
-  keys and PostgreSQL admission tables/rows may remain. Retire old writers and
-  coordinate explicit operator cleanup without resetting debt or policy fences.
-- Migrate shared backend contracts, runnable examples and bilingual documentation;
-  retain rollback, commit-loss, concurrency, cancellation and Unknown coverage.
+  `UpdateQuotas`. Publish positive-revision quotas before requests.
+- `Driver.Admit(ctx, Admission) (Decision, error)` receives Scope + Charges.
+  `Rule`, `Validate` and `Evaluate` remain offline math helpers, not admission APIs.
+- Admission is non-idempotent: no retained results, request identity, replay or
+  uncertain-result recovery. Do not blindly retry Unknown; a mutation may have
+  committed. No billing, refunds, business execution, queue or worker ownership.
+- Backend policies are authoritative. Handle stale publication errors explicitly;
+  restoring earlier parameters requires a higher revision. Updates preserve debt.
+- Wait copies charges once, reads current backend policies per attempt, retries
+  only valid capacity denials after RetryAfter and stops on every error. Preserve
+  in-flight accounting certainty and confirmed success during cancellation; emit
+  one observation for the complete Wait call.
 
-### Other development-line API changes
+### Exact Redis storage contract
 
-- Backend-authoritative dynamic admission is the default; publish revisioned
-  policies through `UpdateQuotas`, then submit names/costs. Rate 0 pauses admission;
-  policy updates preserve absolute debt.
-- Rename `UpdatePolicies` → `UpdateQuotas`, `PolicyDriver` → `QuotaDriver`,
-  `PolicyUpdate` → `QuotaUpdate`. `Policy` and `ApplyPolicies` keep their names.
-- Standard-library core, independent Redis/PostgreSQL modules, explicit Migrate,
-  single-MSET Redis quota commit, logical expiry and application-scheduled cleanup.
+- Accept only exact `D1|tat` debt and `P1|interval:burst:revision` policy formats.
+  Marker `1` identifies the first dynamic storage format, independently of the
+  positive, monotonically increasing `Policy.Revision`.
+- Unknown, malformed or wrong-role stored formats fail closed before mutation.
+  Equivalent same-revision policy publications remain read-only successes.
+- Prune deletes only valid recovered D1 debt, never policy or unknown keys.
+  Permanent policy revision fences and debt-preserving updates remain required.
+- No upgrade, migration, mixed-version or historical storage compatibility is
+  guaranteed. Historical experiments retain their original data and source IDs;
+  they are not current implementation validation or compatibility promises.
+
+### Maintenance and validation
+
+- Remove duplicate Redis engine observation plumbing; validate driver decisions
+  against the dispatched charge snapshot without allocating synthetic rules.
+- Keep rollback, commit-loss, weighted multidimensional atomicity, contention,
+  cancellation, state validation, cleanup and conservative Unknown coverage.
+- Standard-library core, independent Redis/PostgreSQL modules, explicit PostgreSQL
+  setup via `Migrate`, single-MSET Redis commit and application-scheduled cleanup.
 - Per-command Redis NoRetry prevents ambiguous replay while preserving bounded
   MOVED/ASK redirects. Constructors perform no I/O or client option mutation.
+- Keep current bilingual documentation, examples, security and contribution guidance
+  aligned with the [current contract](docs/compatibility.md).
 
-No stable release, automatic state conversion, cross-backend failover or upstream
-exactly-once execution guarantee is introduced. See [migration](docs/compatibility.md).
+No stable release, cross-backend failover or upstream exactly-once guarantee is introduced.

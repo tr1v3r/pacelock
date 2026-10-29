@@ -25,7 +25,7 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 		for _, policy := range []string{"same", "step", "burst"} {
 			t.Run(fmt.Sprintf("tat_offset=%d/policy=%s", offset, policy), func(t *testing.T) {
 				r := Rule{Name: "boundary", Policy: Policy{Rate: 1, Period: 7 * time.Microsecond, Burst: 3}, Cost: 1}
-				before := fmt.Sprintf("%d:7:3", now+offset)
+				before := fmt.Sprintf("D1|%d", now+offset)
 				if policy == "step" {
 					r.Policy.Period = 11 * time.Microsecond
 				} else if policy == "burst" {
@@ -60,7 +60,7 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 					base += offset
 				}
 				step := r.Policy.Period.Microseconds()
-				want := fmt.Sprintf("D3|%d", base+step)
+				want := fmt.Sprintf("D1|%d", base+step)
 				if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != want {
 					t.Fatalf("quota=%q want=%q", raw, want)
 				}
@@ -139,7 +139,7 @@ return {decision, states, expiries, writes}
 				step, burst, cost, used = tinySteps[iteration], 1, 1, 0
 			}
 			rules[i] = Rule{Name: fmt.Sprintf("q%d", i), Policy: Policy{Rate: 1, Period: time.Duration(step) * time.Microsecond, Burst: burst}, Cost: cost}
-			before[i] = fmt.Sprintf("%d:%d:%d", now+used, step, burst)
+			before[i] = fmt.Sprintf("D1|%d", now+used)
 			if err := c.Set(ctx, l.key(rules[i].Name), before[i], 0).Err(); err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +193,7 @@ return {decision, states, expiries, writes}
 			state, stateOK := states[i].(string)
 			expected := before[i]
 			if want.Allowed {
-				expected = fmt.Sprintf("D3|%d", candidates[i])
+				expected = fmt.Sprintf("D1|%d", candidates[i])
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
@@ -206,7 +206,7 @@ return {decision, states, expiries, writes}
 		if want.Allowed {
 			command := []interface{}{"MSET"}
 			for i := range rules {
-				command = append(command, keys[i], fmt.Sprintf("D3|%d", candidates[i]))
+				command = append(command, keys[i], fmt.Sprintf("D1|%d", candidates[i]))
 			}
 			expectedWrites = append(expectedWrites, command)
 		}

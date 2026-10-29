@@ -99,7 +99,7 @@ func BenchmarkPruneCandidates(b *testing.B) {
 			pairs := make([]interface{}, 0, 2*n)
 			for i := range keys {
 				keys[i] = l.key(fmt.Sprint(i))
-				pairs = append(pairs, keys[i], "1:1:1")
+				pairs = append(pairs, keys[i], "D1|1")
 			}
 			defer c.Del(ctx, keys...)
 			cursor := PruneCursor{scope: l.prefix, position: "0", pending: keys}

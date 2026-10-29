@@ -23,7 +23,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 		if err := l.UpdateQuotas(ctx, q); err != nil {
 			t.Fatal(err)
 		}
-		if got := c.Get(ctx, l.policyKey(q.Name)).Val(); got != fmt.Sprintf("P3|1:%d:%d", h, pacelock.MaxRevision) {
+		if got := c.Get(ctx, l.policyKey(q.Name)).Val(); got != fmt.Sprintf("P1|1:%d:%d", h, pacelock.MaxRevision) {
 			t.Fatal(got)
 		}
 	}
@@ -47,12 +47,12 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 			before := ""
 			if tc.debt > 0 {
 				debt = pacelock.QuotaState{TAT: now + tc.debt, ExpiresAt: now + tc.debt, Interval: 1, Burst: h}
-				before = fmt.Sprintf("D3|%d", debt.TAT)
+				before = fmt.Sprintf("D1|%d", debt.TAT)
 				if err := c.Set(ctx, keys[0], before, 0).Err(); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := c.Set(ctx, keys[1], fmt.Sprintf("P3|%d:%d:%d", tc.step, tc.burst, pacelock.MaxRevision), 0).Err(); err != nil {
+			if err := c.Set(ctx, keys[1], fmt.Sprintf("P1|%d:%d:%d", tc.step, tc.burst, pacelock.MaxRevision), 0).Err(); err != nil {
 				t.Fatal(err)
 			}
 			want, next, werr := pacelock.EvaluateManaged(now, []pacelock.Charge{{Name: name, Cost: tc.cost}}, []pacelock.QuotaState{p}, []pacelock.QuotaState{debt})
@@ -77,7 +77,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 			}
 			expected := before
 			if werr == nil && want.Allowed {
-				expected = fmt.Sprintf("D3|%d", next[0].TAT)
+				expected = fmt.Sprintf("D1|%d", next[0].TAT)
 			}
 			if got := c.Get(ctx, keys[0]).Val(); got != expected {
 				t.Fatalf("debt %s want %s", got, expected)
@@ -90,11 +90,11 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	for _, name := range []string{"first", "last"} {
-		if err := c.Set(ctx, l.policyKey(name), "P3|1:10:1", 0).Err(); err != nil {
+		if err := c.Set(ctx, l.policyKey(name), "P1|1:10:1", 0).Err(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := c.Set(ctx, l.key("last"), "D3|corrupt", 0).Err(); err != nil {
+	if err := c.Set(ctx, l.key("last"), "D1|corrupt", 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 	a := managedRequest("first", 1)
@@ -105,7 +105,7 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 	if n := c.Exists(ctx, l.key("first")).Val(); n != 0 {
 		t.Fatal("first debt written")
 	}
-	if got := c.Get(ctx, l.key("last")).Val(); got != "D3|corrupt" {
+	if got := c.Get(ctx, l.key("last")).Val(); got != "D1|corrupt" {
 		t.Fatal(got)
 	}
 }
@@ -141,8 +141,8 @@ func TestRedisManagedModel(t *testing.T) {
 			keys[i] = l.key(name)
 			keys[n+i] = l.policyKey(name)
 			args = append(args, cost)
-			before[i] = fmt.Sprintf("D3|%d", tat)
-			if err := c.MSet(ctx, keys[i], before[i], keys[n+i], fmt.Sprintf("P3|%d:%d:1", policies[i].Interval, burst)).Err(); err != nil {
+			before[i] = fmt.Sprintf("D1|%d", tat)
+			if err := c.MSet(ctx, keys[i], before[i], keys[n+i], fmt.Sprintf("P1|%d:%d:1", policies[i].Interval, burst)).Err(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -170,7 +170,7 @@ func TestRedisManagedModel(t *testing.T) {
 		for i := 0; i < n; i++ {
 			wantRaw := before[i]
 			if wantErr == nil && want.Allowed {
-				wantRaw = fmt.Sprintf("D3|%d", next[i].TAT)
+				wantRaw = fmt.Sprintf("D1|%d", next[i].TAT)
 			}
 			if got := c.Get(ctx, keys[i]).Val(); got != wantRaw {
 				t.Fatalf("%d debt: %s want %s", iteration, got, wantRaw)

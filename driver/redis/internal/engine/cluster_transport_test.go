@@ -81,7 +81,7 @@ func TestRedisClusterLostReply(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				r := rule("q", burst, 1)
-				if err := client.Set(ctx, l.policyKey("q"), fmt.Sprintf("P3|3600000000:%d:1", burst), 0).Err(); err != nil {
+				if err := client.Set(ctx, l.policyKey("q"), fmt.Sprintf("P1|3600000000:%d:1", burst), 0).Err(); err != nil {
 					t.Fatal(err)
 				}
 				d, err := l.admitRules(ctx, r)

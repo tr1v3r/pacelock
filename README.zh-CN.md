@@ -105,7 +105,7 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 `New` / `NewWithOptions` 只构造一种 `Limiter`，提供 `UpdateQuotas`、`Allow`、`Wait`。
 配置可以继续写在应用代码里：先显式发布带正数 `Policy.Revision` 的 `Quota`，
-请求只提交 `Charge{Name, Cost}`。后端权威策略使滚动发布的新旧 pod 共用最新配置。
+请求只提交 `Charge{Name, Cost}`。每次准入使用后端最新策略，不依赖请求进程中的配置快照。
 旧版本发布返回 `ErrPolicyMismatch`，应用必须明确处理或上报，不能吞掉所有更新错误。
 回滚应以**更高版本**发布旧参数，而不是降低版本或换额度名称。
 每次包含全部适用额度，漏传额度不会检查或扣减；`Decision.Limited` 按请求 Charge 顺序返回。
@@ -137,7 +137,7 @@ SDK 不启动后台任务。
 
 ## 默认动态策略与暂停
 
-默认 `New` / `NewWithOptions` 构造动态 Limiter。`UpdatePolicies` → `UpdateQuotas`，`PolicyDriver` → `QuotaDriver`，`PolicyUpdate` → `QuotaUpdate`；旧名称已移除。`Policy` 和纯计算工具 `ApplyPolicies` 保持原名。详见[迁移指南](docs/compatibility.md)。
+当前 API 与存储契约见[兼容性说明](docs/compatibility.md)。
 
 控制面使用 `UpdateQuotas`，数据面使用 `Allow`。Redis 和 PostgreSQL
 将永久配置与可过期的 TAT（债务）分开存储。处理请求的实例只需要额度名和 cost，
@@ -170,10 +170,11 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 
 - 版本来自同一个权威配置源，不能由各进程独立递增。多实例可重复发布同一批配置：高版本生效，同版本同有效策略只读成功，旧版本或同版本冲突返回 `ErrPolicyMismatch`。回滚需以**更高版本**发布旧参数。同 scope 内最多 `MaxRules` 条配置原子更新。
 - 额度配置变更不会补充容量或重置债务。更新不读取、不重标定、不清零 TAT，也不缩短已有债务寿命。准入在同一原子边界内读取当前配置和债务；旧债超过新 burst 时，保留到自然恢复。
-- Redis 每个动态 quota 使用永久 P3 配置 key 与 D3 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
+- Redis 每个动态 quota 使用永久 P1 配置 key 与 D1 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
+- Redis 仅接受字段精确的 D1 债务与 P1 策略格式。未知、损坏或角色错误的存储格式在变更前拒绝。标记 `1` 与正数单调递增的 `Policy.Revision` 无关。不保证升级、迁移或历史存储兼容。详见[Redis 状态](docs/compatibility.md#redis-state)。
 - `Rate=0` 时仍要求正的 Period 和 Burst。新准入返回 `ErrPaused` / `NotCharged`，不扣减。配置不存在返回 `ErrPolicyMissing`，不能默认无限额度。cost 超过当前 burst 返回 `ErrInvalid`。动态 `Wait` 遇到这些错误立即停止，不等待策略变更。配置发布与配置源轮询由应用负责，SDK 不启动轮询 goroutine。
-- `Prune` 可以清理过期债务，但绝不删除配置/版本。需规划配置名称基数；删除配置会丢失版本防护。所有动态发布都应走 SDK/版本检查脚本，不能裸 SET。
-- PostgreSQL 必须在新版请求进程接流量前显式 `Migrate`。安装策略前必须退役旧静态写入者或停止其静态路径；迁移保留旧债务和历史回执，并不会让旧写入程序自动兼容。
+- Redis `Prune` 仅删除合法且完全恢复的 D1 债务，绝不删除策略或未知键。需规划配置名称基数；删除配置会丢失版本防护。所有动态发布都应走 SDK/版本检查脚本，不能裸 SET。
+- PostgreSQL 接收流量前须在初始化阶段显式 `Migrate`，仅支持当前表结构。
 - 传输/提交异常可能导致发布结果不确定；SDK 不自动重试，可显式重试**同一版本/策略**以收敛。`Driver.Admit(ctx, Admission) (Decision, error)` 是必需接口，`QuotaDriver` 负责发布配置；不支持的可选能力返回 `ErrUnsupported`，不修改状态。
 
 可运行 SDK 示例：[管理型准入](driver/redis/examples/managed/main.go)。
@@ -200,18 +201,10 @@ if err := limiter.Wait(waitCtx, charges...); err != nil {
 
 Wait 在调用方 goroutine 中使用私有等待循环，休眠期间不持有后端锁或连接，不增加队列、worker 或后台 goroutine。策略更新不会主动唤醒休眠者：先前的 `RetryAfter` 可能延迟使用放宽后的策略。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
 
-## Pre-v1 破坏性移除
+## 准入边界
 
-准入不具备幂等性。已移除 `AllowOnce`、`Lookup`、`Receipt`、`LookupRequest`、
-准入 ID/Retention/Fingerprint 及 `Event.Replayed`。唯一的 Limiter 提供
-`Allow(ctx, ...Charge) (Decision, error)`、`Wait(ctx, ...Charge) error` 和 `UpdateQuotas`。
-`Driver.Admit(ctx, Admission)` 返回 `(Decision, error)`。静态构造函数、Limiter、Driver
-和 Admission 接口均已移除，不保留兼容别名。不确定写入后没有结果恢复接口：**不要盲目重试 Unknown**。
+准入不具备幂等性，不保留结果或请求身份，不提供结果恢复接口。**不要盲目重试 Unknown**。
 本库只负责速率准入，不承担计费、退款、业务执行、队列或 worker 所有权。
-
-升级不会自动删除历史回执存储。旧 Redis attempt key 和 PostgreSQL admissions
-表/行可能仍然存在；应先停止旧写入进程，再协调备份与显式运维清理。
-详见[迁移指南](docs/compatibility.md)。
 
 ## 错误与观测
 

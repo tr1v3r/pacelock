@@ -62,7 +62,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 		t.Fatalf("initial: %+v %v", d, err)
 	}
 	debt := c.Get(ctx, l.key(r.Name)).Val()
-	if !strings.HasPrefix(debt, "D3|") {
+	if !strings.HasPrefix(debt, "D1|") {
 		t.Fatal(debt)
 	}
 	r.Policy.Revision = 2
@@ -118,7 +118,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 		t.Fatal("pause mutated state")
 	}
 	// Expired debt is reclaimable, policy/paused state remains.
-	c.Set(ctx, l.key(r.Name), "D3|0", 0)
+	c.Set(ctx, l.key(r.Name), "D1|0", 0)
 	var cursor PruneCursor
 	for {
 		page, err := l.Prune(ctx, cursor, 64)
@@ -130,7 +130,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 			break
 		}
 	}
-	if c.Exists(ctx, l.key(r.Name)).Val() != 0 || c.Get(ctx, l.policyKey(r.Name)).Val() != "P3|0:1:3" {
+	if c.Exists(ctx, l.key(r.Name)).Val() != 0 || c.Get(ctx, l.policyKey(r.Name)).Val() != "P1|0:1:3" {
 		t.Fatal("prune failed separation")
 	}
 	if err := l.UpdateQuotas(ctx, quotaOf(equivalent)); !errors.Is(err, ErrPolicyMismatch) {
@@ -160,15 +160,15 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 }
 
-func TestRedisManagedLegacyTupleDebt(t *testing.T) {
+func TestRedisManagedDebtSurvivesPauseAndResume(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
-	r := rule("legacy", 2, 1)
+	r := rule("debt", 2, 1)
 	now, err := c.Time(ctx).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
-	debt := fmt.Sprintf("%d:3600000000:2", now.UnixMicro()+int64(time.Hour/time.Microsecond))
+	debt := fmt.Sprintf("D1|%d", now.UnixMicro()+int64(time.Hour/time.Microsecond))
 	if err := c.Set(ctx, l.key(r.Name), debt, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRedisManagedLegacyTupleDebt(t *testing.T) {
 		t.Fatal(e)
 	}
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
-		t.Fatal("legacy debt touched")
+		t.Fatal("active debt touched")
 	}
 	req := managedRequest(r.Name, 1)
 	if _, e := l.Admit(ctx, req); !errors.Is(e, pacelock.ErrPaused) {
@@ -191,7 +191,7 @@ func TestRedisManagedLegacyTupleDebt(t *testing.T) {
 		t.Fatal(e)
 	}
 	if d, e := l.Admit(ctx, req); e != nil || d.Allowed {
-		t.Fatalf("legacy debt reset: %+v %v", d, e)
+		t.Fatalf("active debt reset: %+v %v", d, e)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	ctx := context.Background()
 	r := rule("bad", 1, 1)
 	r.Policy.Revision = 1
-	for _, raw := range []string{"P3|0:1:0", "P3|0:1:9007199254740992", "P3|0:86400000001:1", "P3|1:0:1", "P3|0:1:1:extra", "D3|0"} {
+	for _, raw := range []string{"P1|0:1:0", "P1|0:1:9007199254740992", "P1|0:86400000001:1", "P1|1:0:1", "P1|0:1:1:extra", "D1|0"} {
 		c.Set(ctx, l.policyKey(r.Name), raw, 0)
 		if err := l.UpdateQuotas(ctx, quotaOf(r)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s update: %v", raw, err)
@@ -225,7 +225,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"D3|-1", "D3|9007199254740991", "D3|bad", "Q2|1:1:1", "P3|1:1:1", "E2|1|C1|removed"} {
+	for _, raw := range []string{"D1|-1", "D1|9007199254740991", "D1|bad", "Q2|1:1:1", "P1|1:1:1", "E2|1|C1|removed"} {
 		c.Set(ctx, l.key(r.Name), raw, 0)
 		if _, err := l.Admit(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s debt: %v", raw, err)
@@ -253,7 +253,7 @@ func TestRedisManagedConcurrentUpdates(t *testing.T) {
 		}(rev)
 	}
 	wg.Wait()
-	if got := c.Get(ctx, l.policyKey("concurrent")).Val(); got != "P3|3600000000:1:50" {
+	if got := c.Get(ctx, l.policyKey("concurrent")).Val(); got != "P1|3600000000:1:50" {
 		t.Fatal(got)
 	}
 }

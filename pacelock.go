@@ -22,7 +22,7 @@ const (
 )
 
 var (
-	// ErrInvalid reports invalid input before dispatch.
+	// ErrInvalid reports invalid input, including a cost above the current backend burst.
 	ErrInvalid = errors.New("pacelock: invalid argument")
 	// ErrPolicyMismatch reports a stale or conflicting quota policy update,
 	// or a policy mismatch detected by the offline math helpers.
@@ -184,7 +184,7 @@ func (l *limiterCore) ready(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func validateDecision(d Decision, rules []Rule) error {
+func validateDecision(d Decision, charges []Charge) error {
 	bad := func() error { return fmt.Errorf("%w: invalid driver decision", ErrState) }
 	if d.RetryAfter < 0 || d.RetryAfter > MaxHorizon || len(d.Limited) > MaxRules {
 		return bad()
@@ -205,11 +205,11 @@ func validateDecision(d Decision, rules []Rule) error {
 			return bad()
 		}
 		seen[name] = true
-		if rules != nil {
-			for position < len(rules) && rules[position].Name != name {
+		if charges != nil {
+			for position < len(charges) && charges[position].Name != name {
 				position++
 			}
-			if position == len(rules) {
+			if position == len(charges) {
 				return bad()
 			}
 			position++

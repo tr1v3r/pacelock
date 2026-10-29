@@ -86,6 +86,6 @@ func Evaluate(now int64, rules []Rule, states []QuotaState) (decision Decision, 
 	return decision, next, nil
 }
 
-// Validate checks structural consistency of a decision, including retained waits.
+// Validate checks structural consistency of an allowance or ordinary quota denial.
 // It does not verify a decision against a particular request's quota names.
 func (d Decision) Validate() error { return validateDecision(d, nil) }

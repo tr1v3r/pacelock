@@ -1,6 +1,12 @@
-> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance, validation or a historical storage compatibility guarantee. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
 
 # Local fixture observations
+
+## Dynamic facade cleanup (2026-10-29)
+
+[Facade allocation cleanup](admission-cleanup-local.md): before/after samples
+show one fewer allocation per Allow call after removing synthetic rules. This is
+a fake-driver microbenchmark, not backend throughput evidence.
 
 ## Dynamic debt-format experiment (2026-10-29)
 

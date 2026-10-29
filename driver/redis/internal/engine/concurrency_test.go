@@ -118,7 +118,7 @@ func (f *contentionFixture) cleanup(t *testing.T, l *Limiter) {
 }
 
 func (f *contentionFixture) caller(l *Limiter, i int) *Limiter {
-	return &Limiter{client: f.clients[i%len(f.clients)], prefix: l.prefix, observer: l.observer}
+	return &Limiter{client: f.clients[i%len(f.clients)], prefix: l.prefix}
 }
 
 func contentionWave(t *testing.T, n int, call func(context.Context, int)) {

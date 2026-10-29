@@ -88,37 +88,34 @@ do not proactively wake sleepers, so an old RetryAfter may delay using relaxed p
 No queue, worker, background goroutine, fairness or refund is added. Use a context
 deadline; see [blocking admission](../../README.md#blocking-admission).
 
-Configuration and debt are separate. The same-slot `policy:<name_hash>` key holds
-permanent `P3|interval_us:burst:revision` (zero interval means paused). Updates read
-and change only configuration, never debt or its expiry; same-revision equivalent
-updates perform no write. Existing quota keys hold managed debt as `D3|tat_us`,
-with legacy tuple debts still readable for upgrade. Prune reclaims expired debt but validates and
-retains configuration forever. Memory therefore includes all configured names;
-there is no automatic policy retirement/reset.
-
-Deploy protocol-aware binaries to **every reader, writer and maintenance process
-before activation**: older writers do not check configuration keys and can bypass
-policy. Mixed-version activation and unconverted rollback are unsupported. Idle or
-pruning does not make rollback safe. Callers own configuration polling/publication;
-the SDK starts no worker. See the [runnable managed example](examples/managed/main.go).
+Configuration and debt are separate. Same-slot `policy:<name_hash>` keys hold
+permanent `P1|interval_us:burst:revision` (zero interval means paused). Updates
+read and change only configuration, never debt or expiry; equivalent same-revision
+updates perform no write. Quota keys hold `D1|tat_us` debt. Only these exact formats
+are accepted; unknown, malformed or wrong-role formats fail closed before mutation.
+Prune deletes only valid recovered D1 debt, never policy or unknown keys.
+Memory includes every configured name; there is no automatic policy retirement.
+Marker `1` is independent of the positive, monotonic `Policy.Revision`.
+No upgrade, migration or historical storage compatibility is guaranteed.
+Applications own configuration polling/publication; the SDK starts no worker.
+See the [runnable managed example](examples/managed/main.go).
 
 ## Logical expiry and bounded physical cleanup
 
 Keys use `pacelock:{scope_hash}:...`. Values use:
 
 ```text
-quota:   D3|tat_us (all new writes)
-legacy:  tat_us:interval_us:burst (read-only upgrade compatibility)
-policy:  P3|interval_us:burst:revision (separate same-slot key)
+quota:   D1|tat_us
+policy:  P1|interval_us:burst:revision (separate same-slot key)
 ```
 
 Debt logically expires at TAT, when capacity is fully replenished. Policy identity
-never expires. Legacy tuple debt is preserved, not reset on policy publication;
-the next successful admission writes D3. Every admission requires policy keys.
+never expires. Policy publication does not reset debt. Every admission requires policy keys.
 The Lua protocol is `KEYS = [N debt keys, N policy keys]`, `ARGV = [N costs]`;
 there is no mode selector or caller-supplied interval/burst.
 These encodings are internal; applications must not construct them. Malformed
-quota/policy state is rejected before mutation; obsolete quota formats remain rejected.
+quota/policy state or any unknown format is rejected before mutation. Field counts
+and decimal syntax must match exactly.
 
 MSET clears native TTLs. Physical deletion is therefore an application-owned
 operational requirement for bounded memory, separate from admission correctness.
@@ -147,7 +144,8 @@ for step := 0; step < 8; step++ {
   that node's keyspace, filtered by scope; many scopes can make repeated scans
   expensive. Measure and budget maintenance separately from admissions.
 - A short Lua script re-reads quota and policy values, validates all candidates,
-  and deletes expired debt in one DEL. Policies are permanent. Malformed or
+  and deletes only valid recovered D1 debt in one DEL, never policy or unknown keys.
+  Policies are permanent. Unknown, malformed or
   wrong-role values fail the batch without deletion. A stale candidate cannot
   authorize deleting updated active debt.
 - `Examined`, `Deleted` and `Cursor` are valid only on success. Lost cleanup replies
@@ -160,19 +158,11 @@ for step := 0; step < 8; step++ {
   Maintenance additionally needs `+scan +del`; a separate maintenance identity is
   supported. Cluster also needs `+cluster|slots`. See [security](../../SECURITY.md).
 
-## Upgrading from retained admissions
-
-Admission IDs, retention, receipts and recovery queries are no longer supported.
-Quota keys and existing debt remain readable; new debt writes use D3. Do not
-reset or rename keys. Existing `:attempt:` keys are ignored by admission and
-excluded from `Prune` discovery, including expired or malformed records. They
-are **not** automatically deleted, and persistent legacy records can occupy memory.
-Retire all old receipt readers/writers first, then arrange a separate, explicitly
-scoped cleanup of legacy `:attempt:` keys only after the application's recovery
-requirements have ended. Never delete quota or policy keys as part of that cleanup.
+## Deployment safety
 
 Prepare cleanup and ACLs before deployment. Do not rename/delete keys to get fresh
-capacity.
+capacity. Unknown keys are not cleanup candidates; never use broad prefix deletion
+as quota maintenance.
 
 Use primary routing, TLS/authentication, controlled ACLs, noeviction and explicit
 durability settings. [Operations](../../docs/operations.md), [core usage](../../README.md)

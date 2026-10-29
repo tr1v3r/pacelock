@@ -40,7 +40,7 @@ Apple M3 Pro / arm64、OrbStack Linux、Redis 8.10.2、关闭 RDB/AOF；
 
 保留 [50k](results-redis8-valid.json) 和 [200k](results-redis8-200k.json) 原始数据作为
 证据，被测源码是 `2820790`，程序提交是 `c331f56`。它们测的是**已移除的 Q2 格式**，
-不代表历史三字段格式。旧程序可从 Git 查阅，当前驱动只兼容读取旧 tuple 债务，不保留旧准入执行分支。
+不代表历史三字段格式。旧程序可从 Git 查阅；归档不表示当前格式兼容，当前驱动仅接受精确的 D1 债务与 P1 策略。
 
 Apple M3 Pro / arm64、OrbStack Linux、Redis 8.10.2、关闭 RDB/AOF。
 有效 50k 结果的各轮平均耗时中位数：

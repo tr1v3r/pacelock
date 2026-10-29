@@ -16,8 +16,6 @@ const Unknown = pacelock.Unknown
 
 type Error = pacelock.Error
 
-func OutcomeOf(err error) Outcome { return pacelock.OutcomeOf(err) }
-
 // failure attaches accounting metadata without discarding error identity.
 func failure(op string, outcome Outcome, err error) error {
 	return &Error{Op: op, Outcome: outcome, Err: err}

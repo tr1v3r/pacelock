@@ -46,7 +46,8 @@ against the historical run below; cross-run differences do not isolate tag remov
 The raw [50k](results-redis8-valid.json) and [200k](results-redis8-200k.json) datasets
 are retained evidence from production source `2820790` and harness commit `c331f56`.
 They measure the **removed Q2 format**, not the later tuple. Historical code is
-available in Git; the current driver retains only legacy tuple debt reading, not the old admission path.
+available in Git. These archives do not imply current format compatibility: the
+current driver accepts only exact D1 debt and P1 policies.
 
 Apple M3 Pro / arm64, OrbStack Linux, Redis 8.10.2, RDB/AOF disabled. Medians of
 round averages from the corrected 50k run:
