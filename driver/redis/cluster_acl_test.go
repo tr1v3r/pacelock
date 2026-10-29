@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	}
 	username := fmt.Sprintf("pacelock-acl-%d-%d", os.Getpid(), time.Now().UnixNano())
 	const password = "disposable-cluster-acl-test-only"
-	owner, err := New(admin, "pacelock-cluster-acl", username)
+	owner, err := newLimiter(admin, "pacelock-cluster-acl", username)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,14 +75,14 @@ func TestRedisClusterMinimalACL(t *testing.T) {
 	if len(masters) == 0 {
 		t.Fatal("Cluster has no masters")
 	}
-	connect := func(t *testing.T) *Limiter {
+	connect := func(t *testing.T) *limiter {
 		t.Helper()
 		client := redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs: addrs, Username: username, Password: password,
 			MaxRetries: -1, MaxRedirects: -1, ContextTimeoutEnabled: true,
 		})
 		t.Cleanup(func() { client.Close() })
-		l, err := New(client, "pacelock-cluster-acl", username)
+		l, err := newLimiter(client, "pacelock-cluster-acl", username)
 		if err != nil {
 			t.Fatal(err)
 		}

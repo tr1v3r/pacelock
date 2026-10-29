@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -30,7 +30,7 @@ func TestRedisClusterManagedPolicies(t *testing.T) {
 	}
 	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: 3})
 	defer c.Close()
-	l, err := New(c, "managed-cluster", fmt.Sprint(time.Now().UnixNano()))
+	l, err := newLimiter(c, "managed-cluster", fmt.Sprint(time.Now().UnixNano()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestRedisClusterManagedPolicies(t *testing.T) {
 	})
 	exerciseManaged(t, l, c)
 }
-func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
+func exerciseManaged(t *testing.T, l *limiter, c redis.UniversalClient) {
 	t.Helper()
 	ctx := context.Background()
 	r := rule("quota", 4, 4)

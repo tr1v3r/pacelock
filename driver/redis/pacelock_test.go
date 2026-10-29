@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -49,13 +49,13 @@ func TestInterval(t *testing.T) {
 func TestValidationBeforeRedis(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "localhost:1", MaxRetries: -1})
 	defer client.Close()
-	if _, err := New(nil, "app", "domain"); !errors.Is(err, ErrInvalid) {
+	if _, err := newLimiter(nil, "app", "domain"); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := New(client, "", "domain"); !errors.Is(err, ErrInvalid) {
+	if _, err := newLimiter(client, "", "domain"); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	l, err := New(client, "app", "domain")
+	l, err := newLimiter(client, "app", "domain")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +70,8 @@ func TestValidationBeforeRedis(t *testing.T) {
 	if _, err := l.admitRules(ctx, r); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	a, _ := New(client, "a", "bc")
-	b, _ := New(client, "ab", "c")
+	a, _ := newLimiter(client, "a", "bc")
+	b, _ := newLimiter(client, "ab", "c")
 	if a.prefix == b.prefix {
 		t.Fatal("ambiguous namespace/domain encoding")
 	}

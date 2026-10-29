@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -114,7 +114,7 @@ func TestConcurrencyProcessWorker(t *testing.T) {
 	if err := c.Ping(ctx).Err(); err != nil {
 		t.Fatal(err)
 	}
-	l := &Limiter{client: c, prefix: os.Getenv("PACELOCK_CONTENTION_PREFIX")}
+	l := &limiter{client: c, prefix: os.Getenv("PACELOCK_CONTENTION_PREFIX")}
 	index := os.Getenv("PACELOCK_CONTENTION_INDEX")
 	if err := os.WriteFile(filepath.Join(dir, "ready"+index), nil, 0600); err != nil {
 		t.Fatal(err)
