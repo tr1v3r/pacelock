@@ -132,6 +132,7 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 	if err != nil {
 		return uncharged(err)
 	}
+
 	policies := make([]pacelock.QuotaState, len(a.Charges))
 	states := make([]pacelock.QuotaState, len(a.Charges))
 	for i, charge := range a.Charges {
@@ -146,6 +147,7 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 			return uncharged(err)
 		}
 	}
+
 	decision, next, err := pacelock.EvaluateManaged(now, a.Charges, policies, states)
 	if err != nil {
 		return uncharged(err)
@@ -158,6 +160,7 @@ func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Deci
 			}
 		}
 	}
+
 	if err = tx.Commit(); err != nil {
 		return pacelock.Decision{}, fail("allow", pacelock.Unknown, err)
 	}
@@ -205,6 +208,7 @@ func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error
 	if err != nil {
 		return uncharged(err)
 	}
+
 	states := make([]pacelock.QuotaState, len(u.Quotas))
 	for i, q := range u.Quotas {
 		states[i], err = loadPolicy(ctx, tx, scope, q.Name)
@@ -212,10 +216,12 @@ func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error
 			return uncharged(err)
 		}
 	}
+
 	next, err := pacelock.ApplyPolicies(now, u.Quotas, states)
 	if err != nil {
 		return uncharged(err)
 	}
+
 	changed := false
 	for i, s := range next {
 		if s == states[i] {
