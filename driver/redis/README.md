@@ -36,7 +36,7 @@ responses, remain `Unknown`. A lost post-commit response can be recovered using
 the complete retained result. This does not promise crash/failover durability or
 upstream execution deduplication. Never blindly retry ordinary `Allow` or refund.
 
-By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. There is no default dynamic Wait.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})`, `AllowOnce` or `Wait(ctx, charges...)`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. Both dynamic and static limiters expose `Wait(ctx, charges...) error`.
 
 Each static call accepts any nonempty subset of fixed quotas as `...Charge`, each
 selected name exactly once with `0 < Cost <= Burst`; omitted quotas are neither
@@ -85,7 +85,20 @@ configured quota returns `ErrPolicyMismatch`, preventing bypass even after idle/
 
 Managed `Rate=0` returns `ErrPaused` / `NotCharged` without debit or receipt write,
 even when cost exceeds the paused burst. Otherwise over-burst cost returns `ErrInvalid`.
-Resume with a higher revision; debt recovers naturally. There is no dynamic Wait; only `StaticLimiter.Wait` is provided.
+Resume with a higher revision; debt recovers naturally.
+
+`Limiter.Wait(ctx, charges...)` copies charges once before dispatch and resolves the
+latest backend policies atomically on each ordinary attempt, without a policy
+snapshot. It retries only valid capacity denials after advisory `RetryAfter`; every
+error stops, including pause, missing policy, a new Burst below Cost, transport
+errors even when `NotCharged`, `Unknown`, unsupported capabilities and invalid
+driver results. Cancellation between attempts is `NotCharged`; in-flight uncertainty
+is preserved, and confirmed success stays success despite cancellation. Each attempt
+has an empty ID and zero retention, with no receipts or automatic `Lookup`. One
+`wait` observation covers the whole call; static Wait remains `wait_static`. Updates
+do not proactively wake sleepers, so an old RetryAfter may delay using relaxed policy.
+No queue, worker, background goroutine, fairness or refund is added. Use a context
+deadline; see [blocking admission](../../README.md#blocking-admission).
 Receipts replay before current policy checks, including across updates and pauses.
 Their historical allowed result is **not permission to execute upstream again**.
 Managed fingerprints bind ordered names/costs and retention, not policy revisions;

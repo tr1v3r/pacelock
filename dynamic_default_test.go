@@ -49,19 +49,20 @@ func TestDefaultDynamicDoesNotFallBackToStatic(t *testing.T) {
 	for _, call := range []func() error{
 		func() error { _, err := l.Allow(ctx, charge); return err },
 		func() error { _, err := l.AllowOnce(ctx, "attempt", time.Minute, charge); return err },
+		func() error { return l.Wait(ctx, charge) },
 	} {
 		if err := call(); !errors.Is(err, ErrPolicyMissing) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("default admission must fail closed: %v", err)
 		}
 	}
-	if d.calls != 0 || d.managedCalls != 2 {
+	if d.calls != 0 || d.managedCalls != 3 {
 		t.Fatalf("default admission dispatched static=%d dynamic=%d", d.calls, d.managedCalls)
 	}
 	static, _ := NewStaticWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }}, sampleQuota())
 	if decision, err := static.Allow(ctx, sampleCharge()); err != nil || !decision.Allowed || d.calls != 1 {
 		t.Fatalf("explicit static alternative: %+v %v", decision, err)
 	}
-	if len(events) != 3 || events[0].Operation != "allow" || events[1].Operation != "allow_once" || events[2].Operation != "allow_static" {
+	if len(events) != 4 || events[0].Operation != "allow" || events[1].Operation != "allow_once" || events[2].Operation != "wait" || events[3].Operation != "allow_static" {
 		t.Fatalf("operations: %+v", events)
 	}
 }

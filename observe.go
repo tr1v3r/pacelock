@@ -20,8 +20,8 @@ type Observer func(context.Context, Event)
 // Event describes a call without exposing quota names or admission IDs as fields.
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, allow_once, allow_static, allow_static_once,
-	// wait_static or lookup. StaticLimiter.Wait emits one event for the whole call.
+	// Operation is allow, allow_once, wait, allow_static, allow_static_once,
+	// wait_static or lookup. Each Wait emits one event for the whole call.
 	Operation string
 	// Duration excludes the observer callback execution time.
 	Duration time.Duration

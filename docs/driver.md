@@ -45,14 +45,26 @@ decision. `NotCharged` on a later call cannot resolve an earlier unknown outcome
 
 ## Blocking wrapper
 
-`StaticLimiter.Wait` snapshots the charges and is implemented entirely in the core
-using the fixed policies and `AdmitStatic` calls with an empty ID. Drivers remain
-immediate: the core sleeps for a validated `RetryAfter` only after a normal denial.
-Any error stops the loop and preserves its accounting certainty. A confirmed
-successful debit remains success even if context cancellation races with the
-response. No driver API, persistence protocol or backend-side queue is added.
-Sleeping holds no driver resources; the caller owns the context deadline. One
-`wait_static` observation covers the complete operation.
+Both `Limiter.Wait(ctx, charges...) error` and `StaticLimiter.Wait(ctx, charges...) error`
+use a shared private core waiting loop. Dynamic `Wait` copies the caller's charge
+slice once before dispatch, then makes ordinary `Admit` calls: each attempt resolves
+the latest backend policy atomically, without taking a policy snapshot. Static
+`Wait` uses the fixed policies and `AdmitStatic`. Each attempt has an empty ID and
+zero retention; neither path writes receipts or automatically calls `Lookup`.
+
+Drivers remain immediate: only a valid ordinary capacity denial is retried, after
+its validated advisory `RetryAfter`. Every error stops the loop, including
+`ErrPaused`, `ErrPolicyMissing`, `ErrInvalid` (such as a newly reduced Burst below
+Cost), transport errors even when `NotCharged`, `Unknown`, unsupported capabilities
+and invalid driver results. Cancellation between attempts is `NotCharged`;
+cancellation in flight preserves that invocation's accounting certainty. A confirmed
+successful debit remains success even if cancellation races with the response.
+
+No driver API, persistence protocol, queue, worker, background goroutine, fairness
+or refund is added. Sleeping holds no driver resources; the caller owns the context
+deadline. Policy updates do not proactively wake sleepers, so a previous RetryAfter
+can delay use of a relaxed policy. One `wait` (dynamic) or `wait_static` (static)
+observation covers the complete call, with no per-attempt observations.
 
 ## GCRA and policy identity
 
@@ -100,7 +112,8 @@ lookup results do not prove no debit or upstream exactly-once execution.
 
 Before activating dynamic policies, upgrade every writer and maintenance process.
 Updates preserve absolute TAT without rescaling or reset; `Rate=0` pauses and a
-higher revision resumes. There is no dynamic Wait or automatic policy polling.
+higher revision resumes. Dynamic Wait rechecks policy on each attempt, but does not
+wait through policy errors or perform automatic configuration-source polling.
 
 Each module has its own go.mod. Backend tests live with their driver; shared real
 backend contracts live in `tests/contracts` to avoid a core-to-driver import cycle.

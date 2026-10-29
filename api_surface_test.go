@@ -14,6 +14,7 @@ type admissionAPI interface {
 	Allow(context.Context, ...pacelock.Charge) (pacelock.Decision, error)
 	AllowOnce(context.Context, string, time.Duration, ...pacelock.Charge) (pacelock.Receipt, error)
 	Lookup(context.Context, string) (pacelock.Decision, bool, error)
+	Wait(context.Context, ...pacelock.Charge) error
 }
 
 var (
@@ -26,7 +27,7 @@ func TestLimiterMethodSets(t *testing.T) {
 		typ  reflect.Type
 		want []string
 	}{
-		{reflect.TypeFor[*pacelock.Limiter](), []string{"Allow", "AllowOnce", "Lookup", "UpdateQuotas"}},
+		{reflect.TypeFor[*pacelock.Limiter](), []string{"Allow", "AllowOnce", "Lookup", "UpdateQuotas", "Wait"}},
 		{reflect.TypeFor[*pacelock.StaticLimiter](), []string{"Allow", "AllowOnce", "Lookup", "Wait"}},
 	} {
 		var names []string

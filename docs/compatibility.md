@@ -32,7 +32,16 @@
   The old public names are removed. The `Policy` type and pure `ApplyPolicies`
   helper keep their names. Configuration changes do not refill capacity or
   reset/rescale debt: absolute TAT and retained receipts remain unchanged.
-- There is no default/dynamic Wait or automatic policy watcher. Pure `Evaluate` and
+- Both dynamic `Limiter` and `StaticLimiter` now expose `Wait(ctx, charges...) error`.
+  Dynamic Wait copies charges once before dispatch, not policies: each ordinary
+  attempt atomically uses the latest backend policy. Only valid capacity denials
+  retry after advisory `RetryAfter`; every error stops, including paused/missing
+  policies, a new Burst below Cost and transport errors even when `NotCharged`.
+  Between-attempt cancellation is `NotCharged`; in-flight uncertainty and confirmed
+  success are preserved. One `wait` or `wait_static` event covers the complete call.
+  Attempts have an empty ID and zero retention, without receipts or automatic Lookup.
+  Updates do not proactively wake sleepers, so an earlier delay can postpone use of
+  relaxed policy. No automatic policy watcher is added. Pure `Evaluate` and
   `EvaluateManaged` remain available; the API rename itself does not reset debt.
 
 For PostgreSQL: **Migrate → upgrade all binaries → activate configuration**. Run

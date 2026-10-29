@@ -36,7 +36,7 @@ for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplifie
 - Redis Lua with one MSET commit; bounded, application-scheduled `Driver.Prune`.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
-- Context-aware blocking `StaticLimiter.Wait` for weighted, multidimensional admission.
+- Context-aware blocking `Limiter.Wait` and `StaticLimiter.Wait` for weighted, multidimensional admission.
 - Bounded idempotent admission with parameter conflict detection and result lookup.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
@@ -208,7 +208,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `AllowOnce`, `Lookup`)
+Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `AllowOnce`, `Wait`, `Lookup`)
 and standalone `StaticLimiter` (`Allow`, `AllowOnce`, `Wait`, `Lookup`), with shared
 outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
@@ -276,8 +276,9 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 - `Rate=0` requires positive Period and Burst. Fresh admission returns `ErrPaused`
   / `NotCharged` without a debit or receipt. Missing configuration returns
   `ErrPolicyMissing`, never unlimited admission. Cost above current burst is
-  `ErrInvalid`. There is no managed blocking Wait API or SDK polling goroutine;
-  applications own publication, retry scheduling and configuration-source polling.
+  `ErrInvalid`. Dynamic `Wait` stops on these errors rather than waiting for a
+  policy change. Applications own publication and configuration-source polling;
+  the SDK starts no polling goroutine.
 - `AllowOnce(ctx, id, retention, charges...)` retains ordinary allow/deny
   decisions. Its fingerprint binds ordered names/costs and retention, NOT policy
   versions. Same-attempt retries replay the original result even after updates or
@@ -305,44 +306,44 @@ Runnable SDK example: [managed admission](driver/redis/examples/managed/main.go)
 
 ## Blocking admission
 
-`static.Wait(ctx, charges...) error` uses the fixed policies of a standalone
-`StaticLimiter`. It snapshots and validates the supplied name/cost charges before
-waiting, tries immediately, sleeps for `RetryAfter` only after ordinary denials,
-and rechecks the selected quotas atomically until admitted or an error occurs:
+Both `Limiter.Wait(ctx, charges...) error` and `StaticLimiter.Wait(ctx, charges...) error`
+try immediately, then sleep for advisory `RetryAfter` only after a valid ordinary
+capacity denial. Dynamic `Wait` copies the caller's name/cost charge slice once
+before dispatch; each attempt atomically reads the latest backend policies, not a
+policy snapshot. `New` still constructs a dynamic `Limiter`. Static `Wait` validates
+and snapshots charges against its independently constructed fixed policies.
 
 ```go
-quotas := []pacelock.Quota{
-    {Name: "static:account:rpm", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}},
-    {Name: "static:model-a:input-tpm", Policy: pacelock.Policy{Rate: 60000, Period: time.Minute, Burst: 12000}},
-}
-static, err := pacelock.NewStatic(driver, "llm-service", "provider-account-a", quotas...)
-if err != nil { return err }
-charges := []pacelock.Charge{
-    {Name: quotas[0].Name, Cost: 1},
-    {Name: quotas[1].Name, Cost: 1500},
-}
+// limiter and charge are from the dynamic setup above; its policy is already published.
+charges := []pacelock.Charge{charge}
 waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 defer cancel()
-if err := static.Wait(waitCtx, charges...); err != nil {
+if err := limiter.Wait(waitCtx, charges...); err != nil {
     // All errors stop waiting. Unknown may have charged: never retry automatically.
     return err
 }
 // Quota was consumed once. Execute this business attempt.
+// A standalone StaticLimiter supports the same static.Wait(waitCtx, charges...) call.
 ```
 
 A nil error confirms admission and consumption; business failure does not refund
 it. Cancellation between attempts is `NotCharged`. Cancellation during a backend
-call preserves its accounting outcome; a confirmed successful debit returns nil
-even if cancellation arrives concurrently. Every backend error stops waiting,
-including `NotCharged` errors. Use `errors.Is` and `OutcomeOf` on returned errors;
-`Error.Op` is `wait_static`.
+call preserves its accounting outcome, including uncertainty; a confirmed successful
+debit returns nil even if cancellation arrives concurrently. Every error stops
+waiting: `ErrPaused`, `ErrPolicyMissing`, `ErrInvalid` (including a new Burst below
+Cost), transport errors even when `NotCharged`, `Unknown`, unsupported capabilities
+and invalid driver results. Use `errors.Is` and `OutcomeOf` on returned errors;
+`Error.Op` is `wait` for dynamic calls and `wait_static` for static calls.
 
-Waiting uses the calling goroutine and a snapshot of the supplied charges. It holds
-no backend lock or connection while sleeping and adds no queue or background
-worker. `RetryAfter` reserves no capacity: competing callers can win repeatedly,
-so there is no FIFO or starvation guarantee. Bound waiting with a context deadline.
+Both paths share a private waiting loop in the calling goroutine. Sleeping holds
+no backend lock or connection and adds no queue, worker or background goroutine.
+Policy updates do not proactively wake sleepers: a previous `RetryAfter` may delay
+use of a relaxed policy. `RetryAfter` reserves no capacity; competing callers can
+win repeatedly, so there is no FIFO or starvation guarantee. Bound waiting with a
+context deadline.
 
-`StaticLimiter.Wait` is non-idempotent and creates no retained ID for `Lookup`. A denied
+Both Wait methods are non-idempotent: each attempt uses an empty ID and zero
+retention, creates no receipt and never automatically calls `Lookup`. A denied
 `AllowOnce` ID replays its original denial, so polling one retained ID cannot
 implement blocking admission. Use the explicit recovery flow below when durable
 attempt identity is required.
@@ -411,9 +412,10 @@ unrecognized errors.
 `Validate(rules...)` checks static bounds offline. `NewWithOptions` and
 `NewStaticWithOptions` accept a synchronous `Observer`: one event per
 dynamic/static admission or `Lookup`; constructors and `UpdateQuotas` emit none. Operation names are `allow`, `allow_once`,
-`allow_static`, `allow_static_once`, `wait_static` and `lookup`. `StaticLimiter.Allow`
-/ `.AllowOnce` emit static operations. `StaticLimiter.Wait` emits one event for the whole
-wait, not each internal attempt. Events expose counts, duration, result, replay,
+`wait`, `allow_static`, `allow_static_once`, `wait_static` and `lookup`. `StaticLimiter.Allow`
+/ `.AllowOnce` emit static operations. `Limiter.Wait` emits `wait` and
+`StaticLimiter.Wait` emits `wait_static`: one event for the whole call, not each
+internal attempt. Events expose counts, duration, result, replay,
 delay and error without raw names/IDs as fields. Errors can contain identifiers:
 never use them as metric labels. Callbacks must be fast and concurrency-safe;
 panics propagate.

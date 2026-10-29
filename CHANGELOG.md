@@ -7,6 +7,16 @@
 - Backend-authoritative dynamic admission is the default: publish versioned
   policies with `UpdateQuotas`, then call `Allow` / `AllowOnce` with names/costs.
   Rate 0 pauses fresh admissions; updates preserve absolute debt and retained replay.
+- Dynamic `Limiter.Wait(ctx, charges...) error` copies charges once and resolves
+  latest backend policies atomically on each ordinary attempt; `New` remains dynamic.
+  Both dynamic and static Wait share a private loop, retry only valid capacity denials
+  after advisory `RetryAfter`, and stop on every error, including pause, missing policy,
+  invalid cost after a Burst reduction and transport errors even when `NotCharged`.
+  Cancellation between attempts is `NotCharged`; in-flight uncertainty is preserved,
+  and confirmed success stays success despite cancellation. Each call emits one
+  `wait` or `wait_static` event. Attempts use an empty ID and zero retention: no
+  receipts, automatic lookup, queues, workers, fairness or refunds. Policy updates
+  do not proactively wake sleepers; a prior RetryAfter may delay use of relaxed policy.
 - Standalone `NewStatic` / `NewStaticWithOptions` validate and copy fixed
   Revision-0 quotas locally, without a parent limiter or backend I/O.
   `StaticLimiter.Allow` / `AllowOnce` / `Wait` take public name/cost `Charge`
