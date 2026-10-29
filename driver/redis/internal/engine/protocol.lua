@@ -11,14 +11,14 @@ local function quota_state(raw, now)
     if string.sub(raw, 1, 3) == 'D3|' then
         local tat = tonumber(string.match(raw, '^D3|(%d+)$'))
         if not tat or tat > exact or tat > now + horizon then return nil end
-        return {tat, 0, 0, tat <= now, true}
+        return tat
     end
     local tat, step, burst = string.match(raw, '^(%d+):(%d+):(%d+)$')
     tat, step, burst = tonumber(tat), tonumber(step), tonumber(burst)
     if not tat or not step or not burst or step < 1 or burst < 1
         or step > horizon or burst > math.floor(horizon / step)
         or tat > exact or tat > now + horizon then return nil end
-    return {tat, step, burst, tat <= now, false}
+    return tat
 end
 local function policy_state(raw)
     local step, burst, revision = string.match(raw, '^P3|(%d+):(%d+):(%d+)$')

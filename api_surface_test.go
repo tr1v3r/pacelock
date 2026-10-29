@@ -2,13 +2,18 @@ package pacelock_test
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/tr1v3r/pacelock"
 )
 
-// Both entry points accept the same costs and support immediate and blocking admission.
+// The limiter supports immediate and blocking admission with the same charges.
 type admissionAPI interface {
 	Allow(context.Context, ...pacelock.Charge) (pacelock.Decision, error)
 	Wait(context.Context, ...pacelock.Charge) error
@@ -16,7 +21,6 @@ type admissionAPI interface {
 
 var (
 	_ admissionAPI = (*pacelock.Limiter)(nil)
-	_ admissionAPI = (*pacelock.StaticLimiter)(nil)
 )
 
 func TestLimiterMethodSets(t *testing.T) {
@@ -25,7 +29,6 @@ func TestLimiterMethodSets(t *testing.T) {
 		want []string
 	}{
 		{reflect.TypeFor[*pacelock.Limiter](), []string{"Allow", "UpdateQuotas", "Wait"}},
-		{reflect.TypeFor[*pacelock.StaticLimiter](), []string{"Allow", "Wait"}},
 	} {
 		var names []string
 		for i := 0; i < tc.typ.NumMethod(); i++ {
@@ -43,9 +46,7 @@ func TestAdmissionDriverMethodSets(t *testing.T) {
 		want []string
 	}{
 		{reflect.TypeFor[pacelock.Driver](), []string{"Admit"}},
-		{reflect.TypeFor[pacelock.StaticDriver](), []string{"AdmitStatic"}},
 		{reflect.TypeFor[pacelock.Admission](), []string{"Validate"}},
-		{reflect.TypeFor[pacelock.StaticAdmission](), []string{"Validate"}},
 	} {
 		var got []string
 		for i := 0; i < tc.typ.NumMethod(); i++ {
@@ -63,7 +64,6 @@ func TestAdmissionFieldSets(t *testing.T) {
 		want []string
 	}{
 		{reflect.TypeFor[pacelock.Admission](), []string{"Scope", "Charges"}},
-		{reflect.TypeFor[pacelock.StaticAdmission](), []string{"Scope", "Rules"}},
 		{reflect.TypeFor[pacelock.Event](), []string{"Operation", "Duration", "RuleCount", "Result", "RetryAfter", "Err"}},
 	} {
 		var got []string
@@ -73,5 +73,43 @@ func TestAdmissionFieldSets(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s fields = %v, want %v", tc.typ, got, tc.want)
 		}
+	}
+}
+
+// Guard against restoring a second backend entry point, including aliases.
+func TestNoStaticEntryPointDeclarations(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := map[string]bool{"StaticLimiter": true, "StaticDriver": true, "StaticAdmission": true, "NewStatic": true, "NewStaticWithOptions": true, "ValidateStatic": true, "admitStatic": true, "AdmitStatic": true}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			var name string
+			switch n := n.(type) {
+			case *ast.TypeSpec:
+				name = n.Name.Name
+			case *ast.FuncDecl:
+				name = n.Name.Name
+			case *ast.ValueSpec:
+				for _, id := range n.Names {
+					if forbidden[id.Name] {
+						t.Errorf("obsolete declaration %s", id.Name)
+					}
+				}
+			}
+			if forbidden[name] {
+				t.Errorf("obsolete declaration %s", name)
+			}
+			return true
+		})
 	}
 }

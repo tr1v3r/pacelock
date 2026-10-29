@@ -32,6 +32,7 @@ func TestRedisPruneContracts(t *testing.T) {
 				}
 			}
 			live := contentionRule("live", 1000, 1)
+			publishRules(t, l, live)
 			requireAllowed(t, l, live)
 			preservedReceipts := map[string]string{
 				l.prefix + "attempt:" + strings.Repeat("b", 64): "1|" + complete,
@@ -84,6 +85,7 @@ func TestRedisPruneContracts(t *testing.T) {
 			// Concurrent cleanup of an old candidate cannot reset newly admitted debt.
 			racing := f.limiter(t)
 			active := contentionRule("q", 37, 1)
+			publishRules(t, racing, active)
 			if err := f.clients[0].Set(ctx, racing.key("q"), "1:1:1", 0).Err(); err != nil {
 				t.Fatal(err)
 			}
@@ -91,7 +93,7 @@ func TestRedisPruneContracts(t *testing.T) {
 			var accepted atomic.Int64
 			contentionWave(t, 200, func(ctx context.Context, i int) {
 				if i%2 == 0 {
-					d, err := racing.Allow(ctx, active)
+					d, err := racing.admitRules(ctx, active)
 					if err != nil {
 						t.Error(err)
 					} else if d.Allowed {

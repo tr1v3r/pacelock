@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/tr1v3r/pacelock"
 )
 
 func BenchmarkValidate(b *testing.B) {
@@ -20,7 +21,7 @@ func BenchmarkValidate(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := Validate(rules...); err != nil {
+				if err := pacelock.Validate(rules...); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -58,15 +59,16 @@ func BenchmarkRedis(b *testing.B) {
 						rules[i] = rule(fmt.Sprint(i), 1, 1)
 					}
 				}
+				publishRules(b, l, rules...)
 				if mode == "deny" {
-					if _, err := l.Allow(ctx, rules...); err != nil {
+					if _, err := l.admitRules(ctx, rules...); err != nil {
 						b.Fatal(err)
 					}
 				}
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					d, err := l.Allow(ctx, rules...)
+					d, err := l.admitRules(ctx, rules...)
 					if err != nil || (mode == "allow" && !d.Allowed) || (mode == "deny" && d.Allowed) {
 						b.Fatalf("%+v %v", d, err)
 					}

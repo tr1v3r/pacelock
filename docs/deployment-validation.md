@@ -30,13 +30,14 @@ docker compose -p pacelock-validation down --volumes
 The failover harness creates its own uniquely named primary/replica network and
 cleans it up in `finally`. Loopback ports 17379/17380 must be free. It uses manual
 promotion, no Sentinel, no persistence and no TLS. It executes the production
-static-admission Lua directly, not the Go transport or an application recovery API.
+dynamic-admission Lua with explicitly published policies directly, not the Go transport or an application recovery API.
 Go transport, lost-response accounting and live ASK/MOVED coverage remain in the
 integration suite.
 
 ## Load interpretation
 
-The load tool uses `NewStatic` and `Allow` with fixed policies. The matrix separates
+The load tool uses `New`, explicitly publishes revisioned quotas with `UpdateQuotas`,
+then calls `Allow` with names and costs. The matrix separates
 ordinary allow/deny, uses 1/4/32 dimensions and 1/8 domains, and finishes with a
 sustained single-domain, 32-rule allowance workload. It no longer has receipt,
 replay, lookup, retention or expiry-measurement modes.

@@ -1,31 +1,25 @@
 -- All KEYS are explicit and share a slot. No mutation precedes the final MSET.
--- ARGV: step/burst/cost for each quota.
+-- KEYS: N debt keys followed by N policy keys. ARGV: N costs.
 local now = backend_time()
 if not now then return redis.error_reply('PACE_STATE server clock outside supported range') end
-local count = #ARGV / 3
-local hasConfigs = #KEYS == count * 2
+local count = #ARGV
+if count < 1 or count > 32 or #KEYS ~= count * 2 then
+    return redis.error_reply('PACE_STATE invalid admission keys')
+end
 local writes = {}
 local result = {1, 0}
 local overBurst = false
 for i = 1, count do
-    local offset = (i - 1) * 3
-    local step = tonumber(ARGV[offset + 1])
-    local burst = tonumber(ARGV[offset + 2])
-    local cost = tonumber(ARGV[offset + 3])
-    if hasConfigs then
-        local config = redis.pcall('GET', KEYS[count + i])
-        if type(config) == 'table' and config.err then return redis.error_reply('PACE_STATE unreadable policy') end
-        if config then
-            local policy = policy_state(config)
-            if not policy then return redis.error_reply('PACE_STATE malformed policy') end
-            if not managed then return redis.error_reply('PACE_POLICY static admission cannot bypass managed policy') end
-            step, burst = policy[1], policy[2]
-        elseif managed then
-            return redis.error_reply('PACE_MISSING policy not configured')
-        end
-    elseif managed then
-        return redis.error_reply('PACE_STATE missing policy keys')
+    local cost = tonumber(ARGV[i])
+    if not cost or cost < 1 or cost ~= math.floor(cost) or cost > horizon then
+        return redis.error_reply('PACE_INVALID invalid cost')
     end
+    local config = redis.pcall('GET', KEYS[count + i])
+    if type(config) == 'table' and config.err then return redis.error_reply('PACE_STATE unreadable policy') end
+    if not config then return redis.error_reply('PACE_MISSING policy not configured') end
+    local policy = policy_state(config)
+    if not policy then return redis.error_reply('PACE_STATE malformed policy') end
+    local step, burst = policy[1], policy[2]
     local tat = now
     local raw = redis.pcall('GET', KEYS[i])
     if type(raw) == 'table' and raw.err then
@@ -34,19 +28,10 @@ for i = 1, count do
     if raw then
         local state = quota_state(raw, now)
         if not state then return redis.error_reply('PACE_STATE invalid quota state or backward clock jump') end
-        if managed then
-            tat = math.max(state[1], now)
-        elseif state[5] then
-            return redis.error_reply('PACE_POLICY managed debt requires policy')
-        elseif not state[4] then
-            if state[2] ~= step or state[3] ~= burst then
-                return redis.error_reply('PACE_POLICY quota policy changed while state is active')
-            end
-            tat = math.max(state[1], now)
-        end
+        tat = math.max(state, now)
     end
     if step == 0 then return redis.error_reply('PACE_PAUSED quota is paused') end
-    if managed and cost > burst then
+    if cost > burst then
         -- Resolve/validate every policy first, matching EvaluateManaged's pause
         -- precedence. Clamp unused arithmetic; this request will never commit.
         overBurst = true
@@ -55,11 +40,7 @@ for i = 1, count do
     local nexttat = tat + cost * step
     local wait = math.max(0, nexttat - burst * step - now)
     writes[#writes + 1] = KEYS[i]
-    if managed then
-        writes[#writes + 1] = string.format('D3|%.0f', nexttat)
-    else
-        writes[#writes + 1] = string.format('%.0f:%s:%s', nexttat, ARGV[offset + 1], ARGV[offset + 2])
-    end
+    writes[#writes + 1] = string.format('D3|%.0f', nexttat)
     result[i + 2] = 0
     if wait > 0 then
         result[1] = 0

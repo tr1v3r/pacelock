@@ -23,7 +23,7 @@ constants and variables, explaining input constraints, concurrency and lifecycle
 rules, and error handling. Read the comments for your pinned version alongside
 the examples when integrating the SDK.
 
-Start with the [default dynamic API](managed.go), [standalone static API](static.go), [Rule and pure math helpers](pacelock.go), [driver contract](driver.go), and [error outcomes](errors.go).
+Start with the [default dynamic API](managed.go), [Rule and pure math helpers](pacelock.go), [driver contract](driver.go), and [error outcomes](errors.go).
 
 For a visual walkthrough, see the [historical interactive admission workflows](docs/workflows/README.md)
 for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplified Chinese).
@@ -36,7 +36,7 @@ for the public API, PostgreSQL transactions and Redis Lua (diagrams in Simplifie
 - Redis Lua with one MSET commit; bounded, application-scheduled `Driver.Prune`.
 - A standard-library-only core and independent Redis/PostgreSQL driver modules.
 - Immediate decisions, advisory `RetryAfter` and all blocking quota names.
-- Context-aware blocking `Limiter.Wait` and `StaticLimiter.Wait` for weighted, multidimensional admission.
+- Context-aware blocking `Limiter.Wait` for weighted, multidimensional admission.
 - Typed accounting outcomes, offline rule validation and synchronous observation.
 - Real Redis/Cluster, race, model, fuzz and failure-injection tests; benchmarks.
 
@@ -131,61 +131,21 @@ backend owns the current dynamic policy; request nodes send names/costs only.
 Include all applicable account/model/tenant quotas; omitted quotas cannot be
 inferred. Different namespaces/domains are independent.
 
-## Explicit static alternative: fixed policies and costs
+## Policies in code, execution in the backend
 
-Construct a standalone `StaticLimiter` when policies are fixed in application code.
-The default `New(driver, namespace, domain)` still returns a dynamic `*Limiter`.
-Static construction does not require a parent limiter or publish backend policies:
+`New` / `NewWithOptions` return the sole `Limiter`, exposing `UpdateQuotas`,
+`Allow` and `Wait`. Configuration can remain in application code: publish `Quota`
+values with positive `Policy.Revision` explicitly, then send only `Charge{Name, Cost}`.
+Every admission reads backend-authoritative policy, so rolling pods share the
+latest policy even if their code carries different configuration revisions.
+Stale publication returns `ErrPolicyMismatch`: explicitly handle or surface it;
+do not silently treat every update failure as success. Rollback publishes the old
+parameters at a **higher revision**, never an older revision or renamed quota.
+Include every applicable quota; omitted quotas are not checked or charged.
+`Decision.Limited` follows request charge order.
 
-```go
-NewStatic(driver Driver, namespace, domain string, quotas ...Quota) (*StaticLimiter, error)
-NewStaticWithOptions(driver Driver, namespace, domain string, options Options, quotas ...Quota) (*StaticLimiter, error)
-```
-
-`Policy` contains `Revision`, `Rate`, `Period` and `Burst` and is embedded by the
-low-level `Rule`; `Quota` has public `Name` and `Policy` fields. Both dynamic and
-static admission take public `Charge{Name, Cost}` values, never per-call policies.
-
-- Construction validates and copies 1–32 uniquely named quotas, all with
-  `Revision == 0`. It performs no backend I/O or policy publication. Invalid
-  definitions return an error wrapping `ErrInvalid`.
-- A `StaticLimiter` is immutable and concurrency-safe under its driver's contract.
-  Changing the original quota slice, quota or policy does not change its fixed
-  policies. Each call assembles its own rules without mutating inputs.
-  A driver without `StaticDriver` may be constructed; admission then returns
-  `ErrUnsupported` / `NotCharged`.
-- `static.Allow(ctx, charges...)` and `static.Wait(ctx, charges...)` accept any nonempty subset of fixed quotas as
-  `...Charge`, each selected name exactly once with `0 < Cost <= Burst`.
-  Omitted quotas are neither checked nor charged. Empty calls, duplicate or unknown
-  names and invalid costs fail locally with `ErrInvalid` / `NotCharged` before
-  dispatch. There are no default costs or zero-cost exemptions. Each call is atomic
-  only across its selected quotas; separate calls are not atomic together.
-- Charge order is arbitrary. Selected quotas are normalized to construction
-  (binding) order for `Decision.Limited`.
-- Build quota names from trusted identity and choose the applicable set in
-  application code. The SDK cannot infer omitted applicable quotas.
-- Policy changes require a new `StaticLimiter`; construction neither migrates debt
-  nor bypasses backend `ErrPolicyMismatch` checks.
-
-```go
-// Use a distinct static name with no published dynamic configuration.
-q := pacelock.Quota{Name: "static:rpm", Policy: pacelock.Policy{
-    Rate: 60, Period: time.Minute, Burst: 10, // Revision defaults to 0
-}}
-static, err := pacelock.NewStatic(driver, "llm-service", "provider-account-a", q)
-if err != nil { return err }
-decision, err := static.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1})
-if err != nil { return err }
-if !decision.Allowed { /* reject */ }
-```
-
-### Low-level driver and pure helpers
-
-`Rule` remains the low-level caller-policy value used by
-`StaticDriver.AdmitStatic(StaticAdmission)` and the pure `Validate` / `Evaluate`
-helpers. `EvaluateManaged` also remains pure. Public static admission is through
-`StaticLimiter`, not rule-taking methods on `Limiter`. Static admission cannot
-bypass configured dynamic quotas.
+`Rule`, `Validate` and `Evaluate` remain offline math helpers only; they do not
+provide a caller-policy backend path. `EvaluateManaged` is also pure.
 
 ## PostgreSQL and the Driver boundary
 
@@ -199,8 +159,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers support dynamic `Limiter` (`UpdateQuotas`, `Allow`, `Wait`)
-and standalone `StaticLimiter` (`Allow`, `Wait`), with shared
+Both drivers support `Limiter` (`UpdateQuotas`, `Allow`, `Wait`), with shared
 outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota mutation in one short transaction. Pre-commit failures roll back;
@@ -273,31 +232,23 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 - `Prune` may reclaim expired debt, but never configuration/revisions.
   Plan configuration cardinality accordingly; deleting a config loses its version
   fence. All dynamic updates must use the SDK/version-check script, not raw SET.
-- `NewStatic` / `NewStaticWithOptions` require Revision-0 fixed policies. Once a backend
-  configuration exists, fresh static admission for that name fails closed with
-  `ErrPolicyMismatch`. A managed policy
-  cannot be passed to these static constructors. Use dynamic name/cost admission instead.
-- For PostgreSQL, run explicit `Migrate` to add the policies table BEFORE upgraded
-  request binaries serve traffic, including static traffic. Deploy protocol-capable
-  binaries everywhere BEFORE enabling managed policies. Unmodified old writers
-  cannot be mixed with managed quotas. Policy updates and admissions
-  serialize normally; slow Lua scripts would still block other Redis commands.
+- For PostgreSQL, run explicit `Migrate` before upgraded request binaries serve
+  traffic. Retire old static writers or stop their static path **before installing
+  policies**. Migration preserves existing debt and legacy receipt data; it does
+  not make old writers safe to mix with backend-authoritative admission.
 - Transport/commit errors may leave publication uncertain. No automatic retry is
   performed; explicitly retry the SAME revision/policy to converge. Optional
   `QuotaDriver` publishes configuration; dynamic `Driver.Admit(Admission)` is mandatory.
-  Optional `StaticDriver.AdmitStatic(StaticAdmission)` supports caller-policy admission;
   missing optional capabilities return `ErrUnsupported` without mutation.
 
 Runnable SDK example: [managed admission](driver/redis/examples/managed/main.go).
 
 ## Blocking admission
 
-Both `Limiter.Wait(ctx, charges...) error` and `StaticLimiter.Wait(ctx, charges...) error`
-try immediately, then sleep for advisory `RetryAfter` only after a valid ordinary
-capacity denial. Dynamic `Wait` copies the caller's name/cost charge slice once
-before dispatch; each attempt atomically reads the latest backend policies, not a
-policy snapshot. `New` still constructs a dynamic `Limiter`. Static `Wait` validates
-and snapshots charges against its independently constructed fixed policies.
+`Limiter.Wait(ctx, charges...) error` tries immediately, then sleeps for advisory
+`RetryAfter` only after a valid ordinary capacity denial. It copies the caller's
+name/cost charge slice once; each attempt atomically reads the latest backend
+policies, not a policy snapshot.
 
 ```go
 // limiter and charge are from the dynamic setup above; its policy is already published.
@@ -309,7 +260,6 @@ if err := limiter.Wait(waitCtx, charges...); err != nil {
     return err
 }
 // Quota was consumed once. Execute this business attempt.
-// A standalone StaticLimiter supports the same static.Wait(waitCtx, charges...) call.
 ```
 
 A nil error confirms admission and consumption; business failure does not refund
@@ -319,9 +269,9 @@ debit returns nil even if cancellation arrives concurrently. Every error stops
 waiting: `ErrPaused`, `ErrPolicyMissing`, `ErrInvalid` (including a new Burst below
 Cost), transport errors even when `NotCharged`, `Unknown`, unsupported capabilities
 and invalid driver results. Use `errors.Is` and `OutcomeOf` on returned errors;
-`Error.Op` is `wait` for dynamic calls and `wait_static` for static calls.
+`Error.Op` is `wait`.
 
-Both paths share a private waiting loop in the calling goroutine. Sleeping holds
+Wait uses a private waiting loop in the calling goroutine. Sleeping holds
 no backend lock or connection and adds no queue, worker or background goroutine.
 Policy updates do not proactively wake sleepers: a previous `RetryAfter` may delay
 use of a relaxed policy. `RetryAfter` reserves no capacity; competing callers can
@@ -332,9 +282,10 @@ context deadline.
 
 Admission is non-idempotent. `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`,
 admission IDs/retention/fingerprints and `Event.Replayed` have been removed.
-Both limiter types expose `Allow(ctx, ...Charge) (Decision, error)` and
-`Wait(ctx, ...Charge) error`; only the dynamic limiter exposes `UpdateQuotas`.
-`Driver.Admit` and `StaticDriver.AdmitStatic` return `(Decision, error)`.
+The sole `Limiter` exposes `Allow(ctx, ...Charge) (Decision, error)`,
+`Wait(ctx, ...Charge) error` and `UpdateQuotas`. `Driver.Admit(ctx, Admission)`
+returns `(Decision, error)`. Static constructors, limiter, driver and admission
+interfaces are removed, with no compatibility aliases.
 There is no result recovery after an uncertain mutation: **do not blindly retry Unknown**.
 This is rate admission, not billing, refunds, business execution, queue or worker ownership.
 
@@ -359,10 +310,9 @@ error, ignore the decision. `ErrState` alone does not mean no debit: a malformed
 reply after a debit also returns it. Check `OutcomeOf(err)`; it is conservative for
 unrecognized errors.
 
-`Validate(rules...)` checks static bounds offline. `NewWithOptions` and
-`NewStaticWithOptions` accept a synchronous `Observer`: one event per
-dynamic/static admission; constructors and `UpdateQuotas` emit none. Operation names are
-`allow`, `wait`, `allow_static` and `wait_static`. Each Wait emits one event for the
+`Validate(rules...)` checks math bounds offline. `NewWithOptions`
+accepts a synchronous `Observer`: one event per admission; constructors and `UpdateQuotas` emit none. Operation names are
+`allow` and `wait`. Each Wait emits one event for the
 whole call, not each internal attempt. Events expose counts, duration, result,
 delay and error without raw names as fields. Errors can contain identifiers:
 never use them as metric labels. Callbacks must be fast and concurrency-safe;
@@ -377,9 +327,7 @@ panics propagate.
 - GCRA is a rate/burst envelope, not an exact fixed/sliding-minute counter. Model
   provider limits explicitly. Known input tokens do not enforce output TPM;
   character, byte and SSE chunk counts are not token counts.
-- Effective interval and burst identify a static (Revision=0) policy. Changing
-  active static state returns `ErrPolicyMismatch`. Managed policies additionally
-  require the persistent revision installed explicitly through `UpdateQuotas`.
+- Policies require positive revisions installed explicitly through `UpdateQuotas`.
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.

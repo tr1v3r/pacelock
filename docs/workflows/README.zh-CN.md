@@ -1,8 +1,7 @@
-> 历史档案：下文包含已移除的幂等准入、回执与查询 API，不适用于当前版本；历史命令须在记录对应的旧源码版本运行。当前动态与静态路径仅提供 Allow/Wait，不确定扣减后无恢复接口，不要盲目重试 Unknown。参见[当前 API](../../README.zh-CN.md)。
+> 历史档案：下文包含已移除的静态、幂等准入、回执与查询 API，不适用于当前版本；历史命令须在记录对应的旧源码版本运行。当前仅有动态 Limiter，提供 UpdateQuotas/Allow/Wait，不确定扣减后无恢复接口，不要盲目重试 Unknown。参见[当前 API](../../README.zh-CN.md)。
 
 # 准入流程图
 
-> 历史快照：下文图示、测量和 API 名称对应固定源码版本，不是当前 API。当前静态路径直接用 `NewStatic` / `NewStaticWithOptions` 构造独立对象，再向 `StaticLimiter.Allow` / `Wait` 传公开的 `Charge{Name, Cost}`；默认 `New` 返回动态 `Limiter`。详见[当前 API](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。历史生成产物有意保持不变。
 
 [English](README.md)
 

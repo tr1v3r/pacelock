@@ -15,7 +15,7 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 注释覆盖包、类型、接口、函数、方法、字段、常量和变量，说明参数约束、并发与生命周期规则，以及错误处理方式。
 集成时，请结合示例阅读所固定版本的源码注释。
 
-可从[默认动态 API](managed.go)、[独立静态 API](static.go)、[Rule 与纯计算工具](pacelock.go)、[Driver 契约](driver.go)和[错误结果](errors.go)开始。
+可从[默认动态 API](managed.go)、[Rule 与纯计算工具](pacelock.go)、[Driver 契约](driver.go)和[错误结果](errors.go)开始。
 
 也可查看[历史交互式准入流程图](docs/workflows/README.zh-CN.md)，分别展开公共 API、PostgreSQL 事务和 Redis Lua 的具体操作。
 
@@ -27,7 +27,7 @@ Pacelock 是一个**提供完整源码注释的 SDK**，方便编码 agent 理�
 - Redis Lua 最后一次 MSET 提交，由应用调度有界的 `Driver.Prune`。
 - 核心仅依赖标准库，Redis/PostgreSQL Driver 为独立模块。
 - 立即返回结果、建议等待时间 `RetryAfter` 和全部阻塞维度名称。
-- 支持 context 取消的阻塞式 `Limiter.Wait` 与 `StaticLimiter.Wait`，复用多维加权准入。
+- 支持 context 取消的阻塞式 `Limiter.Wait`，复用多维加权准入。
 - 可程序化判断的扣减结果、离线规则校验和同步观测回调。
 - 真实 Redis/Cluster、race、模型对照、模糊测试、故障注入和基准测试。
 
@@ -101,55 +101,17 @@ Pacelock 对具体 Client/ClusterClient 的命令设置 go-redis `NoRetry`，阻
 
 共享额度的实例使用相同的 namespace、domain 和额度名称；后端持有当前动态策略，请求节点只传名称/cost。每次准入应包含适用的全部账号、模型和租户额度；库无法推断漏掉的额度。不同 namespace/domain 相互独立。
 
-## 显式静态替代：固定策略与单次消耗
+## 配置在代码中，执行以后端为准
 
-策略由应用代码固定时，直接构造独立的 `StaticLimiter`。
-默认的 `New(driver, namespace, domain)` 仍返回动态 `*Limiter`。
-静态构造不需要父 Limiter，也不发布后端策略：
+`New` / `NewWithOptions` 只构造一种 `Limiter`，提供 `UpdateQuotas`、`Allow`、`Wait`。
+配置可以继续写在应用代码里：先显式发布带正数 `Policy.Revision` 的 `Quota`，
+请求只提交 `Charge{Name, Cost}`。后端权威策略使滚动发布的新旧 pod 共用最新配置。
+旧版本发布返回 `ErrPolicyMismatch`，应用必须明确处理或上报，不能吞掉所有更新错误。
+回滚应以**更高版本**发布旧参数，而不是降低版本或换额度名称。
+每次包含全部适用额度，漏传额度不会检查或扣减；`Decision.Limited` 按请求 Charge 顺序返回。
 
-```go
-NewStatic(driver Driver, namespace, domain string, quotas ...Quota) (*StaticLimiter, error)
-NewStaticWithOptions(driver Driver, namespace, domain string, options Options, quotas ...Quota) (*StaticLimiter, error)
-```
-
-`Policy` 包含 `Revision`、`Rate`、`Period`、`Burst`，也被底层 `Rule` 内嵌；
-`Quota` 保留公开的 `Name` 和 `Policy` 字段。动态和静态准入均传入公开的
-`Charge{Name, Cost}`，每次调用不携带策略。
-
-- 构造时在本地校验并复制 1～32 个名称唯一、`Revision == 0` 的固定额度，
-  不访问后端、不发布策略。无效定义返回包装 `ErrInvalid` 的错误。
-- `StaticLimiter` 不可变，在其 Driver 契约下可并发复用。修改原始额度切片、
-  Quota 或策略不影响固定策略；每次调用独立组装规则，不修改传入参数。
-  未实现 `StaticDriver` 的 Driver 也可构造，但准入返回 `ErrUnsupported` /
-  `NotCharged`。
-- `static.Allow(ctx, charges...)` 和 `static.Wait(ctx, charges...)` 接受固定额度的任意非空子集，以 `...Charge` 传入。
-  每个选中名称仅出现一次，且 `0 < Cost <= Burst`。未传入额度既不检查也不扣减。
-  空调用、重复或未知名称、无效消耗均在派发前本地返回 `ErrInvalid` / `NotCharged`。
-  不默认填充消耗，也不通过零消耗跳过额度。每次调用仅对选中额度保证原子性；
-  多次独立调用合起来不具备原子性。
-- Charge 可以任意排序；选中额度按构造（绑定）顺序整理，用于 `Decision.Limited`。
-- 应用根据可信身份构造名称并选择适用额度；SDK 无法推断漏传的额度。
-- 修改策略需新建 `StaticLimiter`；构造不会迁移已有债务，也不会绕过后端的
-  `ErrPolicyMismatch` 检查。
-
-```go
-// 使用尚未发布动态配置的独立静态额度名。
-q := pacelock.Quota{Name: "static:rpm", Policy: pacelock.Policy{
-    Rate: 60, Period: time.Minute, Burst: 10, // Revision 默认为 0
-}}
-static, err := pacelock.NewStatic(driver, "llm-service", "provider-account-a", q)
-if err != nil { return err }
-decision, err := static.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1})
-if err != nil { return err }
-if !decision.Allowed { /* 拒绝 */ }
-```
-
-### 底层 Driver 与纯计算工具
-
-`Rule` 保留为 `StaticDriver.AdmitStatic(StaticAdmission)` 和纯计算工具
-`Validate` / `Evaluate` 使用的底层调用方策略值；`EvaluateManaged` 也保持纯计算。
-公开静态准入通过 `StaticLimiter`，不再通过 `Limiter` 上接收 Rule 的方法。
-静态准入不能绕过已配置的动态额度。
+`Rule`、`Validate` 和 `Evaluate` 仅保留作离线数学工具，不提供调用方策略的后端路径。
+`EvaluateManaged` 同样保持纯计算。
 
 ## PostgreSQL 与 Driver 边界
 
@@ -163,7 +125,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，�
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-两种 Driver 都支持动态 `Limiter`（`UpdateQuotas`、`Allow`、`Wait`）和独立 `StaticLimiter`（`Allow`、`Wait`），共用错误结果和观测接口。
+两种 Driver 都支持动态 `Limiter`（`UpdateQuotas`、`Allow`、`Wait`），共用错误结果和观测接口。
 PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，用短事务
 一起提交全部额度变更。提交前失败会回滚；提交错误保守标记为 `Unknown`。
 当前不会加入调用者的业务事务。domain 竞争、WAL、连接池和 vacuum 需要目标环境验证，
@@ -175,7 +137,7 @@ SDK 不启动后台任务。
 
 ## 默认动态策略与暂停
 
-默认 `New` / `NewWithOptions` 构造动态 Limiter；固定策略使用独立 `NewStatic` / `NewStaticWithOptions`。`UpdatePolicies` → `UpdateQuotas`，`PolicyDriver` → `QuotaDriver`，`PolicyUpdate` → `QuotaUpdate`；旧名称已移除。`Policy` 和纯计算工具 `ApplyPolicies` 保持原名。详见[迁移指南](docs/compatibility.md)。
+默认 `New` / `NewWithOptions` 构造动态 Limiter。`UpdatePolicies` → `UpdateQuotas`，`PolicyDriver` → `QuotaDriver`，`PolicyUpdate` → `QuotaUpdate`；旧名称已移除。`Policy` 和纯计算工具 `ApplyPolicies` 保持原名。详见[迁移指南](docs/compatibility.md)。
 
 控制面使用 `UpdateQuotas`，数据面使用 `Allow`。Redis 和 PostgreSQL
 将永久配置与可过期的 TAT（债务）分开存储。处理请求的实例只需要额度名和 cost，
@@ -211,19 +173,16 @@ if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 - Redis 每个动态 quota 使用永久 P3 配置 key 与 D3 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
 - `Rate=0` 时仍要求正的 Period 和 Burst。新准入返回 `ErrPaused` / `NotCharged`，不扣减。配置不存在返回 `ErrPolicyMissing`，不能默认无限额度。cost 超过当前 burst 返回 `ErrInvalid`。动态 `Wait` 遇到这些错误立即停止，不等待策略变更。配置发布与配置源轮询由应用负责，SDK 不启动轮询 goroutine。
 - `Prune` 可以清理过期债务，但绝不删除配置/版本。需规划配置名称基数；删除配置会丢失版本防护。所有动态发布都应走 SDK/版本检查脚本，不能裸 SET。
-- `NewStatic` / `NewStaticWithOptions` 要求 Revision=0 固定策略。一旦后端存在对应配置，该名称的新静态准入会返回 `ErrPolicyMismatch`，不能绕过动态策略。不能将带版本的 Policy 传给静态构造函数，应使用动态名称/cost 准入。
-- PostgreSQL 必须在新版请求进程接流量前显式 `Migrate` 新增策略表，**静态流量也需要**。激活动态策略前，再确保**所有写入进程**已升级，不能混跑旧写入程序。配置更新与准入正常串行；耗时过长的 Lua 仍会阻塞其他 Redis 命令。
-- 传输/提交异常可能导致发布结果不确定；SDK 不自动重试，可显式重试**同一版本/策略**以收敛。动态 `Driver.Admit(Admission)` 是必需接口，`QuotaDriver` 负责发布配置；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 支持调用方策略。不支持的可选能力返回 `ErrUnsupported`，不修改状态。
+- PostgreSQL 必须在新版请求进程接流量前显式 `Migrate`。安装策略前必须退役旧静态写入者或停止其静态路径；迁移保留旧债务和历史回执，并不会让旧写入程序自动兼容。
+- 传输/提交异常可能导致发布结果不确定；SDK 不自动重试，可显式重试**同一版本/策略**以收敛。`Driver.Admit(ctx, Admission) (Decision, error)` 是必需接口，`QuotaDriver` 负责发布配置；不支持的可选能力返回 `ErrUnsupported`，不修改状态。
 
 可运行 SDK 示例：[管理型准入](driver/redis/examples/managed/main.go)。
 
 ## 阻塞等待准入
 
-`Limiter.Wait(ctx, charges...) error` 和 `StaticLimiter.Wait(ctx, charges...) error`
-均先立即尝试，仅在有效的普通容量拒绝后按建议的 `RetryAfter` 等待。
-动态 `Wait` 在派发前只复制一次调用者的名称/cost Charge 切片，每次尝试都原子读取后端
-最新策略，不快照策略；`New` 仍构造动态 `Limiter`。静态 `Wait` 根据独立构造时固定的
-策略快照并校验 Charge。
+`Limiter.Wait(ctx, charges...) error` 先立即尝试，仅在有效的普通容量拒绝后按建议的
+`RetryAfter` 等待。派发前只复制一次调用者的名称/cost Charge 切片，每次尝试都原子读取
+后端最新策略，不快照策略。
 
 ```go
 // limiter 和 charge 沿用上方动态示例，对应策略已发布。
@@ -235,20 +194,19 @@ if err := limiter.Wait(waitCtx, charges...); err != nil {
     return err
 }
 // 已成功扣减一次额度，执行本次业务尝试。
-// 独立 StaticLimiter 同样支持 static.Wait(waitCtx, charges...)。
 ```
 
-返回 nil 表示准入且扣减成功，业务失败不会退款。两次尝试之间取消为 `NotCharged`；后端调用期间取消保留该次调用的扣减结果及不确定性。若确认已成功扣减，即使同时发生取消也返回 nil。任何错误都会结束等待，包括 `ErrPaused`、`ErrPolicyMissing`、`ErrInvalid`（例如新 Burst 小于 Cost）、传输错误（即使为 `NotCharged`）、`Unknown`、不支持的能力和无效 Driver 结果。可通过 `errors.Is` 和 `OutcomeOf` 判断错误；动态调用的 `Error.Op` 为 `wait`，静态调用为 `wait_static`。
+返回 nil 表示准入且扣减成功，业务失败不会退款。两次尝试之间取消为 `NotCharged`；后端调用期间取消保留该次调用的扣减结果及不确定性。若确认已成功扣减，即使同时发生取消也返回 nil。任何错误都会结束等待，包括 `ErrPaused`、`ErrPolicyMissing`、`ErrInvalid`（例如新 Burst 小于 Cost）、传输错误（即使为 `NotCharged`）、`Unknown`、不支持的能力和无效 Driver 结果。可通过 `errors.Is` 和 `OutcomeOf` 判断错误；`Error.Op` 为 `wait`。
 
-两条路径在调用方 goroutine 中共用私有等待循环，休眠期间不持有后端锁或连接，不增加队列、worker 或后台 goroutine。策略更新不会主动唤醒休眠者：先前的 `RetryAfter` 可能延迟使用放宽后的策略。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
+Wait 在调用方 goroutine 中使用私有等待循环，休眠期间不持有后端锁或连接，不增加队列、worker 或后台 goroutine。策略更新不会主动唤醒休眠者：先前的 `RetryAfter` 可能延迟使用放宽后的策略。`RetryAfter` 不预留容量，其他调用者可能持续抢先，因此不保证 FIFO 或免于饥饿。请用 context deadline 限制等待时长。
 
 ## Pre-v1 破坏性移除
 
 准入不具备幂等性。已移除 `AllowOnce`、`Lookup`、`Receipt`、`LookupRequest`、
-准入 ID/Retention/Fingerprint 及 `Event.Replayed`。两种 Limiter 均提供
-`Allow(ctx, ...Charge) (Decision, error)` 与 `Wait(ctx, ...Charge) error`；
-只有动态 Limiter 提供 `UpdateQuotas`。`Driver.Admit` 与 `StaticDriver.AdmitStatic`
-均返回 `(Decision, error)`。不确定写入后没有结果恢复接口：**不要盲目重试 Unknown**。
+准入 ID/Retention/Fingerprint 及 `Event.Replayed`。唯一的 Limiter 提供
+`Allow(ctx, ...Charge) (Decision, error)`、`Wait(ctx, ...Charge) error` 和 `UpdateQuotas`。
+`Driver.Admit(ctx, Admission)` 返回 `(Decision, error)`。静态构造函数、Limiter、Driver
+和 Admission 接口均已移除，不保留兼容别名。不确定写入后没有结果恢复接口：**不要盲目重试 Unknown**。
 本库只负责速率准入，不承担计费、退款、业务执行、队列或 worker 所有权。
 
 升级不会自动删除历史回执存储。旧 Redis attempt key 和 PostgreSQL admissions
@@ -267,13 +225,13 @@ if err := limiter.Wait(waitCtx, charges...); err != nil {
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查静态规则。`NewWithOptions` 和 `NewStaticWithOptions` 接受同步 `Observer`，每次动态或静态准入触发一次；构造函数和 `UpdateQuotas` 不触发事件。操作名为 `allow`、`wait`、`allow_static`、`wait_static`。Wait 为整个调用产生一次事件，不另发内部尝试事件。事件包含数量、耗时、结果、等待时间和错误，不暴露原始额度名字段；错误可能包含标识，不可用作指标标签。回调须快速、并发安全；panic 向外传播。
+`Validate(rules...)` 可离线检查数学规则。`NewWithOptions` 接受同步 `Observer`，每次准入触发一次；构造函数和 `UpdateQuotas` 不触发事件。操作名为 `allow`、`wait`。Wait 为整个调用产生一次事件，不另发内部尝试事件。事件包含数量、耗时、结果、等待时间和错误，不暴露原始额度名字段；错误可能包含标识，不可用作指标标签。回调须快速、并发安全；panic 向外传播。
 
 ## 额度与运行契约
 
 - `Rate / Period` 是恢复速度；`Burst` 是总瞬时容量，不是额外容量。`0 < Cost <= Burst`；Period 和突发容量完全恢复的时间均不超过 24 小时。发射间隔向上取整到微秒，极高速率的有效速度会保守降低。
 - GCRA 约束速率与突发包络，不是精确的固定/滑动分钟计数器。需要明确建模供应商规则；已知输入 token 不控制输出 TPM；字符数、字节数和 SSE chunk 数不等于 token 数。
-- 静态策略（Revision=0）的身份为有效间隔和 Burst；活跃状态策略变化返回 `ErrPolicyMismatch`。动态策略通过 `UpdateQuotas` 显式管理，还要求匹配永久保留的 Revision。
+- 策略必须通过 `UpdateQuotas` 显式发布，Revision 必须为正数。
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
 - SDK 脚本命令通过 `NoRetry` 禁止不确定重放，无需禁用客户端重试；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。

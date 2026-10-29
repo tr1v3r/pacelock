@@ -142,10 +142,6 @@ func update(q ...pacelock.Quota) pacelock.QuotaUpdate {
 func managed(cost int64) pacelock.Admission {
 	return pacelock.Admission{Scope: testScope, Charges: []pacelock.Charge{{Name: "requests", Cost: cost}}}
 }
-func static() pacelock.StaticAdmission {
-	q := quota(0, 1, 3)
-	return pacelock.StaticAdmission{Scope: testScope, Rules: []pacelock.Rule{{Name: q.Name, Policy: q.Policy, Cost: 1}}}
-}
 func policyWrite(t *testing.T, want pacelock.QuotaState) sqlStep {
 	return sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies", check: func(a []driver.NamedValue) {
 		got := pacelock.QuotaState{Interval: a[2].Value.(int64), Burst: a[3].Value.(int64), Revision: a[4].Value.(int64)}
@@ -245,6 +241,7 @@ func TestManagedAdmissionUsesCurrentPolicyAndOriginalDebt(t *testing.T) {
 		allowed bool
 	}{
 		{"new", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 2}, pacelock.QuotaState{}, true},
+		{"legacy tuple-equivalent debt", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}, pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000999}, true},
 		{"rate changed", pacelock.QuotaState{Interval: 500000, Burst: 3, Revision: 9}, pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 1000000}, true},
 		{"shrink preserves debt", pacelock.QuotaState{Interval: 1000000, Burst: 1, Revision: 9}, pacelock.QuotaState{TAT: testNow + 3000000, Interval: 1000000, Burst: 3, ExpiresAt: testNow + 3000000}, false},
 		{"idle", pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 9}, pacelock.QuotaState{TAT: testNow - 1000, Interval: 1000000, Burst: 3, ExpiresAt: testNow - 1000}, true},
@@ -287,39 +284,14 @@ func TestManagedAdmissionFailuresDoNotWrite(t *testing.T) {
 		})
 	}
 }
-func TestAdmissionOperationNames(t *testing.T) {
-	for _, dynamic := range []bool{false, true} {
-		op := "allow_static"
-		if dynamic {
-			op = "allow"
-		}
-		t.Run(op, func(t *testing.T) {
-			d := scripted(t, nil)
-			var err error
-			if dynamic {
-				_, err = d.Admit(context.Background(), pacelock.Admission{Scope: testScope})
-			} else {
-				_, err = d.AdmitStatic(context.Background(), pacelock.StaticAdmission{Scope: testScope})
-			}
-			var detail *pacelock.Error
-			if !errors.Is(err, pacelock.ErrInvalid) || !errors.As(err, &detail) || detail.Op != op || detail.Outcome != pacelock.NotCharged {
-				t.Fatalf("got %v, want %s / NotCharged", err, op)
-			}
-		})
+func TestAdmissionOperationName(t *testing.T) {
+	_, err := scripted(t, nil).Admit(context.Background(), pacelock.Admission{Scope: testScope})
+	var detail *pacelock.Error
+	if !errors.Is(err, pacelock.ErrInvalid) || !errors.As(err, &detail) || detail.Op != "allow" || detail.Outcome != pacelock.NotCharged {
+		t.Fatalf("got %v, want allow / NotCharged", err)
 	}
 }
 
-func TestStaticCannotBypassPolicy(t *testing.T) {
-	a := static()
-	steps := append(lockedSteps(), policyRead(pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}), sqlStep{kind: "rollback"})
-	if _, err := scripted(t, steps).AdmitStatic(context.Background(), a); !errors.Is(err, pacelock.ErrPolicyMismatch) {
-		t.Fatal(err)
-	}
-	a.Rules[0].Policy.Revision = 1
-	if _, err := scripted(t, nil).AdmitStatic(context.Background(), a); !errors.Is(err, pacelock.ErrInvalid) {
-		t.Fatal(err)
-	}
-}
 func TestManagedAdmissionCommitAccounting(t *testing.T) {
 	for _, commitFails := range []bool{false, true} {
 		t.Run(fmt.Sprint(commitFails), func(t *testing.T) {
@@ -344,12 +316,14 @@ func TestManagedAdmissionCommitAccounting(t *testing.T) {
 	}
 }
 
-func TestStaticAdmissionCommitUnknown(t *testing.T) {
+func TestDeniedAdmissionCommitUnknown(t *testing.T) {
 	failure := errors.New("lost commit response")
-	steps := append(lockedSteps(), policyRead(pacelock.QuotaState{}), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "commit", err: failure})
-	_, err := scripted(t, steps).AdmitStatic(context.Background(), static())
-	if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.Unknown {
-		t.Fatalf("got %v", err)
+	policy := pacelock.QuotaState{Interval: 1000000, Burst: 1, Revision: 1}
+	debt := pacelock.QuotaState{TAT: testNow + 1000000, Interval: 1000000, Burst: 1, ExpiresAt: testNow + 1000000}
+	steps := append(lockedSteps(), policyRead(policy), debtRead(debt), sqlStep{kind: "commit", err: failure})
+	d, err := scripted(t, steps).Admit(context.Background(), managed(1))
+	if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.Unknown || d.Allowed {
+		t.Fatalf("got %+v %v", d, err)
 	}
 }
 
@@ -392,28 +366,30 @@ func TestMigrateAddsSeparatePolicyTable(t *testing.T) {
 }
 
 func TestAdmissionWriteFailureRollsBack(t *testing.T) {
-	for _, dynamic := range []bool{false, true} {
-		t.Run(fmt.Sprint(dynamic), func(t *testing.T) {
-			failure := errors.New("second debt write failed")
-			policy := pacelock.QuotaState{}
-			if dynamic {
-				policy = pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}
+	failure := errors.New("second debt write failed")
+	policy := pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}
+	steps := append(lockedSteps(), policyRead(policy), debtRead(pacelock.QuotaState{}), policyRead(policy), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas", err: failure}, sqlStep{kind: "rollback"})
+	a := managed(1)
+	a.Charges = append(a.Charges, pacelock.Charge{Name: "other", Cost: 1})
+	_, err := scripted(t, steps).Admit(context.Background(), a)
+	if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestAdmissionBackendFailuresRollBack(t *testing.T) {
+	policy := pacelock.QuotaState{Interval: 1000000, Burst: 3, Revision: 1}
+	base := append(lockedSteps(), policyRead(policy), debtRead(pacelock.QuotaState{}))
+	for i := range base {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			failure := errors.New("backend failed")
+			steps := append([]sqlStep(nil), base[:i+1]...)
+			steps[i].err = failure
+			if i > 0 {
+				steps = append(steps, sqlStep{kind: "rollback"})
 			}
-			steps := append(lockedSteps(), policyRead(policy), debtRead(pacelock.QuotaState{}), policyRead(policy), debtRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas"}, sqlStep{kind: "exec", contains: "INSERT INTO pacelock_quotas", err: failure}, sqlStep{kind: "rollback"})
-			d := scripted(t, steps)
-			var err error
-			if dynamic {
-				a := managed(1)
-				a.Charges = append(a.Charges, pacelock.Charge{Name: "other", Cost: 1})
-				_, err = d.Admit(context.Background(), a)
-			} else {
-				a := static()
-				other := a.Rules[0]
-				other.Name = "other"
-				a.Rules = append(a.Rules, other)
-				_, err = d.AdmitStatic(context.Background(), a)
-			}
-			if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
+			_, err := scripted(t, steps).Admit(context.Background(), managed(1))
+			if !errors.Is(err, failure) || !errors.Is(err, pacelock.ErrBackend) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 				t.Fatalf("got %v", err)
 			}
 		})

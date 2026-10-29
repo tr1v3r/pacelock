@@ -46,22 +46,19 @@ func pruneManagedScope(t *testing.T, b backend, domain string) {
 	}
 }
 
-// Default admission must never infer authority from legacy static quota debt.
+// Admission fails closed until policies are explicitly published.
 func TestDefaultDynamicFailClosed(t *testing.T) {
 	for _, b := range backends(t) {
 		t.Run(b.name, func(t *testing.T) {
 			ctx := context.Background()
 			l := limiter(t, b, 0, freshDomain())
 			c := managedCharge()
-			mustAllow(t, l, rule(c.Name, 3, 1))
 			if _, err := l.Allow(ctx, c); !errors.Is(err, pacelock.ErrPolicyMissing) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
-				t.Fatalf("default admission fell back to static: %v", err)
+				t.Fatalf("unpublished policy admitted: %v", err)
 			}
-			// The failed default call left the legacy static remainder untouched.
-			mustAllow(t, l, rule(c.Name, 3, 2))
-			updateQuota(t, l, dynamicQuota(1, 0, 3))
-			if _, err := l.allowRules(ctx, rule(c.Name, 3, 1)); !errors.Is(err, pacelock.ErrPolicyMismatch) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
-				t.Fatalf("static bypass: %v", err)
+			updateQuota(t, l, dynamicQuota(1, 1, 3))
+			if d, err := l.Allow(ctx, pacelock.Charge{Name: c.Name, Cost: 3}); err != nil || !d.Allowed {
+				t.Fatalf("missing policy call charged debt: %+v %v", d, err)
 			}
 		})
 	}
@@ -122,10 +119,6 @@ func TestDynamicIdlePruneAndAtomicUpdate(t *testing.T) {
 			if _, err := l.Allow(ctx, c); !errors.Is(err, pacelock.ErrPaused) {
 				t.Fatal("prune lost pause", err)
 			}
-			static := pacelock.Rule{Name: c.Name, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: 2}, Cost: 1}
-			if _, err := l.allowRules(ctx, static); !errors.Is(err, pacelock.ErrPolicyMismatch) {
-				t.Fatal("static bypass", err)
-			}
 			other := dynamicQuota(3, 1, 2)
 			other.Name = "other"
 			updateQuota(t, l, other)
@@ -163,28 +156,6 @@ func TestDynamicDebtExpiryDoesNotDeletePolicy(t *testing.T) {
 			}
 			if d, err := l.Allow(ctx, c); err != nil || !d.Allowed {
 				t.Fatal("lost config", d, err)
-			}
-		})
-	}
-}
-
-func TestDynamicStaticUpgrade(t *testing.T) {
-	for _, b := range backends(t) {
-		t.Run(b.name, func(t *testing.T) {
-			ctx := context.Background()
-			l := limiter(t, b, 0, freshDomain())
-			c := managedCharge()
-			r := pacelock.Rule{Name: c.Name, Cost: 1, Policy: pacelock.Policy{Rate: 1, Period: time.Minute, Burst: 1}}
-			saved, err := l.allowRules(ctx, r)
-			if err != nil || !saved.Allowed {
-				t.Fatal(saved, err)
-			}
-			updateQuota(t, l, dynamicQuota(1, 1, 1))
-			if d, err := l.Allow(ctx, c); err != nil || d.Allowed {
-				t.Fatal("upgrade forgot debt", d, err)
-			}
-			if _, err = l.allowRules(ctx, r); !errors.Is(err, pacelock.ErrPolicyMismatch) {
-				t.Fatal("static bypass", err)
 			}
 		})
 	}

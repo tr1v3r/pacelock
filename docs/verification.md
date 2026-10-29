@@ -1,4 +1,4 @@
-> Historical archive: the content below includes removed idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic/static admission exposes Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../README.md).
+> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../README.md).
 
 > Historical verification below predates the Redis MSET/logical-expiry protocol.
 > The current Redis suite replaces partial-write/Pending creation with atomic-commit

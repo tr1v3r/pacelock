@@ -51,12 +51,13 @@ func TestRedisWeightedAndAtomic(t *testing.T) {
 	ctx := context.Background()
 	rpm := rule("rpm", 2, 1)
 	tokens := rule("tokens", 5, 4)
-	d, err := l.Allow(ctx, rpm, tokens)
+	publishRules(t, l, rpm, tokens)
+	d, err := l.admitRules(ctx, rpm, tokens)
 	if err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
 	before := c.Get(ctx, l.key("rpm")).Val()
-	d, err = l.Allow(ctx, rpm, tokens)
+	d, err = l.admitRules(ctx, rpm, tokens)
 	if err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) != 1 || d.Limited[0] != "tokens" {
 		t.Fatalf("%+v %v", d, err)
 	}
@@ -64,10 +65,10 @@ func TestRedisWeightedAndAtomic(t *testing.T) {
 		t.Fatal("denial partially charged RPM")
 	}
 	tokens.Cost = 1
-	if d, err = l.Allow(ctx, rpm, tokens); err != nil || !d.Allowed {
+	if d, err = l.admitRules(ctx, rpm, tokens); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
-	d, err = l.Allow(ctx, rpm, tokens)
+	d, err = l.admitRules(ctx, rpm, tokens)
 	if err != nil || d.Allowed || len(d.Limited) != 2 {
 		t.Fatalf("%+v %v", d, err)
 	}
@@ -82,6 +83,7 @@ func TestRedisConcurrentInstances(t *testing.T) {
 	second := redis.NewClient(&redis.Options{Addr: c.Options().Addr, MaxRetries: -1})
 	defer second.Close()
 	l2 := &Limiter{client: second, prefix: l.prefix}
+	publishRules(t, l, rule("shared", 20, 2))
 	var accepted atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
@@ -92,7 +94,7 @@ func TestRedisConcurrentInstances(t *testing.T) {
 			if i%2 == 0 {
 				current = l2
 			}
-			d, err := current.Allow(context.Background(), rule("shared", 20, 2))
+			d, err := current.admitRules(context.Background(), rule("shared", 20, 2))
 			if err != nil {
 				t.Error(err)
 				return
@@ -112,32 +114,17 @@ func TestRedisPolicyAndCorruptionDoNotPartiallyWrite(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("existing", 3, 1)
-	if _, err := l.Allow(ctx, r); err != nil {
+	publishRules(t, l, r, rule("fresh", 1, 1))
+	if _, err := l.admitRules(ctx, r); err != nil {
 		t.Fatal(err)
 	}
 	before := c.Get(ctx, l.key(r.Name)).Val()
-	for _, field := range []string{"step", "burst"} {
-		t.Run(field, func(t *testing.T) {
-			changed := r
-			if field == "step" {
-				changed.Policy.Period = 2 * time.Hour
-			} else {
-				changed.Policy.Burst = 4
-			}
-			if _, err := l.Allow(ctx, rule("fresh", 1, 1), changed); !errors.Is(err, ErrPolicyMismatch) || OutcomeOf(err) != NotCharged {
-				t.Fatalf("err=%v", err)
-			}
-			if c.Exists(ctx, l.key("fresh")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != before {
-				t.Fatal("policy error mutated quota state")
-			}
-		})
-	}
 	for _, raw := range []string{"broken", "Q2|1:1:1", "Q2|" + before} {
 		t.Run(raw, func(t *testing.T) {
 			if err := c.Set(ctx, l.key(r.Name), raw, 0).Err(); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
+			if _, err := l.admitRules(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
 				t.Fatalf("err=%v", err)
 			}
 			if c.Exists(ctx, l.key("fresh")).Val() != 0 || c.Get(ctx, l.key(r.Name)).Val() != raw {
@@ -152,18 +139,21 @@ func TestRedisRefillAndExpiry(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := Rule{Name: "short", Policy: Policy{Rate: 1, Period: 200 * time.Millisecond, Burst: 1}, Cost: 1}
-	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
+	publishRules(t, l, r)
+	if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
-	if d, err := l.Allow(ctx, r); err != nil || d.Allowed || d.RetryAfter <= 0 || d.RetryAfter > r.Policy.Period {
+	if d, err := l.admitRules(ctx, r); err != nil || d.Allowed || d.RetryAfter <= 0 || d.RetryAfter > r.Policy.Period {
 		t.Fatalf("%+v %v", d, err)
 	}
 	time.Sleep(220 * time.Millisecond)
 	if c.Exists(ctx, l.key(r.Name)).Val() != 1 {
 		t.Fatal("test must retain physically expired logical state")
 	}
-	r.Policy.Burst = 2 // A logically expired policy may change without physical cleanup.
-	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
+	r.Policy.Burst = 2
+	r.Policy.Revision = 2
+	publishRules(t, l, r)
+	if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
 
@@ -173,17 +163,19 @@ func TestRedisIndependentDomainsAndCanceledCall(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("quota", 1, 1)
-	if _, err := l.Allow(ctx, r); err != nil {
+	publishRules(t, l, r)
+	if _, err := l.admitRules(ctx, r); err != nil {
 		t.Fatal(err)
 	}
 	other, _ := New(c, "another-app", l.prefix)
-	t.Cleanup(func() { c.Del(ctx, other.key(r.Name)) })
-	if d, err := other.Allow(ctx, r); err != nil || !d.Allowed {
+	t.Cleanup(func() { c.Del(ctx, other.key(r.Name), other.policyKey(r.Name)) })
+	publishRules(t, other, r)
+	if d, err := other.admitRules(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("%+v %v", d, err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := l.Allow(canceled, rule("untouched", 1, 1)); !errors.Is(err, context.Canceled) {
+	if _, err := l.admitRules(canceled, rule("untouched", 1, 1)); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if c.Exists(ctx, l.key("untouched")).Val() != 0 {

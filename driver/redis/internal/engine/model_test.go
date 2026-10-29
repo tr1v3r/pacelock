@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -35,20 +34,20 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 				if err := c.Set(ctx, l.key(r.Name), before, 0).Err(); err != nil {
 					t.Fatal(err)
 				}
+				r.Policy.Revision = int64(1 + (offset+1)*3)
+				if policy == "step" {
+					r.Policy.Revision++
+				}
+				if policy == "burst" {
+					r.Policy.Revision += 2
+				}
+				publishRules(t, l, r)
 				keys, args, err := l.prepare([]Rule{r})
 				if err != nil {
 					t.Fatal(err)
 				}
 				values, err := fixedClock.Run(ctx, c, keys, args...).Int64Slice()
-				if offset > 0 && policy != "same" {
-					if err == nil || !errors.Is(scriptFailure("allow", err), ErrPolicyMismatch) {
-						t.Fatalf("active policy change: %v", err)
-					}
-					if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != before {
-						t.Fatalf("active policy mismatch mutated state: %q", raw)
-					}
-					return
-				}
+
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -61,7 +60,7 @@ func TestRedisPlainQuotaExpiryBoundaries(t *testing.T) {
 					base += offset
 				}
 				step := r.Policy.Period.Microseconds()
-				want := fmt.Sprintf("%d:%d:%d", base+step, step, r.Policy.Burst)
+				want := fmt.Sprintf("D3|%d", base+step)
 				if raw := c.Get(ctx, l.key(r.Name)).Val(); raw != want {
 					t.Fatalf("quota=%q want=%q", raw, want)
 				}
@@ -104,7 +103,7 @@ local function admit()
 end
 local decision = admit()
 local states, expiries = {}, {}
-for i = 1, #KEYS do
+for i = 1, #ARGV do
     states[i] = nativeRedis.call('GET', KEYS[i])
     expiries[i] = nativeRedis.call('PEXPIRETIME', KEYS[i])
 end
@@ -159,6 +158,10 @@ return {decision, states, expiries, writes}
 				}
 			}
 		}
+		for i := range rules {
+			rules[i].Policy.Revision = int64(iteration + 1)
+		}
+		publishRules(t, l, rules...)
 		keys, args, err := l.prepare(rules)
 		if err != nil {
 			t.Fatal(err)
@@ -190,7 +193,7 @@ return {decision, states, expiries, writes}
 			state, stateOK := states[i].(string)
 			expected := before[i]
 			if want.Allowed {
-				expected = fmt.Sprintf("%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst)
+				expected = fmt.Sprintf("D3|%d", candidates[i])
 			}
 			if !stateOK || state != expected {
 				t.Fatalf("iteration=%d quota=%s state=%v want=%q (missing state is never valid inside the admission script)", iteration, r.Name, states[i], expected)
@@ -202,8 +205,8 @@ return {decision, states, expiries, writes}
 		expectedWrites := []interface{}{}
 		if want.Allowed {
 			command := []interface{}{"MSET"}
-			for i, r := range rules {
-				command = append(command, keys[i], fmt.Sprintf("%d:%d:%d", candidates[i], r.Policy.Period.Microseconds(), r.Policy.Burst))
+			for i := range rules {
+				command = append(command, keys[i], fmt.Sprintf("D3|%d", candidates[i]))
 			}
 			expectedWrites = append(expectedWrites, command)
 		}

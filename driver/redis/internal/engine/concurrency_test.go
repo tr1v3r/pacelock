@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -145,7 +144,7 @@ func requireAllowed(t *testing.T, l *Limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if d, err := l.Allow(ctx, rules...); err != nil || !d.Allowed {
+	if d, err := l.admitRules(ctx, rules...); err != nil || !d.Allowed {
 		t.Fatalf("want allowed: %+v %v", d, err)
 	}
 }
@@ -154,7 +153,7 @@ func requireDenied(t *testing.T, l *Limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if d, err := l.Allow(ctx, rules...); err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) == 0 {
+	if d, err := l.admitRules(ctx, rules...); err != nil || d.Allowed || d.RetryAfter <= 0 || len(d.Limited) == 0 {
 		t.Fatalf("want denied: %+v %v", d, err)
 	}
 }
@@ -195,7 +194,7 @@ func TestRedisConcurrency(t *testing.T) {
 				{"repeated_workers", testContentionWorkers},
 				{"overlapping_quotas", testContentionOverlapping},
 				{"isolation", testContentionIsolation},
-				{"policy_race", testContentionPolicy},
+				{"policy_updates", testContentionPolicyUpdates},
 				{"invalid_and_canceled", testContentionCancellation},
 				{"malformed_quotas", testContentionBadState},
 				{"lost_responses", testContentionLostResponses},
@@ -224,6 +223,7 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 					cost := int64(j%3 + 1)
 					rules[j] = contentionRule(fmt.Sprintf("q%d", j), int64(37+j%3)*cost, cost)
 				}
+				publishRules(t, l, rules...)
 				var admitted atomic.Int64
 				contentionWave(t, n, func(ctx context.Context, i int) {
 					// Different argument orders must not affect atomic admission.
@@ -233,7 +233,7 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 							r[a], r[b] = r[b], r[a]
 						}
 					}
-					d, err := f.caller(l, i).Allow(ctx, r...)
+					d, err := f.caller(l, i).admitRules(ctx, r...)
 					if err != nil {
 						t.Error(err)
 						return
@@ -274,13 +274,14 @@ func testContentionBurst(t *testing.T, f *contentionFixture) {
 func testContentionCosts(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
 	r := contentionRule("units", 1000, 1)
+	publishRules(t, l, r)
 	requireAllowed(t, l, r) // Establish a common TAT before competing weighted calls.
 	var charged atomic.Int64
 	charged.Store(1)
 	contentionWave(t, 500, func(ctx context.Context, i int) {
 		r := r
 		r.Cost = int64(i%7 + 1)
-		d, err := f.caller(l, i).Allow(ctx, r)
+		d, err := f.caller(l, i).admitRules(ctx, r)
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {
@@ -301,10 +302,14 @@ func testContentionCosts(t *testing.T, f *contentionFixture) {
 
 func testContentionOverlapping(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
+	publishRules(t, l, contentionRule("global", 122, 2))
+	for i := 0; i < 4; i++ {
+		publishRules(t, l, contentionRule(fmt.Sprintf("tenant%d", i), 17, 1))
+	}
 	var admitted [4]atomic.Int64
 	contentionWave(t, 400, func(ctx context.Context, i int) {
 		tenant := i % 4
-		d, err := f.caller(l, i).Allow(ctx, contentionRule("global", 122, 2), contentionRule(fmt.Sprintf("tenant%d", tenant), 17, 1))
+		d, err := f.caller(l, i).admitRules(ctx, contentionRule("global", 122, 2), contentionRule(fmt.Sprintf("tenant%d", tenant), 17, 1))
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {
@@ -348,12 +353,13 @@ func testContentionIsolation(t *testing.T, f *contentionFixture) {
 			t.Fatal(err)
 		}
 		limiters[i] = l
+		publishRules(t, l, contentionRule("q", 1, 1))
 		f.cleanup(t, l)
 	}
 	var originals [32]atomic.Int64
 	contentionWave(t, 512, func(ctx context.Context, i int) {
 		domain := i % len(limiters)
-		d, err := f.caller(limiters[domain], i).Allow(ctx, contentionRule("q", 1, 1))
+		d, err := f.caller(limiters[domain], i).admitRules(ctx, contentionRule("q", 1, 1))
 		if err != nil {
 			t.Errorf("domain %d: %+v %v", domain, d, err)
 		} else if d.Allowed {
@@ -368,30 +374,6 @@ func testContentionIsolation(t *testing.T, f *contentionFixture) {
 	}
 }
 
-func testContentionPolicy(t *testing.T, f *contentionFixture) {
-	l := f.limiter(t)
-	var mismatches, admitted, winningBurst atomic.Int64
-	contentionWave(t, 200, func(ctx context.Context, i int) {
-		burst := int64(10 * (i%2 + 1))
-		d, err := f.caller(l, i).Allow(ctx, contentionRule("q", burst, 1), contentionRule(fmt.Sprintf("side%d", i), 1, 1))
-		if errors.Is(err, ErrPolicyMismatch) && OutcomeOf(err) == NotCharged {
-			mismatches.Add(1)
-		} else if err != nil {
-			t.Error(err)
-		} else if d.Allowed {
-			admitted.Add(1)
-			winningBurst.Store(burst)
-			return
-		}
-		if n, err := f.clients[0].Exists(ctx, l.key(fmt.Sprintf("side%d", i))).Result(); err != nil || n != 0 {
-			t.Errorf("failed request wrote side quota: %d %v", n, err)
-		}
-	})
-	if mismatches.Load() != 100 || admitted.Load() != winningBurst.Load() || admitted.Load() == 0 {
-		t.Fatalf("mismatches=%d admitted=%d burst=%d", mismatches.Load(), admitted.Load(), winningBurst.Load())
-	}
-}
-
 func testContentionWorkers(t *testing.T, f *contentionFixture) {
 	// Keep each worker active for multiple sequential calls. Half hit one hot
 	// domain; half spread over eight other domains. All workers contend
@@ -399,6 +381,7 @@ func testContentionWorkers(t *testing.T, f *contentionFixture) {
 	limiters := make([]*Limiter, 9)
 	for i := range limiters {
 		limiters[i] = f.limiter(t)
+		publishRules(t, limiters[i], contentionRule("q", 200, 2))
 	}
 	var admitted [9]atomic.Int64
 	contentionWave(t, 64, func(ctx context.Context, worker int) {
@@ -409,7 +392,7 @@ func testContentionWorkers(t *testing.T, f *contentionFixture) {
 		current := f.caller(limiters[domain], worker)
 		for iteration := 0; iteration < 40; iteration++ {
 			r := contentionRule("q", 200, 2)
-			d, err := current.Allow(ctx, r)
+			d, err := current.admitRules(ctx, r)
 			if err != nil {
 				t.Error(err)
 				return

@@ -36,16 +36,17 @@ func TestRedisLostResponseAccounting(t *testing.T) {
 	wrapped := &lostResponse{Scripter: c}
 	broken := &Limiter{client: wrapped, prefix: l.prefix}
 	r := rule("q", 2, 1)
-	if _, err := broken.Allow(ctx, r); !errors.Is(err, io.ErrUnexpectedEOF) || OutcomeOf(err) != Unknown {
+	publishRules(t, l, r)
+	if _, err := broken.admitRules(ctx, r); !errors.Is(err, io.ErrUnexpectedEOF) || OutcomeOf(err) != Unknown {
 		t.Fatal(err)
 	}
 	if wrapped.calls != 1 {
 		t.Fatal("retried uncertain command")
 	}
-	if d, err := l.Allow(ctx, r); err != nil || !d.Allowed {
+	if d, err := l.admitRules(ctx, r); err != nil || !d.Allowed {
 		t.Fatalf("double charge: %+v %v", d, err)
 	}
-	if d, err := l.Allow(ctx, r); err != nil || d.Allowed {
+	if d, err := l.admitRules(ctx, r); err != nil || d.Allowed {
 		t.Fatalf("lost debit: %+v %v", d, err)
 	}
 }
@@ -65,13 +66,14 @@ func TestRedisMSETACLFailureIsUncharged(t *testing.T) {
 	defer restricted.Close()
 	limited := &Limiter{client: restricted, prefix: l.prefix}
 	rules := []Rule{rule("first", 2, 1), rule("second", 2, 1)}
-	if _, err := limited.Allow(ctx, rules...); err == nil || OutcomeOf(err) != NotCharged {
+	publishRules(t, l, rules...)
+	if _, err := limited.admitRules(ctx, rules...); err == nil || OutcomeOf(err) != NotCharged {
 		t.Fatalf("want rejected commit: %v", err)
 	}
 	if admin.Exists(ctx, l.key("first"), l.key("second")).Val() != 0 {
 		t.Fatal("rejected MSET partially committed")
 	}
-	if r, err := l.Allow(ctx, rules...); err != nil || !r.Allowed {
+	if r, err := l.admitRules(ctx, rules...); err != nil || !r.Allowed {
 		t.Fatalf("retry after known rejection: %+v %v", r, err)
 	}
 }
@@ -80,11 +82,12 @@ func TestRedisMalformedStates(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	r := rule("bad", 1, 1)
+	publishRules(t, l, r, rule("fresh", 1, 1))
 	for _, state := range []string{"broken", "1:0:1", "1:1:0", "9007199254740992:1:1", "1:86400000001:1"} {
 		if err := c.Set(ctx, l.key("bad"), state, time.Minute).Err(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := l.Allow(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
+		if _, err := l.admitRules(ctx, rule("fresh", 1, 1), r); !errors.Is(err, ErrState) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("%q: %v", state, err)
 		}
 		if c.Exists(ctx, l.key("fresh")).Val() != 0 {
@@ -93,7 +96,7 @@ func TestRedisMalformedStates(t *testing.T) {
 	}
 	c.Del(ctx, l.key("bad"))
 	c.LPush(ctx, l.key("bad"), "wrongtype")
-	if _, err := l.Allow(ctx, r); !errors.Is(err, ErrState) {
+	if _, err := l.admitRules(ctx, r); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 	c.Del(ctx, l.key("bad"))

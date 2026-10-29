@@ -15,6 +15,7 @@ import (
 
 func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
+	publishRules(t, l, contentionRule("q", 200, 1))
 	var mu sync.Mutex
 	events := make(map[string]int)
 	l.observer = func(_ context.Context, e Event) {
@@ -34,33 +35,33 @@ func testContentionCancellation(t *testing.T, f *contentionFixture) {
 		switch i % 6 {
 		case 0:
 			var d Decision
-			d, err = current.Allow(ctx, r)
+			d, err = current.admitRules(ctx, r)
 			if err == nil && d.Allowed {
 				allowed.Add(1)
 			}
 		case 1:
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
-			_, err = current.Allow(canceled, contentionRule("untouched", 1, 1))
+			_, err = current.admitRules(canceled, contentionRule("untouched", 1, 1))
 			want = context.Canceled
 		case 2:
 			expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 			defer cancel()
-			_, err = current.Allow(expired, r)
+			_, err = current.admitRules(expired, r)
 			want = context.DeadlineExceeded
 		case 3:
-			_, err = current.Allow(ctx, r, r)
+			_, err = current.admitRules(ctx, r, r)
 			want = ErrInvalid
 		case 4:
 			var d Decision
-			d, err = current.Allow(ctx, r)
+			d, err = current.admitRules(ctx, r)
 			if err == nil && d.Allowed {
 				allowed.Add(1)
 			}
 		case 5:
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
-			_, err = current.Allow(canceled, r)
+			_, err = current.admitRules(canceled, r)
 			want = context.Canceled
 		}
 		if want == nil {
@@ -74,7 +75,7 @@ func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	if allowed.Load() != 200 {
 		t.Fatalf("admitted=%d want 200", allowed.Load())
 	}
-	want := map[string]int{"allow_static/allowed": 200, "allow_static/error": 400}
+	want := map[string]int{"allow/allowed": 200, "allow/error": 400}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("observer events %v want %v", events, want)
 	}
@@ -94,6 +95,7 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			r := contentionRule("q", 10, 1)
+			publishRules(t, l, r, contentionRule("side", 10, 1))
 			requireAllowed(t, l, r)
 			before := quotaState(t, f, l, "q")
 			rules := []Rule{r, contentionRule("side", 10, 1)}
@@ -112,7 +114,7 @@ func testContentionBadState(t *testing.T, f *contentionFixture) {
 			}
 			contentionWave(t, 300, func(ctx context.Context, i int) {
 				current := f.caller(l, i)
-				_, err := current.Allow(ctx, rules...)
+				_, err := current.admitRules(ctx, rules...)
 				if !errors.Is(err, want) || OutcomeOf(err) != outcome {
 					t.Errorf("want %v/%s, got %v", want, outcome, err)
 				}
@@ -156,10 +158,11 @@ func testContentionLostResponses(t *testing.T, f *contentionFixture) {
 		t.Run(loss.name, func(t *testing.T) {
 			l := f.limiter(t)
 			r := contentionRule("q", 100, 1)
+			publishRules(t, l, r)
 			wrapped := &concurrentResponseLoss{Scripter: f.clients[0], loss: loss.err}
 			broken := &Limiter{client: wrapped, prefix: l.prefix}
 			contentionWave(t, 400, func(ctx context.Context, i int) {
-				_, err := broken.Allow(ctx, r)
+				_, err := broken.admitRules(ctx, r)
 				if !errors.Is(err, loss.err) || OutcomeOf(err) != Unknown {
 					t.Errorf("want unknown lost response, got %v", err)
 				}
@@ -177,9 +180,10 @@ func testContentionSmallPool(t *testing.T, f *contentionFixture) {
 	small := contentionClient(f.cluster, 1)
 	defer small.Close()
 	current := &Limiter{client: small, prefix: l.prefix}
+	publishRules(t, l, contentionRule("q", 73, 1), contentionRule("after", 1, 1))
 	var admitted atomic.Int64
 	contentionWave(t, 500, func(ctx context.Context, i int) {
-		d, err := current.Allow(ctx, contentionRule("q", 73, 1))
+		d, err := current.admitRules(ctx, contentionRule("q", 73, 1))
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {
@@ -208,10 +212,11 @@ func testContentionColdScripts(t *testing.T, f *contentionFixture) {
 		t.Fatal(err)
 	}
 	l := f.limiter(t)
+	publishRules(t, l, contentionRule("q", 1, 1))
 	var originals atomic.Int64
 	contentionWave(t, 300, func(ctx context.Context, i int) {
 		current := f.caller(l, i)
-		d, err := current.Allow(ctx, contentionRule("q", 1, 1))
+		d, err := current.admitRules(ctx, contentionRule("q", 1, 1))
 		if err != nil {
 			t.Errorf("cold script %+v %v", d, err)
 		} else if d.Allowed {
@@ -230,6 +235,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 		// With a fast real clock, don't assert an exact burst count: Redis service
 		// time can span replenishment. Bound accepted cost by server elapsed time.
 		r := Rule{Name: "q", Policy: Policy{Rate: 1, Period: 10 * time.Millisecond, Burst: 20}, Cost: 1}
+		publishRules(t, l, r)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		for wave := 0; wave < 3; wave++ {
@@ -239,7 +245,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 			}
 			var admitted atomic.Int64
 			contentionWave(t, 200, func(ctx context.Context, i int) {
-				d, err := f.caller(l, i).Allow(ctx, r)
+				d, err := f.caller(l, i).admitRules(ctx, r)
 				if err != nil {
 					t.Error(err)
 				} else if d.Allowed {
@@ -261,6 +267,7 @@ func testContentionRefill(t *testing.T, f *contentionFixture) {
 
 func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
+	publishRules(t, l, contentionRule("q", 1, 1))
 	small := contentionClient(f.cluster, 1)
 	defer small.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -308,7 +315,7 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	contentionWave(t, 100, func(parent context.Context, i int) {
 		deadline, cancel := context.WithTimeout(parent, 100*time.Millisecond)
 		defer cancel()
-		_, err := current.Allow(deadline, contentionRule("q", 1, 1))
+		_, err := current.admitRules(deadline, contentionRule("q", 1, 1))
 		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrBackend) || OutcomeOf(err) != Unknown {
 			t.Errorf("pool wait deadline: %v", err)
 		}
@@ -319,7 +326,7 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 		t.Fatalf("blocked pool wrote %d keys: %v", n, err)
 	}
 	release()
-	if d, err := current.Allow(ctx, contentionRule("q", 1, 1)); err != nil || !d.Allowed {
+	if d, err := current.admitRules(ctx, contentionRule("q", 1, 1)); err != nil || !d.Allowed {
 		t.Fatalf("pool did not recover: %+v %v", d, err)
 	}
 }

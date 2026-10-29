@@ -11,7 +11,7 @@ type Options struct {
 	Observer Observer
 }
 
-// Observer receives one synchronous event per dynamic or static Allow or Wait call.
+// Observer receives one synchronous event per Allow or Wait call.
 // Constructors and UpdateQuotas emit no event. The callback must be fast and
 // concurrency-safe.
 // Panics propagate; no background work is created.
@@ -20,7 +20,7 @@ type Observer func(context.Context, Event)
 // Event describes a call without exposing quota names as fields.
 // Err may contain identifiers and must not be used as a metric label.
 type Event struct {
-	// Operation is allow, wait, allow_static or wait_static.
+	// Operation is allow or wait.
 	// Each Wait emits one event for the whole call.
 	Operation string
 	// Duration excludes the observer callback execution time.

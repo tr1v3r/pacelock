@@ -34,20 +34,25 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Construct fixed policies once; the static limiter snapshots them and is
-	// safe for concurrent use. Construct another instance to change policies.
+	// Configuration may live in code; publish it explicitly before requests.
+	// Backend-authoritative execution lets rolling pods share the latest policy.
 	rpm := pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
-		Rate: 6, Period: time.Minute, Burst: 6,
+		Revision: 1, Rate: 6, Period: time.Minute, Burst: 6,
 	}}
 	tpm := pacelock.Quota{Name: "input-tpm", Policy: pacelock.Policy{
-		Rate: 1000, Period: time.Minute, Burst: 1000,
+		Revision: 1, Rate: 1000, Period: time.Minute, Burst: 1000,
 	}}
-	limiter, err := pacelock.NewStatic(driver, "llm-gateway", "provider-account-a", rpm, tpm)
+	limiter, err := pacelock.New(driver, "llm-gateway", "provider-account-a")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	ctx := context.Background()
+	// Revisions come from one authority, not per-pod counters. Handle stale
+	// publication explicitly; rollback uses old parameters at a higher revision.
+	if err := limiter.UpdateQuotas(ctx, rpm, tpm); err != nil {
+		log.Fatalf("publish policies (stale=%v): %v", errors.Is(err, pacelock.ErrPolicyMismatch), err)
+	}
 
 	// 1. Immediate admission: charge 1 request and 200 input tokens.
 	// Charges may select any nonempty subset, in any order.

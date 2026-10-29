@@ -38,26 +38,12 @@ the limiter's contract.
 
 Publish positive-revision policies with `UpdateQuotas`, then call
 `Allow(ctx, charges...)` or `Wait(ctx, charges...)`; no local binding or policy
-refresh is required. The explicit static alternative is standalone
-`NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it
-validates and copies fixed Revision-0 quotas without backend I/O. Both limiters
-accept public `Charge{Name, Cost}` values and expose `Wait(ctx, charges...) error`.
-`Rule` remains for low-level `StaticAdmission` and pure evaluation.
-The driver returns `Decision` directly from `Admit` and `AdmitStatic`.
-
-Each static call accepts any nonempty subset of fixed quotas as `...Charge`, each
-selected name exactly once with `0 < Cost <= Burst`; omitted quotas are neither
-checked nor charged. Selected charges are normalized to construction (binding)
-order. Separate
-calls are not atomic together. Empty calls, duplicate or unknown names and invalid
-costs fail locally with `ErrInvalid` / `NotCharged` before admission. Policies are
-validated/copied at construction, not carried in charges; policy changes require a
-new `StaticLimiter` and cannot bypass active backend policy/debt checks.
-`static.Wait(ctx, charges...)` snapshots charges and retries only ordinary denial;
-all errors stop waiting, including `Unknown`. A confirmed debit remains success
-even if cancellation races with its response. Waiting adds no refunds, queue or
-workers and emits one observation for the whole operation.
-See [policy and cost contracts](../../README.md#explicit-static-alternative-fixed-policies-and-costs).
+refresh is required. This is the only runtime admission path. The driver implements
+`Admit(ctx, Admission) (Decision, error)`; requests contain names and costs only.
+`Rule`, `Validate` and `Evaluate` are pure math helpers, not a runtime policy channel.
+Each call checks only its supplied unique quota names; include every applicable quota.
+Empty calls, duplicate names and invalid costs fail locally. Unknown backend names
+return `ErrPolicyMissing`. Separate calls are not atomic together.
 
 Concrete clients receive per-command NoRetry while retaining bounded MOVED/ASK
 redirects. Ring is unsupported. Custom Scripters/hooks/factories/proxies must
@@ -66,9 +52,9 @@ and policy keys. During Cluster resharding, mixed/missing
 keys can yield `TRYAGAIN`; this remains a conservative `Unknown` transport error,
 never an implicit replay. Retry/recovery decisions belong to the caller.
 
-## Default dynamic policies
+## Backend-managed dynamic policies
 
-Dynamic admission is the default. Publish positive, monotonically
+All admission is backend-managed. Publish positive, monotonically
 increasing revisions and `limiter.UpdateQuotas(ctx, quotas...)` (or the driver's
 `UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`). Each batch
 is atomic with admission, using one final MSET and the same NoRetry transport.
@@ -84,8 +70,7 @@ The data plane passes names and costs only: `limiter.Allow(ctx,
 pacelock.Charge{Name: "rpm", Cost: 1})`. The driver's mandatory `Admit(Admission)` operation resolves
 current backend policies in the admission Lua call; callers do not refresh bindings
 or send revisions. Missing configuration returns `ErrPolicyMissing` / `NotCharged`.
-Static constructors reject positive revisions locally; static admission against a
-configured quota returns `ErrPolicyMismatch`, preventing bypass even after idle/prune.
+There is no caller-policy override, including after idle periods or pruning.
 
 Managed `Rate=0` returns `ErrPaused` / `NotCharged` without debit,
 even when cost exceeds the paused burst. Otherwise over-burst cost returns `ErrInvalid`.
@@ -98,7 +83,7 @@ error stops, including pause, missing policy, a new Burst below Cost, transport
 errors even when `NotCharged`, `Unknown`, unsupported capabilities and invalid
 driver results. Cancellation between attempts is `NotCharged`; in-flight uncertainty
 is preserved, and confirmed success stays success despite cancellation. One
-`wait` observation covers the whole call; static Wait remains `wait_static`. Updates
+`wait` observation covers the whole call. Updates
 do not proactively wake sleepers, so an old RetryAfter may delay using relaxed policy.
 No queue, worker, background goroutine, fairness or refund is added. Use a context
 deadline; see [blocking admission](../../README.md#blocking-admission).
@@ -107,7 +92,7 @@ Configuration and debt are separate. The same-slot `policy:<name_hash>` key hold
 permanent `P3|interval_us:burst:revision` (zero interval means paused). Updates read
 and change only configuration, never debt or its expiry; same-revision equivalent
 updates perform no write. Existing quota keys hold managed debt as `D3|tat_us`,
-with plain static debts still readable. Prune reclaims expired debt but validates and
+with legacy tuple debts still readable for upgrade. Prune reclaims expired debt but validates and
 retains configuration forever. Memory therefore includes all configured names;
 there is no automatic policy retirement/reset.
 
@@ -122,13 +107,16 @@ the SDK starts no worker. See the [runnable managed example](examples/managed/ma
 Keys use `pacelock:{scope_hash}:...`. Values use:
 
 ```text
-quota:   tat_us:interval_us:burst (static) or D3|tat_us (managed debt)
+quota:   D3|tat_us (all new writes)
+legacy:  tat_us:interval_us:burst (read-only upgrade compatibility)
 policy:  P3|interval_us:burst:revision (separate same-slot key)
 ```
 
-A static quota logically expires at its TAT, when its debt is fully replenished.
-Managed quota debt also recovers at TAT, but its policy identity never expires.
-Reads ignore logically expired static state even if its key is still present.
+Debt logically expires at TAT, when capacity is fully replenished. Policy identity
+never expires. Legacy tuple debt is preserved, not reset on policy publication;
+the next successful admission writes D3. Every admission requires policy keys.
+The Lua protocol is `KEYS = [N debt keys, N policy keys]`, `ARGV = [N costs]`;
+there is no mode selector or caller-supplied interval/burst.
 These encodings are internal; applications must not construct them. Malformed
 quota/policy state is rejected before mutation; obsolete quota formats remain rejected.
 
@@ -175,8 +163,8 @@ for step := 0; step < 8; step++ {
 ## Upgrading from retained admissions
 
 Admission IDs, retention, receipts and recovery queries are no longer supported.
-Quota keys, static debt encoding and managed P3/D3 storage are unchanged; do not
-reset or rename them. Existing `:attempt:` keys are ignored by admission and
+Quota keys and existing debt remain readable; new debt writes use D3. Do not
+reset or rename keys. Existing `:attempt:` keys are ignored by admission and
 excluded from `Prune` discovery, including expired or malformed records. They
 are **not** automatically deleted, and persistent legacy records can occupy memory.
 Retire all old receipt readers/writers first, then arrange a separate, explicitly
@@ -199,5 +187,5 @@ and lost-response faults.
 Short local baseline/MSET and candidate-cleanup measurements are in the
 [verification record](../../docs/validation/redis-mset-local.md); they are not production SLOs.
 The historical [Lua encoding experiment](bench/lua-parse/README.md) includes a
-reproducible harness and raw timings for the former quota encoding; its scalar
+archived raw timings for the former quota encoding; the removed scalar
 prototype drops policy checks and is not a contract-preserving replacement.

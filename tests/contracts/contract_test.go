@@ -82,9 +82,7 @@ func backends(t *testing.T) []backend {
 
 var sequence atomic.Int64
 
-// contractLimiter preserves a dynamic scope while low-level contracts vary fixed
-// policy sets between calls. Each static call uses the public constructor; main
-// StaticLimiter contracts below retain one instance for repeated admissions.
+// contractLimiter provides explicit policy publication for backend contract fixtures.
 type contractLimiter struct {
 	*pacelock.Limiter
 	driver pacelock.Driver
@@ -99,29 +97,30 @@ func newContractLimiter(driver pacelock.Driver, namespace, domain string) (*cont
 	return &contractLimiter{Limiter: l, driver: driver, scope: pacelock.Scope{Namespace: namespace, Domain: domain}}, nil
 }
 
-func (l *contractLimiter) staticRules(rules ...pacelock.Rule) (*pacelock.StaticLimiter, []pacelock.Charge, error) {
+func (l *contractLimiter) publishRules(ctx context.Context, rules ...pacelock.Rule) ([]pacelock.Charge, error) {
 	quotas := make([]pacelock.Quota, len(rules))
 	charges := make([]pacelock.Charge, len(rules))
 	for i, r := range rules {
+		r.Policy.Revision = 1
 		quotas[i] = pacelock.Quota{Name: r.Name, Policy: r.Policy}
 		charges[i] = pacelock.Charge{Name: r.Name, Cost: r.Cost}
 	}
-	static, err := pacelock.NewStatic(l.driver, l.scope.Namespace, l.scope.Domain, quotas...)
-	return static, charges, err
+	err := l.UpdateQuotas(ctx, quotas...)
+	return charges, err
 }
 func (l *contractLimiter) allowRules(ctx context.Context, rules ...pacelock.Rule) (pacelock.Decision, error) {
-	static, charges, err := l.staticRules(rules...)
+	charges, err := l.publishRules(ctx, rules...)
 	if err != nil {
 		return pacelock.Decision{}, err
 	}
-	return static.Allow(ctx, charges...)
+	return l.Allow(ctx, charges...)
 }
 func (l *contractLimiter) waitRules(ctx context.Context, rules ...pacelock.Rule) error {
-	static, charges, err := l.staticRules(rules...)
+	charges, err := l.publishRules(ctx, rules...)
 	if err != nil {
 		return err
 	}
-	return static.Wait(ctx, charges...)
+	return l.Wait(ctx, charges...)
 }
 
 func limiter(t *testing.T, b backend, index int, domain string) *contractLimiter {
@@ -237,8 +236,12 @@ type cancelOnDenialDriver struct {
 	cancel context.CancelFunc
 }
 
-func (d cancelOnDenialDriver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Decision, error) {
-	r, err := d.Driver.(pacelock.StaticDriver).AdmitStatic(ctx, a)
+func (d cancelOnDenialDriver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error {
+	return d.Driver.(pacelock.QuotaDriver).UpdateQuotas(ctx, u)
+}
+
+func (d cancelOnDenialDriver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Decision, error) {
+	r, err := d.Driver.Admit(ctx, a)
 	if err == nil && !r.Allowed {
 		d.cancel()
 	}

@@ -120,18 +120,21 @@ func TestRedisRetryBudgetsLostReply(t *testing.T) {
 					defer func() {
 						cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
-						if err := client.Del(cleanup, limiter.key("q")).Err(); err != nil {
+						if err := client.Del(cleanup, limiter.key("q"), limiter.policyKey("q")).Err(); err != nil {
 							t.Error(err)
 						}
 					}()
 					r := rule("q", 2, 1)
-					_, err = limiter.Allow(ctx, r)
+					if err := client.Set(ctx, limiter.policyKey("q"), "P3|3600000000:2:1", 0).Err(); err != nil {
+						t.Fatal(err)
+					}
+					_, err = limiter.admitRules(ctx, r)
 					if !errors.Is(err, io.EOF) || !errors.Is(err, ErrBackend) || OutcomeOf(err) != Unknown || loss.dropped.Load() != 1 {
 						t.Fatalf("lost reply: dropped=%d outcome=%v err=%v", loss.dropped.Load(), OutcomeOf(err), err)
 					}
 					// Exactly one debit must have occurred: one further admission, then denial.
 					for _, want := range []bool{true, false} {
-						d, err := limiter.Allow(ctx, r)
+						d, err := limiter.admitRules(ctx, r)
 						if err != nil || d.Allowed != want {
 							t.Fatalf("remaining quota: want allowed=%t got %+v err=%v", want, d, err)
 						}

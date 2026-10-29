@@ -1,5 +1,6 @@
 // Run: REDIS_ADDR=localhost:16379 go run ./examples/managed
-// The caller owns publishing configuration; data-plane calls carry no policy.
+// All admission is backend-managed. The caller publishes configuration;
+// data-plane calls carry only names and costs.
 package main
 
 import (

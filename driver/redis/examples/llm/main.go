@@ -1,4 +1,5 @@
-// This example admits known input tokens; it does not enforce output TPM.
+// This example publishes backend policies and admits known input tokens;
+// it does not enforce output TPM.
 package main
 
 import (

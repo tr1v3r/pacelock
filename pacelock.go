@@ -1,9 +1,7 @@
 // Package pacelock provides weighted, multidimensional GCRA admission using
-// backend-owned dynamic policies by default and explicit caller-owned static policies.
-// Both admission modes support immediate checks and context-aware waits.
+// backend-owned dynamic policies, with immediate checks and context-aware waits.
 // Drivers own backend time and atomic persistence.
 // The package does not queue work, refund capacity, execute upstream calls or bill usage.
-// NewStatic separates fixed quota policies from per-attempt costs.
 package pacelock
 
 import (
@@ -26,7 +24,8 @@ const (
 var (
 	// ErrInvalid reports invalid input before dispatch.
 	ErrInvalid = errors.New("pacelock: invalid argument")
-	// ErrPolicyMismatch reports a policy conflict with active quota state.
+	// ErrPolicyMismatch reports a stale or conflicting quota policy update,
+	// or a policy mismatch detected by the offline math helpers.
 	ErrPolicyMismatch = errors.New("pacelock: policy differs from active backend state")
 	// ErrState reports malformed state or replies; inspect OutcomeOf.
 	ErrState = errors.New("pacelock: invalid backend state")
@@ -44,8 +43,8 @@ var (
 // charge. The same named quota must use the same effective policy throughout
 // a domain.
 type Policy struct {
-	// Revision is zero for static policies, or 1..MaxRevision for policies
-	// explicitly installed by UpdateQuotas. Managed revisions never expire.
+	// Revision is 1..MaxRevision for policies installed by UpdateQuotas.
+	// Revisions never expire. Zero is supported only by offline math helpers.
 	Revision int64
 	// Rate is units replenished per Period. Zero pauses a managed policy.
 	Rate int64
@@ -57,8 +56,8 @@ type Policy struct {
 
 // Rule charges Cost units to the quota named by Name under a caller-owned Policy.
 // Burst is total instantaneous capacity, including the first unit. Rule is the
-// low-level driver and math format; use NewStatic to fix caller-owned policies.
-// Both public limiter types accept Charge values for per-attempt costs.
+// offline math format, not a backend admission request. Limiter accepts Charge
+// values and resolves policies from the backend.
 type Rule struct {
 	// Name identifies a quota within a scope; it contains 1..256 bytes.
 	Name string
@@ -114,8 +113,7 @@ type Decision struct {
 	Allowed bool
 	// RetryAfter is advisory, not a reservation.
 	RetryAfter time.Duration
-	// Limited lists every blocking quota in charge/rule order, or binding order for
-	// StaticLimiter. It is empty on allowance.
+	// Limited lists every blocking quota in charge/rule order. It is empty on allowance.
 	Limited []string
 }
 
@@ -127,8 +125,7 @@ type Limiter struct {
 	core *limiterCore
 }
 
-// limiterCore shares transport, scope and observation without exposing either
-// public limiter's policy ownership or admission methods to the other.
+// limiterCore holds transport, scope and observation for admission and updates.
 type limiterCore struct {
 	driver   Driver
 	scope    Scope
@@ -185,29 +182,6 @@ func (l *limiterCore) ready(ctx context.Context) error {
 		return fmt.Errorf("%w: initialized limiter and non-nil context required", ErrInvalid)
 	}
 	return ctx.Err()
-}
-
-func (l *limiterCore) admitStatic(ctx context.Context, rules []Rule) (Decision, error) {
-	op := "allow_static"
-	if err := l.ready(ctx); err != nil {
-		return Decision{}, failure(op, NotCharged, err)
-	}
-	request := StaticAdmission{Scope: l.scope, Rules: append([]Rule(nil), rules...)}
-	if err := request.Validate(); err != nil {
-		return Decision{}, failure(op, NotCharged, err)
-	}
-	driver, ok := l.driver.(StaticDriver)
-	if !ok {
-		return Decision{}, failure(op, NotCharged, ErrUnsupported)
-	}
-	result, err := driver.AdmitStatic(ctx, request)
-	if err != nil {
-		return Decision{}, driverFailure(op, err)
-	}
-	if err := validateDecision(result, rules); err != nil {
-		return Decision{}, failure(op, Unknown, err)
-	}
-	return result, nil
 }
 
 func validateDecision(d Decision, rules []Rule) error {

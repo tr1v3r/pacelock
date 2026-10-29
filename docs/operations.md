@@ -8,9 +8,8 @@ Core Driver contracts are documented [separately](driver.md).
 Default admission is dynamic: publish trusted `Quota` policies with positive
 revisions before sending `Charge{Name, Cost}` requests. Upgrade every writer and
 maintenance process before activation; run PostgreSQL `Migrate` before upgraded
-binaries handle even static traffic. Static opt-in uses standalone `NewStatic` /
-`NewStaticWithOptions`, validating and copying fixed Revision-0 quotas locally.
-`StaticLimiter.Allow` / `Wait` take name/cost `Charge` values. Dynamic `Limiter.Wait(ctx, charges...)` uses the latest
+binaries handle traffic. Retire old static writers or stop their static path before
+installing policies. `Limiter.Wait(ctx, charges...)` uses the latest
 backend policies atomically on each attempt, retrying only ordinary capacity denials
 after advisory `RetryAfter`; every error stops waiting. Updates do not proactively
 wake sleepers, so a relaxed policy may not be used until the previous delay expires.
@@ -53,10 +52,9 @@ SDK. Environment variables in this repository configure examples/tests only.
 
 Clients must be initialized with go-redis constructors; zero-value client structs
 are unsupported. For these initialized concrete `*redis.Client` and
-`*redis.ClusterClient` instances, limiter constructors (`New` / `NewWithOptions`
-and `NewStatic` / `NewStaticWithOptions`) inspect options locally.
+`*redis.ClusterClient` instances, `redisdriver.New` inspects options locally.
 Unsupported negative budgets (`MaxRetries < -1` or `MaxRedirects < -1` at client
-construction) return `ErrInvalid` and a nil limiter, without a network request
+construction) return `ErrInvalid` and a nil driver, without a network request
 or changing caller-owned settings. Configure the client before construction;
 do not mutate its options later. A shared client retains its retry policy for
 commands outside Pacelock.
@@ -95,7 +93,7 @@ hot slots. Use a concurrency-safe callback; avoid network I/O in the callback.
 Bound label cardinality; never label with tenant IDs, quota names
 or raw errors. Wrap the observer in application code if panic recovery is needed.
 
-`ErrInvalid` is a local input problem. `ErrPolicyMismatch` suggests inconsistent
+`ErrInvalid` is an input problem (including costs above the current backend burst). `ErrPolicyMismatch` suggests inconsistent
 rollout or uncoordinated policy migration. `ErrState` suggests corrupted/wrong-type
 state, invalid replies or an unsupported clock jump: inspect, alert and preserve
 state. Always check `OutcomeOf(err)`: `ErrState` alone does not establish that no
@@ -134,7 +132,7 @@ successful admission survives every crash or failover.
 
 Run the commands in the README against disposable Redis on representative
 hardware/network paths. Benchmark 1, 4 and 32 dimensions and separate allowed,
-denied and dynamic/static calls. Include concurrent clients and
+denied calls and policy updates. Include concurrent clients and
 multiple domains in application load testing. Serial loopback benchmark averages
 are not p95/p99 latency, production throughput, fairness or availability results.
 

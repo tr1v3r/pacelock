@@ -22,22 +22,12 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域和名称，动态策略以后端配置为准；
 每次准入必须包含全部适用额度。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, charges...)` 或
-`Wait(ctx, charges...)` 准入，无需本地绑定或策略刷新。显式静态替代路径是独立的
-`NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），
-在本地校验并复制 Revision=0 的固定额度，不访问后端。两种 Limiter 均接受公开的
-`Charge{Name, Cost}`，并提供 `Wait(ctx, charges...) error`。`Rule` 仅用于底层
-`StaticAdmission` 和纯计算。驱动的 `Admit`、`AdmitStatic` 直接返回 `Decision`。
-
-每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
-且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
-多次独立调用合起来不具备原子性。
-空调用、重复或未知名称、无效消耗在准入前本地返回 `ErrInvalid` / `NotCharged`。
-策略在构造时校验并复制，不由 Charge 携带；策略变更需新建 `StaticLimiter`，不能绕过
-后端活跃策略或债务检查。`static.Wait(ctx, charges...)` 快照 Charge，仅重试普通额度拒绝，
-所有错误（包括 `Unknown`）立即停止等待；确认扣减成功不会因并发取消变为失败。
-等待不提供退款、队列或 worker，整次等待仅产生一次观测。
-详见[策略与消耗契约](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。
+先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, charges...)` 或
+`Wait(ctx, charges...)` 准入，无需本地绑定或策略刷新。这是唯一运行时准入路径。
+驱动实现 `Admit(ctx, Admission) (Decision, error)`，请求只包含名称与消耗。
+`Rule`、`Validate`、`Evaluate` 仅用于纯数学计算，不是运行时策略通道。
+每次调用只检查传入的唯一额度名称；必须包含全部适用额度。空调用、重复名称与无效消耗
+在本地拒绝，后端未配置名称返回 `ErrPolicyMissing`。多次调用合起来不具备原子性。
 
 ## 单命令准入
 
@@ -54,9 +44,9 @@ Lua 读取本次涉及的额度与策略，计算 GCRA，提前编码全部值�
 全部准入显式传入债务键、策略键。Cluster 迁槽期间，部分键存在或缺失可能导致
 `TRYAGAIN`，保守归类为 `Unknown` 传输错误，绝不隐式重放；是否重试或恢复由调用者决定。
 
-## 默认动态策略
+## 后端托管动态策略
 
-动态准入是默认路径。通过正数、单调递增的 revision 和
+全部准入均由后端托管策略。通过正数、单调递增的 revision 和
 `limiter.UpdateQuotas(ctx, quotas...)` 发布配置，也可调用驱动的
 `UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`。
 每批更新与准入原子串行，最后仅执行一次 MSET，复用 NoRetry 传输。
@@ -68,8 +58,7 @@ Lua 读取本次涉及的额度与策略，计算 GCRA，提前编码全部值�
 数据面只传名称和消耗：`limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})`，
 驱动的必需 `Admit(Admission)` 接口在同一次
 Lua 准入中读取后端最新策略，调用方无需刷新 binding 或传递 revision。配置缺失返回
-`ErrPolicyMissing` / `NotCharged`。静态构造函数在本地拒绝正 revision；对已配置额度
-使用静态准入返回 `ErrPolicyMismatch`，即使空闲或清理后也不能绕过策略。
+`ErrPolicyMissing` / `NotCharged`。不存在调用方策略覆盖通道，空闲或清理后也不能绕过策略。
 
 托管 `Rate=0` 返回 `ErrPaused` / `NotCharged`，不扣减；即使消耗超过暂停额度的
 burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。用更高 revision 恢复，债务
@@ -79,13 +68,13 @@ burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。
 最新策略，不快照策略。仅在有效容量拒绝后按建议的 `RetryAfter` 重试；任何错误都停止，
 包括暂停、策略缺失、新 Burst 小于 Cost、传输错误（即使为 `NotCharged`）、`Unknown`、
 不支持的能力及无效 Driver 结果。两次尝试间取消为 `NotCharged`；调用期间保留不确定性，
-已确认成功不因并发取消变为失败。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
+已确认成功不因并发取消变为失败。整次调用只产生一次 `wait` 观测。更新不会主动
 唤醒休眠者，旧 RetryAfter 可能延迟使用放宽后的策略。不增加队列、worker、后台 goroutine、
 公平性或退款。请设置 context deadline，详见[阻塞等待准入](../../README.zh-CN.md#阻塞等待准入)。
 
 配置与债务分离：同槽 `policy:<name_hash>` 键永久保存 `P3|interval_us:burst:revision`，
 interval 为零表示暂停。更新只读写配置，不读写债务或其过期时间；相同 revision 的等效更新
-完全不写入。原额度键保存 `D3|tat_us` 托管债务，仍可读取 普通静态债务。Prune 回收过期债务，
+完全不写入。原额度键保存 `D3|tat_us` 托管债务，升级时仍可读取旧 tuple 债务。Prune 回收过期债务，
 但校验并永久保留配置；内存包含所有曾配置名称，不提供自动策略退役或重置。
 
 激活前必须让**全部读取、写入及维护进程**升级为理解新协议的版本：旧写入方不检查配置键，
@@ -97,13 +86,16 @@ interval 为零表示暂停。更新只读写配置，不读写债务或其过�
 键前缀为 `pacelock:{scope_hash}:`。值格式为：
 
 ```text
-额度：tat_us:interval_us:burst（静态）或 D3|tat_us（托管债务）
+额度：D3|tat_us（全部新写入）
+旧值：tat_us:interval_us:burst（仅供升级兼容读取）
 策略：P3|interval_us:burst:revision（独立同槽键）
 ```
 
-静态额度在 TAT 时逻辑过期，表示债务已全部恢复；托管额度的债务也在 TAT 时恢复，但策略身份永不过期。
-即使键仍存在，读取也会忽略逻辑过期的静态状态。额度或策略损坏时在变更前报错；
-旧额度格式仍被拒绝。这些编码属于内部协议，应用不得自行构造。
+债务在 TAT 时逻辑过期，表示容量已全部恢复；策略身份永不过期。
+发布策略不会重置旧 tuple 债务，下一次成功准入才写入 D3。每次准入都要求策略键存在。
+Lua 协议为 `KEYS = [N 个债务键, N 个策略键]`、`ARGV = [N 个消耗]`，
+没有模式选择器，也不接受调用方传入 interval/burst。
+额度或策略损坏时在变更前报错；其他过时格式仍被拒绝。这些编码属于内部协议，应用不得自行构造。
 
 MSET 会清除原生 TTL，因此应用必须安排物理清理以控制内存。准入正确性依赖逻辑过期，
 不依赖清理是否及时；但长期不清理会积累内存。对每个使用过的作用域（包括已空闲的作用域）
@@ -141,7 +133,7 @@ for step := 0; step < 8; step++ {
 
 ## 从保留准入结果的版本升级
 
-不再支持准入 ID、保留期、回执或恢复查询。额度键、静态债务编码及托管 P3/D3 存储保持不变，
+不再支持准入 ID、保留期、回执或恢复查询。额度键与已有债务保持可读，新债务统一写入 D3，
 不能重置或改名。准入忽略旧 `:attempt:` 键，`Prune` 发现阶段也排除这些键，包括已过期或
 损坏的记录；**不会自动删除**，旧持久记录仍可能占用内存。先停用全部旧回执读写进程，
 待应用不再需要原恢复语义后，再单独安排明确限定作用域的旧 `:attempt:` 键清理。
@@ -158,5 +150,5 @@ for step := 0; step < 8; step++ {
 状态校验、清理、ACL/OOM 和响应丢失故障。
 
 旧协议与 MSET、候选清理的短时本地实测见[验证记录](../../docs/validation/redis-mset-local.md)，不代表生产 SLO。
-历史 [Lua 编码对照实验](bench/lua-parse/README.zh-CN.md)提供当时额度编码的可复现程序和原始耗时；
+历史 [Lua 编码对照实验](bench/lua-parse/README.zh-CN.md)保留当时额度编码的原始耗时（程序已移除）；
 其中单数字原型移除了策略校验，不是保持原契约的替换方案。

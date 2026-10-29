@@ -24,7 +24,6 @@ type Driver struct{ db *sql.DB }
 
 var _ pacelock.Driver = (*Driver)(nil)
 var _ pacelock.QuotaDriver = (*Driver)(nil)
-var _ pacelock.StaticDriver = (*Driver)(nil)
 
 //go:embed schema.sql
 var schema string
@@ -106,46 +105,16 @@ func fail(op string, outcome pacelock.Outcome, err error) error {
 	return &pacelock.Error{Op: op, Outcome: outcome, Err: err}
 }
 
-// AdmitStatic validates, locks the domain, samples backend time once, and calculates the
-// shared GCRA transition. Every quota commits in one transaction.
-// Before Commit is sent, failures are NotCharged; any Commit error is conservatively
-// Unknown. No automatic retry occurs.
-func (d *Driver) AdmitStatic(ctx context.Context, a pacelock.StaticAdmission) (pacelock.Decision, error) {
-	return d.admit(ctx, a, nil)
-}
-
-// Admit resolves authoritative policies after locking.
-// Callers provide only quota names and costs, never cached policy snapshots.
+// Admit resolves authoritative policies after locking the domain and sampling
+// backend time once. Callers provide only quota names and costs. Every quota
+// commits in one transaction; failures before Commit are NotCharged, and any
+// Commit error is conservatively Unknown. No automatic retry occurs.
 func (d *Driver) Admit(ctx context.Context, a pacelock.Admission) (pacelock.Decision, error) {
-	return d.admit(ctx, pacelock.StaticAdmission{Scope: a.Scope}, &a)
-}
-
-func (d *Driver) admit(ctx context.Context, a pacelock.StaticAdmission, managed *pacelock.Admission) (pacelock.Decision, error) {
-	op := "allow_static"
-	if managed != nil {
-		op = "allow"
-	}
 	uncharged := func(err error) (pacelock.Decision, error) {
-		return pacelock.Decision{}, fail(op, pacelock.NotCharged, err)
+		return pacelock.Decision{}, fail("allow", pacelock.NotCharged, err)
 	}
-	var names []string
-	if managed != nil {
-		if err := managed.Validate(); err != nil {
-			return uncharged(err)
-		}
-		for _, c := range managed.Charges {
-			names = append(names, c.Name)
-		}
-	} else {
-		if err := a.Validate(); err != nil {
-			return uncharged(err)
-		}
-		for _, r := range a.Rules {
-			if r.Policy.Revision != 0 {
-				return uncharged(fmt.Errorf("%w: use managed admission for managed policies", pacelock.ErrInvalid))
-			}
-			names = append(names, r.Name)
-		}
+	if err := a.Validate(); err != nil {
+		return uncharged(err)
 	}
 	if err := d.ready(ctx); err != nil {
 		return uncharged(err)
@@ -163,15 +132,13 @@ func (d *Driver) admit(ctx context.Context, a pacelock.StaticAdmission, managed 
 	if err != nil {
 		return uncharged(err)
 	}
-	policies := make([]pacelock.QuotaState, len(names))
-	states := make([]pacelock.QuotaState, len(names))
-	for i, name := range names {
+	policies := make([]pacelock.QuotaState, len(a.Charges))
+	states := make([]pacelock.QuotaState, len(a.Charges))
+	for i, charge := range a.Charges {
+		name := charge.Name
 		policies[i], err = loadPolicy(ctx, tx, scope, name)
 		if err != nil {
 			return uncharged(err)
-		}
-		if managed == nil && policies[i] != (pacelock.QuotaState{}) {
-			return uncharged(pacelock.ErrPolicyMismatch)
 		}
 		s := &states[i]
 		err = tx.QueryRowContext(ctx, `SELECT tat_us,interval_us,burst,expires_us FROM pacelock_quotas WHERE scope_id=$1 AND quota_id=$2`, scope, itemID(name)).Scan(&s.TAT, &s.Interval, &s.Burst, &s.ExpiresAt)
@@ -179,26 +146,20 @@ func (d *Driver) admit(ctx context.Context, a pacelock.StaticAdmission, managed 
 			return uncharged(err)
 		}
 	}
-	var decision pacelock.Decision
-	var next []pacelock.QuotaState
-	if managed != nil {
-		decision, next, err = pacelock.EvaluateManaged(now, managed.Charges, policies, states)
-	} else {
-		decision, next, err = pacelock.Evaluate(now, a.Rules, states)
-	}
+	decision, next, err := pacelock.EvaluateManaged(now, a.Charges, policies, states)
 	if err != nil {
 		return uncharged(err)
 	}
 	if decision.Allowed {
 		for i, s := range next {
-			err = storeQuota(ctx, tx, scope, names[i], s)
+			err = storeQuota(ctx, tx, scope, a.Charges[i].Name, s)
 			if err != nil {
 				return uncharged(err)
 			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
-		return pacelock.Decision{}, fail(op, pacelock.Unknown, err)
+		return pacelock.Decision{}, fail("allow", pacelock.Unknown, err)
 	}
 	return decision, nil
 }

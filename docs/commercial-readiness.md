@@ -13,7 +13,7 @@ pre-v1 removal of retained admission results.
 - Admission consumes capacity even when later business execution fails.
 - Never blindly retry Unknown. There is no SDK result recovery after an uncertain
   mutation; a later NotCharged result cannot resolve earlier uncertainty.
-- Dynamic and static Allow return Decision/error. Both Wait methods retry only
+- Allow returns Decision/error. Wait retries only
   valid capacity denials, stop on every error, preserve confirmed success and
   in-flight accounting, and add no worker, queue or fairness guarantee.
 - Applications own clients, context deadlines, policy publication, trusted quota

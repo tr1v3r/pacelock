@@ -14,7 +14,7 @@ for i = 1, #KEYS do
         else
             local state = quota_state(raw, now)
             if not state then return redis.error_reply('PACE_STATE malformed cleanup quota') end
-            if state[4] then expired[#expired + 1] = KEYS[i] end
+            if state <= now then expired[#expired + 1] = KEYS[i] end
         end
     end
 end

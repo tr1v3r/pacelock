@@ -1,5 +1,5 @@
 // load is a bounded measurement tool for disposable Redis deployments.
-// It explicitly measures static admission to preserve historical benchmark comparability.
+// It publishes backend policies before measuring dynamic admission.
 package main
 
 import (
@@ -155,12 +155,12 @@ func run() error {
 		return err
 	}
 	namespace := fmt.Sprintf("pacelock-load-%d", time.Now().UnixNano())
-	limiters := make([]*pacelock.StaticLimiter, *domains)
+	limiters := make([]*pacelock.Limiter, *domains)
 	prefixes := make([]string, *domains)
 	quotas := make([]pacelock.Quota, *dimensions)
 	charges := make([]pacelock.Charge, *dimensions)
 	for i := range quotas {
-		quotas[i] = pacelock.Quota{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000}}
+		quotas[i] = pacelock.Quota{Name: fmt.Sprintf("quota-%d", i), Policy: pacelock.Policy{Rate: 1000000, Period: time.Second, Burst: 1000000, Revision: 1}}
 		charges[i] = pacelock.Charge{Name: quotas[i].Name, Cost: 1}
 		if *mode == "deny" {
 			quotas[i].Policy.Rate = 1
@@ -170,8 +170,11 @@ func run() error {
 	}
 	for i := range limiters {
 		domain := fmt.Sprint(i)
-		l, err := newLimiter(c, namespace, domain, quotas...)
+		l, err := newLimiter(c, namespace, domain)
 		if err != nil {
+			return err
+		}
+		if err := l.UpdateQuotas(ctx, quotas...); err != nil {
 			return err
 		}
 		limiters[i] = l
@@ -283,7 +286,7 @@ func run() error {
 		return m.Samples[int(float64(len(m.Samples)-1)*p)]
 	}
 	build, _ := debug.ReadBuildInfo()
-	result := map[string]interface{}{"mode": *mode, "domains": *domains, "rules": *dimensions, "workers": *workers, "offered_rps": *rps, "duration_seconds": elapsed.Seconds(), "warmup_seconds": warmup.Seconds(), "calls": m.Calls, "allowed": m.Allowed, "denied": m.Denied, "errors": m.Errors, "context_errors": m.ContextErrors, "cluster": *clusterMode, "unknown": m.Unknown, "throughput": float64(m.Calls) / elapsed.Seconds(), "latency_us": map[string]int64{"p50": percentile(.50), "p95": percentile(.95), "p99": percentile(.99)}, "latency_sample_size": len(m.Samples), "latency_sampling": "uniform reservoir, max 100000; includes failures", "keys_after": count, "redis_before": before, "redis_after": after, "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "cpus": runtime.NumCPU(), "pool_stats": c.PoolStats(), "build": build}
+	result := map[string]interface{}{"admission": "dynamic", "mode": *mode, "domains": *domains, "rules": *dimensions, "workers": *workers, "offered_rps": *rps, "duration_seconds": elapsed.Seconds(), "warmup_seconds": warmup.Seconds(), "calls": m.Calls, "allowed": m.Allowed, "denied": m.Denied, "errors": m.Errors, "context_errors": m.ContextErrors, "cluster": *clusterMode, "unknown": m.Unknown, "throughput": float64(m.Calls) / elapsed.Seconds(), "latency_us": map[string]int64{"p50": percentile(.50), "p95": percentile(.95), "p99": percentile(.99)}, "latency_sample_size": len(m.Samples), "latency_sampling": "uniform reservoir, max 100000; includes failures", "keys_after": count, "redis_before": before, "redis_after": after, "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "cpus": runtime.NumCPU(), "pool_stats": c.PoolStats(), "build": build}
 	if countErr != nil {
 		result["keys_error"] = countErr.Error()
 	}
@@ -293,15 +296,15 @@ func run() error {
 }
 
 // newLimiter constructs a Redis driver and the shared admission facade.
-func newLimiter(client redis.Scripter, namespace, domain string, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
-	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{}, quotas...)
+func newLimiter(client redis.Scripter, namespace, domain string) (*pacelock.Limiter, error) {
+	return newLimiterWithOptions(client, namespace, domain, pacelock.Options{})
 }
 
 // newLimiterWithOptions attaches application observation to the common facade.
-func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options, quotas ...pacelock.Quota) (*pacelock.StaticLimiter, error) {
+func newLimiterWithOptions(client redis.Scripter, namespace, domain string, options pacelock.Options) (*pacelock.Limiter, error) {
 	driver, err := redisdriver.New(client)
 	if err != nil {
 		return nil, err
 	}
-	return pacelock.NewStaticWithOptions(driver, namespace, domain, options, quotas...)
+	return pacelock.NewWithOptions(driver, namespace, domain, options)
 }

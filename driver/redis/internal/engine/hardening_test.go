@@ -53,13 +53,13 @@ func TestDefensiveInputs(t *testing.T) {
 	l, _ := New(s, "app", "domain")
 	r := rule("q", 1, 1)
 	for _, current := range []*Limiter{nil, {}, l} {
-		if _, err := current.Allow(nil, r); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
+		if _, err := current.admitRules(nil, r); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("nil context/limiter: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := l.Allow(ctx, r); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
+	if _, err := l.admitRules(ctx, r); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 	if s.calls != 0 {
@@ -89,20 +89,12 @@ func TestTransportAndReplyErrors(t *testing.T) {
 		{"short reply", []interface{}{}, nil, ErrState, Unknown},
 		{"reply type", "invalid", nil, ErrState, Unknown},
 	} {
-		for _, managed := range []bool{false, true} {
-			op := "allow_static"
-			if managed {
-				op = "allow"
-			}
+		{
+			op := "allow"
 			t.Run(op+"/"+tc.name, func(t *testing.T) {
 				s := &stubScripter{reply: tc.reply, err: tc.err}
 				l, _ := New(s, "a", "b")
-				var err error
-				if managed {
-					_, err = l.AdmitManaged(context.Background(), managedRequest("q", 1))
-				} else {
-					_, err = l.Allow(context.Background(), rule("q", 1, 1))
-				}
+				_, err := l.Admit(context.Background(), managedRequest("q", 1))
 				if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome {
 					t.Fatalf("%v: %s", err, OutcomeOf(err))
 				}
@@ -124,7 +116,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 func TestOnlyNoScriptFallsBack(t *testing.T) {
 	s := &stubScripter{shaErr: serverError("NOSCRIPT No matching script"), reply: []interface{}{int64(1), int64(0), int64(0)}}
 	l, _ := New(s, "a", "b")
-	d, err := l.Allow(context.Background(), rule("q", 1, 1))
+	d, err := l.admitRules(context.Background(), rule("q", 1, 1))
 	if err != nil || !d.Allowed || s.calls != 1 || s.evalCalls != 1 {
 		t.Fatalf("%+v %v calls=%d/%d", d, err, s.calls, s.evalCalls)
 	}
@@ -134,11 +126,11 @@ func TestObserver(t *testing.T) {
 	var events []Event
 	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
 	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	l.Allow(context.Background(), rule("q", 1, 1))
-	l.Allow(context.Background())
+	l.admitRules(context.Background(), rule("q", 1, 1))
+	l.admitRules(context.Background())
 	s.reply = nil
 	s.err = redis.Nil
-	l.Allow(context.Background(), rule("q", 1, 1))
+	l.admitRules(context.Background(), rule("q", 1, 1))
 	if len(events) != 3 || events[0].Result != "allowed" || events[1].Result != "error" || events[2].Result != "error" || events[0].RuleCount != 1 {
 		t.Fatalf("%+v", events)
 	}
@@ -153,13 +145,13 @@ func TestAdmissionObservers(t *testing.T) {
 	var events []Event
 	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
 	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	if _, err := l.AdmitManaged(context.Background(), managedRequest("q", 1)); err != nil {
+	if _, err := l.Admit(context.Background(), managedRequest("q", 1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Allow(context.Background(), rule("q", 1, 1)); err != nil {
+	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Operation != "allow" || events[1].Operation != "allow_static" {
+	if len(events) != 2 || events[0].Operation != "allow" || events[1].Operation != "allow" {
 		t.Fatalf("%+v", events)
 	}
 	for _, e := range events {
@@ -200,13 +192,13 @@ func TestMalformedReplyAndObserverContext(t *testing.T) {
 		}
 		seen = e
 	}})
-	if _, err := l.Allow(context.Background(), rule("q", 1, 1)); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
+	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
 		t.Fatal(err)
 	}
 	if seen.Result != "error" {
 		t.Fatal(seen)
 	}
-	if _, err := l.Allow(nil, rule("q", 1, 1)); !errors.Is(err, ErrInvalid) {
+	if _, err := l.admitRules(nil, rule("q", 1, 1)); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
 }

@@ -129,8 +129,8 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := l.allowRules(ctx, rule); err != nil || !decision.Allowed {
-		t.Fatalf("static admission after migration: %+v %v", decision, err)
+	if _, err := l.Allow(ctx, pacelock.Charge{Name: rule.Name, Cost: 1}); !errors.Is(err, pacelock.ErrPolicyMissing) {
+		t.Fatalf("legacy debt must not imply policy authority: %v", err)
 	}
 	beforeUpdate := readDebt()
 	q := pacelock.Quota{Name: rule.Name, Policy: pacelock.Policy{Revision: 1, Rate: 2, Period: time.Hour, Burst: 10}}
@@ -139,9 +139,6 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	}
 	if got := readDebt(); got != beforeUpdate {
 		t.Fatalf("activation changed debt: %+v, want %+v", got, beforeUpdate)
-	}
-	if _, err = l.allowRules(ctx, rule); !errors.Is(err, pacelock.ErrPolicyMismatch) {
-		t.Fatalf("static bypass after activation: %v", err)
 	}
 	if decision, err := l.Allow(ctx, pacelock.Charge{Name: q.Name, Cost: 1}); err != nil || !decision.Allowed {
 		t.Fatalf("managed admission after activation: %+v %v", decision, err)

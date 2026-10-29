@@ -33,11 +33,13 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `Wait(ctx, charges...)` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `Wait` 均传公开的 `Charge{Name, Cost}`。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；动态与静态 Limiter 均提供 `Wait(ctx, charges...) error`。
+先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})`
+或 `Wait(ctx, charges...)` 准入，无需本地绑定或策略刷新。`Limiter` 只提供动态准入；
+`Rule` 与 `Evaluate` 保留为纯计算 API，不是后端准入入口。
 
-## 默认动态策略
+## 动态策略
 
-Driver 实现必需的动态 `pacelock.Driver`，以及可选 `pacelock.QuotaDriver` 与 `pacelock.StaticDriver` 接口。
+Driver 实现必需的动态 `pacelock.Driver`，以及可选 `pacelock.QuotaDriver` 接口。
 控制面发布配置，数据面**只传名称与消耗**，获得 scope 锁后使用后端最新配置。
 准入节点无需刷新本地策略或重新绑定，SDK 不启动后台 worker；配置源轮询与发布由调用者负责。
 
@@ -68,39 +70,25 @@ _ = decision
 最新策略，不快照策略。仅在有效容量拒绝后按建议的 `RetryAfter` 重试；任何错误都停止，
 包括暂停、策略缺失、新 Burst 小于 Cost、传输错误（即使为 `NotCharged`）、`Unknown`、
 不支持的能力及无效 Driver 结果。两次尝试间取消为 `NotCharged`；调用期间保留不确定性，
-已确认成功不因并发取消变为失败。每次尝试均为独立准入。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
+已确认成功不因并发取消变为失败。每次尝试均为独立准入。整次调用只产生一次 `wait` 观测。更新不会主动
 唤醒休眠者，旧 RetryAfter 可能延迟使用放宽后的策略。休眠不持有事务、锁或连接，
 不增加队列、worker、后台 goroutine、公平性或退款。请设置 context deadline；配置源
 轮询与发布仍由调用者负责。详见[阻塞等待准入](../../README.zh-CN.md#阻塞等待准入)。
 
-静态构造函数在本地拒绝托管 Revision；对已配置额度发起静态准入返回
-`ErrPolicyMismatch`，不存在绕过该检查的历史结果。每次调用都是新的额度决策。
-
 更新在提交前失败会回滚；提交错误为 `Unknown`，表示策略更新可能已经提交，不表示发生额度扣减。
 显式重试相同版本可处理不确定性，但该版本也可能已被更新版本取代。不做隐藏重试，派发前取消不修改状态。
 
-**部署顺序：先迁移 → 升级全部二进制 → 激活托管策略。** 新版请求服务在接收任何流量前
-就必须执行 `Migrate`，**仅有静态流量也不例外**：新版静态准入会查询策略表，防止绕过托管配置。
-迁移只增加表，因此升级期间旧二进制仍可处理静态流量，但此时不能激活任何托管策略。
-共享数据库的全部二进制升级完成后，才能发布托管配置。旧 PostgreSQL 代码无法与动态策略共存：
-它不检查独立配置表，会绕过托管限额。Migrate 应在受控初始化阶段运行，避免并发迁移；DDL 会持有表锁。
-
-每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
-且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
-多次独立调用合起来不具备原子性。
-空调用、重复或未知名称、无效消耗在准入前本地返回 `ErrInvalid` / `NotCharged`。
-策略在构造时校验并复制，不由 Charge 携带；策略变更需新建 `StaticLimiter`，不能绕过
-后端活跃策略或债务检查。`static.Wait(ctx, charges...)` 快照 Charge，仅重试普通额度拒绝，
-所有错误（包括 `Unknown`）立即停止等待；确认扣减成功不会因并发取消变为失败。
-等待不提供退款、队列或 worker，整次等待仅产生一次观测。
-详见[策略与消耗契约](../../README.zh-CN.md#显式静态替代固定策略与单次消耗)。
+在接收流量前，于受控初始化阶段运行 `Migrate`，避免并发迁移；DDL 会持有表锁。
+旧版仅支持静态准入的 PostgreSQL 二进制不能与已激活的动态策略同时服务：它们不检查
+独立配置表，可能绕过托管限额。已有债务（包括间隔/Burst 元组等价的旧静态债务）
+仍可读取，不会被重置。
 
 ## 事务与故障契约
 
 每次准入使用 Read Committed，通过 INSERT ON CONFLICT 建立永久 domain 锁行，
 再用 SELECT FOR UPDATE 锁定它，覆盖额度尚不存在的情况。
 获得锁后用 clock_timestamp 采样一次后端时间，全部额度在同一事务提交。
-PostgreSQL 使用核心 Evaluate / EvaluateManaged 转换；Redis 的等价计算在 Lua 内执行。
+PostgreSQL 使用核心 EvaluateManaged 转换；Redis 的等价计算在 Lua 内执行。
 托管准入先独立校验原债务字段，再在内存中应用当前配置。债务行的间隔/Burst 仅用于完整性校验，
 不是权威策略。
 
@@ -115,7 +103,7 @@ PostgreSQL 使用核心 Evaluate / EvaluateManaged 转换；Redis 的等价计�
 - 使用有日志表、fsync 和合适的 synchronous_commit/复制策略。异步提交或切换至落后副本
   可能丢失债务。PG 也不能消除墙上时钟跳变。
 - 过期债务会被逻辑忽略，但托管策略身份永久保留。应用可调度 `driver.Prune(ctx, scope, limit)`，
-  每次最多删除 limit 条过期债务（静态或托管，1～10000）。
+  每次最多删除 limit 条过期债务（包括旧债务，1～10000）。
   过期时间与 TAT 都必须不晚于数据库时间，避免删除仍有效的债务。
   它使用同一 domain 锁，绝不触碰策略表，需规划持久化策略基数。
   domain 锁行故意保留，需规划 domain 基数；不要独立删除锁行或活跃状态。

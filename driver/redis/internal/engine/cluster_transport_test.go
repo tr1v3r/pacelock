@@ -74,14 +74,17 @@ func TestRedisClusterLostReply(t *testing.T) {
 				defer func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					if err := client.Del(ctx, l.key("q")).Err(); err != nil {
+					if err := client.Del(ctx, l.key("q"), l.policyKey("q")).Err(); err != nil {
 						t.Error(err)
 					}
 				}()
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				r := rule("q", burst, 1)
-				d, err := l.Allow(ctx, r)
+				if err := client.Set(ctx, l.policyKey("q"), fmt.Sprintf("P3|3600000000:%d:1", burst), 0).Err(); err != nil {
+					t.Fatal(err)
+				}
+				d, err := l.admitRules(ctx, r)
 				if !errors.Is(err, ErrBackend) || !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown {
 					t.Fatalf("lost reply must remain unknown, not a normal decision: decision=%+v err=%v", d, err)
 				}
@@ -92,13 +95,13 @@ func TestRedisClusterLostReply(t *testing.T) {
 				// This is a separate business attempt, not a recommended recovery of
 				// the unknown one. It proves stable-topology routing still works and
 				// that the failed public call consumed exactly one unit, not two.
-				d, err = l.Allow(ctx, r)
+				d, err = l.admitRules(ctx, r)
 				if err != nil || d.Allowed != (burst == 2) {
 					t.Fatalf("wrong remaining capacity: decision=%+v err=%v", d, err)
 				}
 				t.Logf("new attempt: burst=%d allowed=%t", burst, d.Allowed)
 				if burst == 2 {
-					if d, err := l.Allow(ctx, r); err != nil || d.Allowed {
+					if d, err := l.admitRules(ctx, r); err != nil || d.Allowed {
 						t.Fatalf("quota did not exhaust after two admissions: decision=%+v err=%v", d, err)
 					}
 				}

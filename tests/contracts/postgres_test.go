@@ -148,8 +148,11 @@ func TestPostgresLostCommitReplyIsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	broken, _ := newContractLimiter(fault, s.Namespace, s.Domain)
+	if _, err := broken.publishRules(context.Background(), rule("q", 1, 1)); err != nil {
+		t.Fatal(err)
+	}
 	connector.armed.Store(true)
-	if _, err := broken.allowRules(context.Background(), rule("q", 1, 1)); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
+	if _, err := broken.Allow(context.Background(), pacelock.Charge{Name: "q", Cost: 1}); !errors.Is(err, io.ErrUnexpectedEOF) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 		t.Fatal(err)
 	}
 	// Inspect state out of band: this is evidence of mutation, not a recovery API.
@@ -175,7 +178,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	_, err = l.allowRules(ctx, r)
+	_, err = l.Allow(ctx, pacelock.Charge{Name: r.Name, Cost: r.Cost})
 	cancel()
 	if !errors.Is(err, context.DeadlineExceeded) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 		t.Fatal(err)
@@ -184,7 +187,7 @@ func TestPostgresLockWaitAndPostLockClock(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		d, err := l.allowRules(ctx, r)
+		d, err := l.Allow(ctx, pacelock.Charge{Name: r.Name, Cost: r.Cost})
 		if err == nil && !d.Allowed {
 			err = fmt.Errorf("stale transaction clock: %+v", d)
 		}

@@ -19,6 +19,7 @@ func testContentionProcesses(t *testing.T, f *contentionFixture) {
 	for _, mode := range []string{"allow"} {
 		t.Run(mode, func(t *testing.T) {
 			l := f.limiter(t)
+			publishRules(t, l, contentionRule("q", 127, 1))
 			dir := t.TempDir()
 			exe, err := os.Executable()
 			if err != nil {
@@ -130,7 +131,7 @@ func TestConcurrencyProcessWorker(t *testing.T) {
 	}
 	var admitted atomic.Int64
 	contentionWave(t, 64, func(ctx context.Context, i int) {
-		d, err := l.Allow(ctx, contentionRule("q", 127, 1))
+		d, err := l.admitRules(ctx, contentionRule("q", 127, 1))
 		if err != nil {
 			t.Error(err)
 		} else if d.Allowed {

@@ -33,13 +33,22 @@ def until(fn, timeout=20):
     raise RuntimeError('fixture readiness timeout')
 
 engine = root / 'driver/redis/internal/engine'
-source = (engine / 'protocol.lua').read_text() + '\nlocal managed = false\n' + (engine / 'gcra.lua').read_text()
+source = (engine / 'protocol.lua').read_text() + '\n' + (engine / 'gcra.lua').read_text()
+
+def seed_policies(name, domain):
+    # Fixture setup only; applications publish fenced policies through UpdateQuotas.
+    pairs = [item for i in range(10) for item in (f'{domain}:policy:{i}', 'P3|86400000000:1:1')]
+    assert redis(name, 'MSET', *pairs) == 'OK'
+
+def replicated(primary, replica):
+    offset = int([x.split(':')[1] for x in redis(primary, 'INFO', 'replication').splitlines() if x.startswith('master_repl_offset:')][0])
+    until(lambda: int([x.split(':')[1] for x in redis(replica, 'INFO', 'replication').splitlines() if x.startswith('slave_repl_offset:')][0]) >= offset)
 
 def probe(name, domain):
     # Each call is a fresh admission, not an idempotent recovery attempt.
     result = {'allowed': 0, 'denied': 0, 'errors': 0}
     for i in range(10):
-        reply = redis(name, 'EVAL', source, 1, f'{domain}:q:{i}', 86400000000, 1, 1)
+        reply = redis(name, 'EVAL', source, 2, f'{domain}:q:{i}', f'{domain}:policy:{i}', 1)
         first = reply.splitlines()[0]
         result['allowed' if first == '1' else 'denied' if first == '0' else 'errors'] += 1
     return result
@@ -52,6 +61,9 @@ for loss in (False, True):
         docker('run', '-d', '--name', primary, '--network', network, '-p', '127.0.0.1:17379:6379', args.image, 'redis-server', '--save', '', '--appendonly', 'no', '--maxmemory-policy', 'noeviction')
         docker('run', '-d', '--name', replica, '--network', network, '-p', '127.0.0.1:17380:6379', args.image, 'redis-server', '--save', '', '--appendonly', 'no', '--replicaof', primary, '6379')
         until(lambda: redis(primary, 'PING') == 'PONG' and 'master_link_status:up' in redis(replica, 'INFO', 'replication'))
+        # Replicate configuration before isolating debt loss. Missing policies fail closed.
+        seed_policies(primary, network)
+        replicated(primary, replica)
         if loss:
             docker('network', 'disconnect', network, replica)
         results['redis_version'] = next((x.split(':', 1)[1] for x in redis(primary, 'INFO', 'server').splitlines() if x.startswith('redis_version:')))
@@ -60,8 +72,7 @@ for loss in (False, True):
         if not loss:
             # A fresh WAIT connection does not cover the probe's writes.
             # Compare the replica offset with the primary offset instead.
-            offset = int([x.split(':')[1] for x in redis(primary, 'INFO', 'replication').splitlines() if x.startswith('master_repl_offset:')][0])
-            until(lambda: int([x.split(':')[1] for x in redis(replica, 'INFO', 'replication').splitlines() if x.startswith('slave_repl_offset:')][0]) >= offset)
+            replicated(primary, replica)
         before = time.monotonic()
         docker('kill', primary)
         if loss:
@@ -76,7 +87,11 @@ for loss in (False, True):
         else:
             assert checked['allowed'] == 10 and checked['errors'] == 0, checked
         results['scenarios']['unreplicated_loss' if loss else 'replicated_promotion'] = {'seed': seed, 'after_promotion': checked, 'manual_recovery_seconds': recovery, 'extra_admissions_after_10_confirmed': checked['allowed']}
+        missing = probe(replica, network + '-missing-policy')
+        assert missing['allowed'] == 0 and missing['errors'] == 10, missing
+        results['scenarios']['missing_policy_fail_closed'] = missing
         if not loss:
+            seed_policies(replica, network + '-oom')
             assert redis(replica, 'CONFIG', 'SET', 'maxmemory', '1') == 'OK'
             oom = probe(replica, network + '-oom')
             assert oom['allowed'] == 0 and oom['errors'] == 10, oom
@@ -85,8 +100,10 @@ for loss in (False, True):
             clock = 'local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])'
             now = int(time.time() * 1000000)
 
+            assert redis(replica, 'SET', 'synthetic-clock-policy', 'P3|1000000:1:1') == 'OK'
+
             def evaluate(ts):
-                return redis(replica, 'EVAL', source.replace(clock, f'local now = {ts}'), 1, 'synthetic-clock', 1000000, 1, 1)
+                return redis(replica, 'EVAL', source.replace(clock, f'local now = {ts}'), 2, 'synthetic-clock', 'synthetic-clock-policy', 1)
             first = evaluate(now)
             forward = evaluate(now + 2000000)
             backward = evaluate(now - 86400000001)

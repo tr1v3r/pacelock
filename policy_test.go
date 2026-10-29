@@ -200,9 +200,6 @@ func TestManagedFacade(t *testing.T) {
 	if decision, err := l.Allow(ctx, c); err != nil || !decision.Allowed {
 		t.Fatal(decision, err)
 	}
-	if _, err := NewStatic(d, "ns", "d", q); !errors.Is(err, ErrInvalid) || d.calls != 0 {
-		t.Fatal(err)
-	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	count := d.managedCalls
@@ -217,9 +214,6 @@ func TestManagedFacade(t *testing.T) {
 		t.Fatal(err)
 	}
 	unsupported, _ := New(&testDriver{}, "ns", "d")
-	if _, err := unsupported.Allow(ctx, c); !errors.Is(err, ErrUnsupported) {
-		t.Fatal(err)
-	}
 	if err := unsupported.UpdateQuotas(ctx, q); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
 	}

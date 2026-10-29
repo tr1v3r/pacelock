@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// dynamicWaitDriver scripts dynamic admissions. Inherited static methods
-// share its dispatch counter, exposing accidental extra calls.
+// dynamicWaitDriver scripts admissions and counts dispatches.
 type dynamicWaitDriver struct {
 	testDriver
 	admit func(context.Context, Admission) (Decision, error)
@@ -97,7 +96,7 @@ func TestDynamicWaitValidationBeforeDispatch(t *testing.T) {
 	if d.calls != 0 {
 		t.Fatal("invalid request reached driver", d.calls)
 	}
-	// Dynamic Wait must not require the optional StaticDriver or QuotaDriver.
+	// Dynamic Wait must not require the optional QuotaDriver.
 	if err := l.Wait(context.Background(), sampleCharge()); err != nil || d.calls != 1 {
 		t.Fatal(d.calls, err)
 	}
@@ -107,6 +106,7 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 	for _, backendErr := range []error{
 		io.ErrUnexpectedEOF,
 		&Error{Outcome: NotCharged, Err: ErrPolicyMissing},
+		&Error{Outcome: NotCharged, Err: ErrPolicyMismatch},
 		&Error{Outcome: NotCharged, Err: ErrPaused},
 		&Error{Outcome: NotCharged, Err: ErrInvalid},
 		&Error{Outcome: NotCharged, Err: ErrUnsupported},

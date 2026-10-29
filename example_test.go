@@ -17,15 +17,6 @@ func ExampleAdmission_Validate() {
 	// Output: <nil>
 }
 
-func ExampleStaticAdmission_Validate() {
-	request := pacelock.StaticAdmission{
-		Scope: pacelock.Scope{Namespace: "app", Domain: "account"},
-		Rules: []pacelock.Rule{{Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1}},
-	}
-	fmt.Println(request.Validate())
-	// Output: <nil>
-}
-
 func ExampleValidate() {
 	err := pacelock.Validate(
 		pacelock.Rule{Name: "requests", Policy: pacelock.Policy{Rate: 60, Period: time.Minute, Burst: 10}, Cost: 1},

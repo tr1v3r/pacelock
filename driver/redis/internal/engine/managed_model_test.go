@@ -28,7 +28,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 		}
 	}
 	now := pacelock.MaxRevision - 2*h
-	script := redis.NewScript(strings.Replace(protocolSource+"\nlocal managed=true\n"+admissionSource, "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])", fmt.Sprintf("local now = %d", now), 1))
+	script := redis.NewScript(strings.Replace(source, "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])", fmt.Sprintf("local now = %d", now), 1))
 	for _, tc := range []struct {
 		name                    string
 		step, burst, cost, debt int64
@@ -56,7 +56,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			want, next, werr := pacelock.EvaluateManaged(now, []pacelock.Charge{{Name: name, Cost: tc.cost}}, []pacelock.QuotaState{p}, []pacelock.QuotaState{debt})
-			cmd := script.Run(ctx, c, keys, int64(0), int64(0), tc.cost)
+			cmd := script.Run(ctx, c, keys, tc.cost)
 			if werr != nil {
 				kind := pacelock.ErrInvalid
 				if tc.step == 0 {
@@ -99,7 +99,7 @@ func TestRedisManagedCorruptLastIsAtomic(t *testing.T) {
 	}
 	a := managedRequest("first", 1)
 	a.Charges = append(a.Charges, pacelock.Charge{Name: "last", Cost: 1})
-	if _, err := l.AdmitManaged(ctx, a); !errors.Is(err, pacelock.ErrState) {
+	if _, err := l.Admit(ctx, a); !errors.Is(err, pacelock.ErrState) {
 		t.Fatal(err)
 	}
 	if n := c.Exists(ctx, l.key("first")).Val(); n != 0 {
@@ -114,7 +114,7 @@ func TestRedisManagedModel(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	const now = int64(1700000000000000)
-	script := redis.NewScript(strings.Replace(protocolSource+"\nlocal managed=true\n"+admissionSource, "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])", fmt.Sprintf("local now = %d", now), 1))
+	script := redis.NewScript(strings.Replace(source, "local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])", fmt.Sprintf("local now = %d", now), 1))
 	rng := rand.New(rand.NewSource(20261028))
 	for iteration := 0; iteration < 150; iteration++ {
 		n := 1 + rng.Intn(4)
@@ -140,7 +140,7 @@ func TestRedisManagedModel(t *testing.T) {
 			names[i] = name
 			keys[i] = l.key(name)
 			keys[n+i] = l.policyKey(name)
-			args = append(args, int64(0), int64(0), cost)
+			args = append(args, cost)
 			before[i] = fmt.Sprintf("D3|%d", tat)
 			if err := c.MSet(ctx, keys[i], before[i], keys[n+i], fmt.Sprintf("P3|%d:%d:1", policies[i].Interval, burst)).Err(); err != nil {
 				t.Fatal(err)

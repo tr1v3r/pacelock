@@ -7,13 +7,17 @@
 - Remove `AllowOnce`, `Lookup`, `Receipt`, `LookupRequest`, admission
   `ID`/`Retention`/`Fingerprint`, and `Event.Replayed`. Admission no longer retains
   results, detects admission-ID conflicts or provides uncertain-result recovery.
-- `New` / `NewWithOptions` remain dynamic. `NewStatic` / `NewStaticWithOptions`
-  construct independent fixed-policy limiters. Both expose
-  `Allow(ctx, ...Charge) (Decision, error)` and `Wait(ctx, ...Charge) error`;
-  only dynamic limiters expose `UpdateQuotas`.
-- `Driver.Admit` and `StaticDriver.AdmitStatic` return `(Decision, error)`.
-  `Admission` is Scope + Charges; `StaticAdmission` is Scope + Rules.
-  Custom drivers and consumers must migrate together; no compatibility aliases.
+- `New` / `NewWithOptions` construct the sole dynamic `Limiter`, exposing
+  `Allow(ctx, ...Charge) (Decision, error)`, `Wait(ctx, ...Charge) error` and
+  `UpdateQuotas`. Publish positive-revision quotas explicitly before requests.
+- Remove `StaticLimiter`, `NewStatic`, `NewStaticWithOptions`, `StaticDriver`,
+  `StaticAdmission`, `ValidateStatic` and all backend static admission paths.
+  `Rule`, `Validate` and `Evaluate` remain offline math helpers only.
+- `Driver.Admit(ctx, Admission) (Decision, error)` remains unchanged; `Admission`
+  is Scope + Charges. No compatibility aliases or deployment convenience APIs.
+- Policies may live in code, but execution is backend-authoritative across rolling
+  pods. Handle stale update rejection explicitly; rollback requires a higher revision.
+  Retire old static writers before installing policies, preserving debt and receipts.
 - Preserve dynamic Wait from dev #34: copy charges once, use current backend
   policies on each attempt, retry only valid capacity denials after RetryAfter,
   and stop on every error. Preserve in-flight accounting certainty and confirmed
@@ -35,9 +39,6 @@
   policy updates preserve absolute debt.
 - Rename `UpdatePolicies` → `UpdateQuotas`, `PolicyDriver` → `QuotaDriver`,
   `PolicyUpdate` → `QuotaUpdate`. `Policy` and `ApplyPolicies` keep their names.
-- Replace parent-bound static construction and rule-taking limiter methods with
-  standalone static constructors and public `Charge{Name, Cost}` values. Static
-  calls accept any nonempty subset; callers must select every applicable quota.
 - Standard-library core, independent Redis/PostgreSQL modules, explicit Migrate,
   single-MSET Redis quota commit, logical expiry and application-scheduled cleanup.
 - Per-command Redis NoRetry prevents ambiguous replay while preserving bounded

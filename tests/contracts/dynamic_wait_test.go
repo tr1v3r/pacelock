@@ -12,7 +12,7 @@ import (
 
 // dynamicWaitDriver keeps the real backend's atomic admission and authoritative
 // clock. Hooks coordinate changes at the driver boundary, not with guessed sleeps.
-// It intentionally exposes no StaticDriver: dynamic Wait must use Admit.
+// Wait always uses Admit; the hook does not replace backend policy resolution.
 type dynamicWaitDriver struct {
 	pacelock.Driver
 	admissions []pacelock.Admission
@@ -79,8 +79,8 @@ func allowDynamic(t *testing.T, l *contractLimiter, charges ...pacelock.Charge) 
 
 func TestDynamicWaitDriverContract(t *testing.T) {
 	// Include Cluster as well as standalone Redis and PostgreSQL using the same
-	// real fixtures as the static blocking contracts.
-	for _, b := range boundBackends(t) {
+	// real fixtures as the published-policy blocking contracts.
+	for _, b := range allBackends(t) {
 		t.Run(b.name, func(t *testing.T) {
 			t.Run("weighted recovery consumes once", func(t *testing.T) {
 				l := limiter(t, b, 0, freshDomain())
@@ -260,7 +260,7 @@ func TestDynamicWaitDriverContract(t *testing.T) {
 }
 
 func TestDynamicWaitCancellationAccounting(t *testing.T) {
-	for _, b := range boundBackends(t) {
+	for _, b := range allBackends(t) {
 		t.Run(b.name, func(t *testing.T) {
 			for _, mode := range []string{"confirmed debit", "confirmed denial", "lost debit reply", "uncanceled lost debit reply", "uncharged transport error"} {
 				t.Run(mode, func(t *testing.T) {

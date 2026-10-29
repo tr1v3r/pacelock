@@ -1,8 +1,7 @@
-> Historical archive: the content below includes removed idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic/static admission exposes Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
+> Historical archive: the content below includes removed static, idempotent admission, receipt and lookup APIs. It is not current integration guidance or validation. Run historical commands only against their recorded source revision. Current dynamic-only admission exposes UpdateQuotas/Allow/Wait, with no uncertain-result recovery; do not blindly retry Unknown. See the [current API](../../README.md).
 
 # Quota.Charge local verification — 2026-10-28
 
-> Historical snapshot: diagrams, measurements and API names below describe the pinned source revision, not the current API. Current static use constructs a standalone `NewStatic` / `NewStaticWithOptions`, then passes public `Charge{Name, Cost}` values to `StaticLimiter.Allow` / `Wait`. Default `New` returns dynamic `Limiter`. See the [current API](../../README.md#explicit-static-alternative-fixed-policies-and-costs); generated historical artifacts are intentionally unchanged.
 
 > Archived measurement of the tree identified below, not validation of the current
 > Redis key prefix, quota/receipt encoding or fingerprint. API measurements remain
@@ -14,7 +13,7 @@ results, a release certification or production throughput measurements.
 
 This historical run predates nonempty-subset bound admission. Its complete-set
 validation results describe the earlier contract, not the current API; see the
-[current policy and cost contracts](../../README.md#explicit-static-alternative-fixed-policies-and-costs).
+[current policy and cost contracts](../../README.md#policies-in-code-execution-in-the-backend).
 
 ## Environment and correctness checks
 

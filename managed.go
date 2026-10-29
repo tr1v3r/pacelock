@@ -7,8 +7,8 @@ import (
 )
 
 // Charge requests a known cost against a named quota. It contains no policy or
-// revision: Limiter resolves backend configuration atomically, while StaticLimiter
-// uses its immutable local policies. Include every applicable quota in one call.
+// revision: Limiter resolves backend configuration atomically.
+// Include every applicable quota in one call.
 type Charge struct {
 	// Name identifies a quota within the limiter's scope.
 	Name string
@@ -124,19 +124,4 @@ func EvaluateManaged(now int64, charges []Charge, policies, debts []QuotaState) 
 		states[i].ExpiresAt = d.ExpiresAt
 	}
 	return Evaluate(now, rules, states)
-}
-
-// ValidateStatic prevents the caller-policy API from masquerading as managed
-// admission. Backend configuration checks additionally prevent a static writer
-// from bypassing an already managed quota. Validate remains a general math check.
-func ValidateStatic(rules ...Rule) error {
-	if err := Validate(rules...); err != nil {
-		return err
-	}
-	for _, r := range rules {
-		if r.Policy.Revision != 0 {
-			return fmt.Errorf("%w: use Allow for backend-owned policy", ErrInvalid)
-		}
-	}
-	return nil
 }

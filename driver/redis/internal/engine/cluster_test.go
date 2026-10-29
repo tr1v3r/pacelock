@@ -43,11 +43,12 @@ func TestRedisCluster(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := []Rule{rule("rpm", 2, 1), rule("tokens", 4, 2)}
+		publishRules(t, l, r...)
 		quotaSlot, err := c.ClusterKeySlot(ctx, l.key("rpm")).Result()
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []string{l.key("rpm"), l.key("tokens"), l.policyKey("rpm")} {
+		for _, k := range []string{l.key("rpm"), l.key("tokens"), l.policyKey("rpm"), l.policyKey("tokens")} {
 			keys = append(keys, k)
 			slot, err := c.ClusterKeySlot(ctx, k).Result()
 			if err != nil || slot != quotaSlot {
@@ -59,14 +60,14 @@ func TestRedisCluster(t *testing.T) {
 				seen[s.Nodes[0].Addr] = true
 			}
 		}
-		d, err := l.Allow(ctx, r...)
+		d, err := l.admitRules(ctx, r...)
 		if err != nil || !d.Allowed {
 			t.Fatalf("%+v %v", d, err)
 		}
-		if d, err := l.Allow(ctx, r...); err != nil || !d.Allowed {
+		if d, err := l.admitRules(ctx, r...); err != nil || !d.Allowed {
 			t.Fatalf("%+v %v", d, err)
 		}
-		if d, err := l.Allow(ctx, r...); err != nil || d.Allowed {
+		if d, err := l.admitRules(ctx, r...); err != nil || d.Allowed {
 			t.Fatalf("%+v %v", d, err)
 		}
 	}
@@ -78,7 +79,8 @@ func TestRedisCluster(t *testing.T) {
 	other := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ","), MaxRetries: -1, MaxRedirects: -1})
 	defer other.Close()
 	l2 := &Limiter{client: other, prefix: l.prefix}
-	keys = append(keys, l.key("q"))
+	keys = append(keys, l.key("q"), l.policyKey("q"))
+	publishRules(t, l, rule("q", 1, 1))
 	var first atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {
@@ -89,7 +91,7 @@ func TestRedisCluster(t *testing.T) {
 			if i%2 == 0 {
 				current = l2
 			}
-			d, err := current.Allow(ctx, rule("q", 1, 1))
+			d, err := current.admitRules(ctx, rule("q", 1, 1))
 			if err != nil {
 				t.Errorf("%+v %v", d, err)
 			} else if d.Allowed {
