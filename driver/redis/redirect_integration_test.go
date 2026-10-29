@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func TestClusterMissingPolicyResharding(t *testing.T) {
 			defer cancel()
 			admin := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ",")})
 			defer admin.Close()
-			l, err := New(admin, "missing-policy-resharding", fmt.Sprint(time.Now().UnixNano()))
+			l, err := newLimiter(admin, "missing-policy-resharding", fmt.Sprint(time.Now().UnixNano()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +208,7 @@ func testClusterLiveRedirects(t *testing.T, retries int, wireLoss bool) {
 	defer cancel()
 	admin := redis.NewClusterClient(&redis.ClusterOptions{Addrs: strings.Split(addresses, ",")})
 	t.Cleanup(func() { admin.Close() })
-	l, err := New(redis.NewClient(&redis.Options{Addr: "unused", MaxRetries: -1}), "redirect-test", time.Now().String())
+	l, err := newLimiter(redis.NewClient(&redis.Options{Addr: "unused", MaxRetries: -1}), "redirect-test", time.Now().String())
 	if err != nil {
 		t.Fatal(err)
 	}

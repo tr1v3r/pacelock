@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -46,13 +46,13 @@ func (s *stubScripter) Eval(ctx context.Context, _ string, _ []string, _ ...inte
 
 func TestDefensiveInputs(t *testing.T) {
 	var nilRedis *redis.Client
-	if _, err := New(nilRedis, "app", "domain"); !errors.Is(err, ErrInvalid) {
+	if _, err := newLimiter(nilRedis, "app", "domain"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("typed nil: %v", err)
 	}
 	s := &stubScripter{}
-	l, _ := New(s, "app", "domain")
+	l, _ := newLimiter(s, "app", "domain")
 	r := rule("q", 1, 1)
-	for _, current := range []*Limiter{nil, {}, l} {
+	for _, current := range []*limiter{nil, {}, l} {
 		if _, err := current.admitRules(nil, r); !errors.Is(err, ErrInvalid) || OutcomeOf(err) != NotCharged {
 			t.Fatalf("nil context/limiter: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 			op := "allow"
 			t.Run(op+"/"+tc.name, func(t *testing.T) {
 				s := &stubScripter{reply: tc.reply, err: tc.err}
-				l, _ := New(s, "a", "b")
+				l, _ := newLimiter(s, "a", "b")
 				_, err := l.Admit(context.Background(), managedRequest("q", 1))
 				if !errors.Is(err, tc.want) || OutcomeOf(err) != tc.outcome {
 					t.Fatalf("%v: %s", err, OutcomeOf(err))
@@ -115,7 +115,7 @@ func TestTransportAndReplyErrors(t *testing.T) {
 
 func TestOnlyNoScriptFallsBack(t *testing.T) {
 	s := &stubScripter{shaErr: serverError("NOSCRIPT No matching script"), reply: []interface{}{int64(1), int64(0), int64(0)}}
-	l, _ := New(s, "a", "b")
+	l, _ := newLimiter(s, "a", "b")
 	d, err := l.admitRules(context.Background(), rule("q", 1, 1))
 	if err != nil || !d.Allowed || s.calls != 1 || s.evalCalls != 1 {
 		t.Fatalf("%+v %v calls=%d/%d", d, err, s.calls, s.evalCalls)

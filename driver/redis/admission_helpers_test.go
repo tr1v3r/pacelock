@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -12,7 +12,7 @@ type Policy = pacelock.Policy
 func OutcomeOf(err error) Outcome { return pacelock.OutcomeOf(err) }
 
 // Rules are fixture descriptions only. Runtime admission carries names and costs.
-func (l *Limiter) admitRules(ctx context.Context, rules ...Rule) (Decision, error) {
+func (l *limiter) admitRules(ctx context.Context, rules ...Rule) (Decision, error) {
 	request := pacelock.Admission{Scope: pacelock.Scope{Namespace: "test", Domain: "test"}}
 	for _, r := range rules {
 		request.Charges = append(request.Charges, pacelock.Charge{Name: r.Name, Cost: r.Cost})
@@ -20,7 +20,7 @@ func (l *Limiter) admitRules(ctx context.Context, rules ...Rule) (Decision, erro
 	return l.Admit(ctx, request)
 }
 
-func publishRules(t testing.TB, l *Limiter, rules ...Rule) {
+func publishRules(t testing.TB, l *limiter, rules ...Rule) {
 	t.Helper()
 	quotas := make([]pacelock.Quota, len(rules))
 	for i, r := range rules {
@@ -35,7 +35,7 @@ func publishRules(t testing.TB, l *Limiter, rules ...Rule) {
 	}
 }
 
-func (l *Limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
+func (l *limiter) prepare(rules []Rule) ([]string, []interface{}, error) {
 	if err := pacelock.Validate(rules...); err != nil {
 		return nil, nil, err
 	}

@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -76,7 +76,7 @@ func (s *admissionProtocolSpy) EvalSha(ctx context.Context, sha string, keys []s
 }
 func TestAdmissionProtocol(t *testing.T) {
 	spy := &admissionProtocolSpy{stubScripter: stubScripter{reply: []interface{}{int64(1), int64(0), int64(0), int64(0)}}}
-	l, err := New(spy, "test", "protocol")
+	l, err := newLimiter(spy, "test", "protocol")
 	if err != nil {
 		t.Fatal(err)
 	}

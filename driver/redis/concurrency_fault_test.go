@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -144,7 +144,7 @@ func testContentionLostResponses(t *testing.T, f *contentionFixture) {
 			r := contentionRule("q", 100, 1)
 			publishRules(t, l, r)
 			wrapped := &concurrentResponseLoss{Scripter: f.clients[0], loss: loss.err}
-			broken := &Limiter{client: wrapped, prefix: l.prefix}
+			broken := &limiter{client: wrapped, prefix: l.prefix}
 			contentionWave(t, 400, func(ctx context.Context, i int) {
 				_, err := broken.admitRules(ctx, r)
 				if !errors.Is(err, loss.err) || OutcomeOf(err) != Unknown {
@@ -163,7 +163,7 @@ func testContentionSmallPool(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
 	small := contentionClient(f.cluster, 1)
 	defer small.Close()
-	current := &Limiter{client: small, prefix: l.prefix}
+	current := &limiter{client: small, prefix: l.prefix}
 	publishRules(t, l, contentionRule("q", 73, 1), contentionRule("after", 1, 1))
 	var admitted atomic.Int64
 	contentionWave(t, 500, func(ctx context.Context, i int) {
@@ -295,7 +295,7 @@ func testContentionPoolExhaustion(t *testing.T, f *contentionFixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := &Limiter{client: small, prefix: l.prefix}
+	current := &limiter{client: small, prefix: l.prefix}
 	contentionWave(t, 100, func(parent context.Context, i int) {
 		deadline, cancel := context.WithTimeout(parent, 100*time.Millisecond)
 		defer cancel()

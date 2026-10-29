@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func TestNewClientRetryOptions(t *testing.T) {
 			if normalized != wantNormalized {
 				t.Fatalf("unexpected go-redis normalization: %d", normalized)
 			}
-			l, err := New(client, "transport-test", "domain")
+			l, err := newLimiter(client, "transport-test", "domain")
 			if retries >= -1 {
 				if err != nil || l == nil {
 					t.Fatalf("safe client rejected: %v", err)
@@ -84,7 +84,7 @@ func TestNewClusterRetryOptions(t *testing.T) {
 				if normalizedRedirects != wantRedirects || normalizedRetries != wantRetries {
 					t.Fatalf("unexpected go-redis normalization: redirects=%d retries=%d", normalizedRedirects, normalizedRetries)
 				}
-				l, err := New(client, "transport-test", "domain")
+				l, err := newLimiter(client, "transport-test", "domain")
 				if redirects >= -1 && retries >= -1 {
 					if err != nil || l == nil {
 						t.Fatalf("safe client rejected: %v", err)
@@ -104,11 +104,11 @@ func TestNewClusterRetryOptions(t *testing.T) {
 }
 
 func TestNewCustomTransport(t *testing.T) {
-	if l, err := New(&stubScripter{}, "transport-test", "domain"); err != nil || l == nil {
+	if l, err := newLimiter(&stubScripter{}, "transport-test", "domain"); err != nil || l == nil {
 		t.Fatalf("custom Scripter rejected: %v", err)
 	}
 	var nilCluster *redis.ClusterClient
-	if l, err := New(nilCluster, "transport-test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
+	if l, err := newLimiter(nilCluster, "transport-test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
 		t.Fatalf("typed-nil Cluster accepted: %v", err)
 	}
 }
@@ -152,7 +152,7 @@ func TestClusterRedirectsDisabled(t *testing.T) {
 				},
 			})
 			defer client.Close()
-			l, err := New(client, "transport-test", kind)
+			l, err := newLimiter(client, "transport-test", kind)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -168,7 +168,7 @@ func TestNewRejectsRing(t *testing.T) {
 	for _, retries := range []int{-1, 0, 3} {
 		ring := redis.NewRing(&redis.RingOptions{Addrs: map[string]string{}, MaxRetries: retries, HeartbeatFrequency: time.Hour})
 		before := ring.Options().MaxRetries
-		limiter, err := New(ring, "transport-test", "domain")
+		limiter, err := newLimiter(ring, "transport-test", "domain")
 		if limiter != nil || !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Ring accepted: %v %v", limiter, err)
 		}
@@ -178,7 +178,7 @@ func TestNewRejectsRing(t *testing.T) {
 		ring.Close()
 	}
 	var ring *redis.Ring
-	if l, err := New(ring, "test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
+	if l, err := newLimiter(ring, "test", "domain"); l != nil || !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil Ring accepted: %v", err)
 	}
 }
@@ -193,7 +193,7 @@ func TestClusterRedirectBudget(t *testing.T) {
 		NewClient: func(o *redis.Options) *redis.Client { c := redis.NewClient(o); c.AddHook(hook); return c },
 	})
 	defer client.Close()
-	limiter, err := New(client, "budget", "domain")
+	limiter, err := newLimiter(client, "budget", "domain")
 	if err != nil {
 		t.Fatal(err)
 	}

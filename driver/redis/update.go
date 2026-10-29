@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -16,7 +16,7 @@ var updateScript = redis.NewScript(protocolSource + updateSource)
 
 // UpdateQuotas atomically installs managed policies without resetting debt.
 // Transport ambiguity is Unknown; no implicit retries are performed.
-func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...pacelock.Quota) error {
+func (l *limiter) UpdateQuotas(ctx context.Context, quotas ...pacelock.Quota) error {
 	const op = "update_quotas"
 	if err := l.ready(ctx); err != nil {
 		return failure(op, NotCharged, err)

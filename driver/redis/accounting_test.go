@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func TestRedisLostResponseAccounting(t *testing.T) {
 	l, c := integration(t)
 	ctx := context.Background()
 	wrapped := &lostResponse{Scripter: c}
-	broken := &Limiter{client: wrapped, prefix: l.prefix}
+	broken := &limiter{client: wrapped, prefix: l.prefix}
 	r := rule("q", 2, 1)
 	publishRules(t, l, r)
 	if _, err := broken.admitRules(ctx, r); !errors.Is(err, io.ErrUnexpectedEOF) || OutcomeOf(err) != Unknown {
@@ -64,7 +64,7 @@ func TestRedisMSETACLFailureIsUncharged(t *testing.T) {
 	t.Cleanup(func() { admin.Do(ctx, "ACL", "DELUSER", user) })
 	restricted := redis.NewClient(&redis.Options{Addr: admin.Options().Addr, Username: user, Password: password, MaxRetries: -1})
 	defer restricted.Close()
-	limited := &Limiter{client: restricted, prefix: l.prefix}
+	limited := &limiter{client: restricted, prefix: l.prefix}
 	rules := []Rule{rule("first", 2, 1), rule("second", 2, 1)}
 	publishRules(t, l, rules...)
 	if _, err := limited.admitRules(ctx, rules...); err == nil || OutcomeOf(err) != NotCharged {

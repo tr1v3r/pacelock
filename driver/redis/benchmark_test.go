@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func BenchmarkRedis(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/rules=%d", mode, n), func(b *testing.B) {
 				c := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
 				defer c.Close()
-				l, _ := New(c, "pacelock-bench", fmt.Sprintf("%s-%d", b.Name(), time.Now().UnixNano()))
+				l, _ := newLimiter(c, "pacelock-bench", fmt.Sprintf("%s-%d", b.Name(), time.Now().UnixNano()))
 				ctx := context.Background()
 				b.Cleanup(func() {
 					clean := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
@@ -90,7 +90,7 @@ func BenchmarkPruneCandidates(b *testing.B) {
 		b.Run(fmt.Sprintf("keys=%d", n), func(b *testing.B) {
 			c := redis.NewClient(&redis.Options{Addr: address, ContextTimeoutEnabled: true})
 			defer c.Close()
-			l, err := New(c, "pacelock-prune-bench", fmt.Sprint(time.Now().UnixNano()))
+			l, err := newLimiter(c, "pacelock-prune-bench", fmt.Sprint(time.Now().UnixNano()))
 			if err != nil {
 				b.Fatal(err)
 			}

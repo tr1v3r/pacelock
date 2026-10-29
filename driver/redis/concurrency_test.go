@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -73,9 +73,9 @@ func newContentionFixture(t *testing.T, cluster bool) *contentionFixture {
 
 var contentionSequence atomic.Int64
 
-func (f *contentionFixture) limiter(t *testing.T) *Limiter {
+func (f *contentionFixture) limiter(t *testing.T) *limiter {
 	t.Helper()
-	l, err := New(f.clients[0], "pacelock-contention", fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), contentionSequence.Add(1)))
+	l, err := newLimiter(f.clients[0], "pacelock-contention", fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), contentionSequence.Add(1)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func (f *contentionFixture) limiter(t *testing.T) *Limiter {
 	return l
 }
 
-func (f *contentionFixture) cleanup(t *testing.T, l *Limiter) {
+func (f *contentionFixture) cleanup(t *testing.T, l *limiter) {
 	t.Helper()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -117,8 +117,8 @@ func (f *contentionFixture) cleanup(t *testing.T, l *Limiter) {
 	})
 }
 
-func (f *contentionFixture) caller(l *Limiter, i int) *Limiter {
-	return &Limiter{client: f.clients[i%len(f.clients)], prefix: l.prefix}
+func (f *contentionFixture) caller(l *limiter, i int) *limiter {
+	return &limiter{client: f.clients[i%len(f.clients)], prefix: l.prefix}
 }
 
 func contentionWave(t *testing.T, n int, call func(context.Context, int)) {
@@ -140,7 +140,7 @@ func contentionWave(t *testing.T, n int, call func(context.Context, int)) {
 	}
 }
 
-func requireAllowed(t *testing.T, l *Limiter, rules ...Rule) {
+func requireAllowed(t *testing.T, l *limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -149,7 +149,7 @@ func requireAllowed(t *testing.T, l *Limiter, rules ...Rule) {
 	}
 }
 
-func requireDenied(t *testing.T, l *Limiter, rules ...Rule) {
+func requireDenied(t *testing.T, l *limiter, rules ...Rule) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -158,7 +158,7 @@ func requireDenied(t *testing.T, l *Limiter, rules ...Rule) {
 	}
 }
 
-func quotaState(t *testing.T, f *contentionFixture, l *Limiter, name string) string {
+func quotaState(t *testing.T, f *contentionFixture, l *limiter, name string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -340,7 +340,7 @@ func testContentionOverlapping(t *testing.T, f *contentionFixture) {
 func testContentionIsolation(t *testing.T, f *contentionFixture) {
 	// Same quota name; vary namespace alone, domain alone, and both.
 	seed := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
-	limiters := make([]*Limiter, 32)
+	limiters := make([]*limiter, 32)
 	for i := range limiters {
 		ns, domain := "ns-"+seed, "domain-"+seed
 		if i%2 == 0 {
@@ -348,7 +348,7 @@ func testContentionIsolation(t *testing.T, f *contentionFixture) {
 		} else {
 			domain = fmt.Sprintf("%s-%d", domain, i)
 		}
-		l, err := New(f.clients[0], ns, domain)
+		l, err := newLimiter(f.clients[0], ns, domain)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -378,7 +378,7 @@ func testContentionWorkers(t *testing.T, f *contentionFixture) {
 	// Keep each worker active for multiple sequential calls. Half hit one hot
 	// domain; half spread over eight other domains. All workers contend
 	// on the same quotas. This is a bounded workload, not a long-duration soak.
-	limiters := make([]*Limiter, 9)
+	limiters := make([]*limiter, 9)
 	for i := range limiters {
 		limiters[i] = f.limiter(t)
 		publishRules(t, limiters[i], contentionRule("q", 200, 2))

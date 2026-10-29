@@ -1,4 +1,4 @@
-package engine
+package redisdriver
 
 import (
 	"context"
@@ -113,7 +113,7 @@ func TestRedisRetryBudgetsLostReply(t *testing.T) {
 					}); err != nil {
 						t.Fatal(err)
 					}
-					limiter, err := New(client, "retry-budget", fmt.Sprint(time.Now().UnixNano()))
+					limiter, err := newLimiter(client, "retry-budget", fmt.Sprint(time.Now().UnixNano()))
 					if err != nil {
 						t.Fatal(err)
 					}
