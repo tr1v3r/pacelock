@@ -19,7 +19,7 @@ rpm := pacelock.Quota{
 tokens := pacelock.Quota{
     Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000},
 }
-if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 // 错误时忽略 decision，并检查 pacelock.OutcomeOf(err)。
 ```
@@ -32,17 +32,17 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-默认先用 `UpdatePolicies` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
 
 ## 默认动态策略
 
-Driver 实现必需的动态 `pacelock.Driver`，以及可选 `pacelock.PolicyDriver` 与 `pacelock.StaticDriver` 接口。
+Driver 实现必需的动态 `pacelock.Driver`，以及可选 `pacelock.QuotaDriver` 与 `pacelock.StaticDriver` 接口。
 控制面发布配置，数据面**只传名称与消耗**，获得 scope 锁后使用后端最新配置。
 准入节点无需刷新本地策略或重新绑定，SDK 不启动后台 worker；配置源轮询与发布由调用者负责。
 
 ```go
 // 控制面：发布配置源中的权威版本。
-err = limiter.UpdatePolicies(ctx, pacelock.Quota{
+err = limiter.UpdateQuotas(ctx, pacelock.Quota{
     Name: "requests",
     Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 })
@@ -60,7 +60,7 @@ _ = receipt
 通过 `ApplyPolicies` 完整校验批次后写入。更新只读写独立策略表，绝不读写债务，
 暂停与恢复也不修改 TAT 或债务过期时间。更高版本替换配置；相同版本且有效间隔/Burst 相同
 是只读成功，不重写配置。旧版本或同版本不同配置返回 `ErrPolicyMismatch`。
-缩小容量可能使债务暂时超出容量；债务随时间恢复，更新配置不会重置债务。
+缩小容量可能使债务暂时超出容量；债务随时间恢复，额度配置变更不会补充容量、重置或重标定债务。
 
 任何策略缺失时，托管准入关闭放行并返回 `ErrPolicyMissing` / `NotCharged`。
 消耗超过当前 Burst 返回 `ErrInvalid`，不是可以等待恢复的容量拒绝。

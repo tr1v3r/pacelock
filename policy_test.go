@@ -154,9 +154,9 @@ type managedTestDriver struct {
 	override       *Receipt
 }
 
-func (d *managedTestDriver) UpdatePolicies(ctx context.Context, u PolicyUpdate) error {
+func (d *managedTestDriver) UpdateQuotas(ctx context.Context, u QuotaUpdate) error {
 	if err := ctx.Err(); err != nil {
-		return failure("update_policies", NotCharged, err)
+		return failure("update_quotas", NotCharged, err)
 	}
 	states := make([]QuotaState, len(u.Quotas))
 	for i, q := range u.Quotas {
@@ -164,7 +164,7 @@ func (d *managedTestDriver) UpdatePolicies(ctx context.Context, u PolicyUpdate) 
 	}
 	next, err := ApplyPolicies(time.Now().UnixMicro(), u.Quotas, states)
 	if err != nil {
-		return failure("update_policies", NotCharged, err)
+		return failure("update_quotas", NotCharged, err)
 	}
 	for i, q := range u.Quotas {
 		d.policies[q.Name] = next[i]
@@ -204,7 +204,7 @@ func TestManagedFacade(t *testing.T) {
 	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrPolicyMissing) {
 		t.Fatal(err)
 	}
-	if err := l.UpdatePolicies(ctx, q); err != nil {
+	if err := l.UpdateQuotas(ctx, q); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.Allow(ctx, c); !errors.Is(err, ErrPaused) || OutcomeOf(err) != NotCharged {
@@ -212,7 +212,7 @@ func TestManagedFacade(t *testing.T) {
 	}
 	q.Policy.Revision++
 	q.Policy.Rate = 10
-	if err := l.UpdatePolicies(ctx, q); err != nil {
+	if err := l.UpdateQuotas(ctx, q); err != nil {
 		t.Fatal(err)
 	}
 	if decision, err := l.Allow(ctx, c); err != nil || !decision.Allowed {
@@ -233,7 +233,7 @@ func TestManagedFacade(t *testing.T) {
 	if _, err := l.Allow(canceled, c); !errors.Is(err, context.Canceled) || d.managedCalls != count {
 		t.Fatal(err)
 	}
-	if err := l.UpdatePolicies(canceled, q); !errors.Is(err, context.Canceled) {
+	if err := l.UpdateQuotas(canceled, q); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	d.override = &Receipt{Decision: Decision{Allowed: true}, Replayed: true}
@@ -251,8 +251,32 @@ func TestManagedFacade(t *testing.T) {
 	if _, err := unsupported.Allow(ctx, c); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
 	}
-	if err := unsupported.UpdatePolicies(ctx, q); !errors.Is(err, ErrUnsupported) {
+	if err := unsupported.UpdateQuotas(ctx, q); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdateQuotasErrorOperation(t *testing.T) {
+	var _ QuotaDriver = (*managedTestDriver)(nil)
+	l, err := New(&testDriver{}, "ns", "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		quotas []Quota
+		want   error
+	}{
+		{name: "invalid", want: ErrInvalid},
+		{name: "unsupported", quotas: []Quota{managedQuota(1, 10, 10)}, want: ErrUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := l.UpdateQuotas(context.Background(), tc.quotas...)
+			var failure *Error
+			if !errors.Is(err, tc.want) || !errors.As(err, &failure) || failure.Op != "update_quotas" || failure.Outcome != NotCharged {
+				t.Fatalf("quota update error: %+v", err)
+			}
+		})
 	}
 }
 

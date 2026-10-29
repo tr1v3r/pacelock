@@ -12,7 +12,7 @@ type Options struct {
 }
 
 // Observer receives one synchronous event per dynamic or static admission and
-// Lookup call. BindStatic and UpdatePolicies emit no event. The callback must be
+// Lookup call. BindStatic and UpdateQuotas emit no event. The callback must be
 // fast and concurrency-safe.
 // Panics propagate; no background work is created.
 type Observer func(context.Context, Event)

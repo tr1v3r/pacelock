@@ -69,7 +69,7 @@ tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000,
 }}
 // 控制面先发布；数据面只传名称与本次消耗。
-if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
 charges := []pacelock.Charge{{Name: rpm.Name, Cost: 1}, {Name: tokens.Name, Cost: 1500}}
 decision, err := limiter.Allow(ctx, charges...)
 if err != nil {
@@ -147,7 +147,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // 显式初始化，�
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-两种 Driver 共用 `UpdatePolicies`、`Allow`、`AllowOnce`、`BindStatic`、`WaitStatic`、`Lookup`、错误结果和观测接口。
+两种 Driver 共用 `UpdateQuotas`、`Allow`、`AllowOnce`、`BindStatic`、`WaitStatic`、`Lookup`、错误结果和观测接口。
 PostgreSQL 锁定一行 domain，获得锁后采样一次 `clock_timestamp()`，用短事务
 一起提交全部额度与准入记录。提交前失败会回滚；提交错误保守标记为 `Unknown`。
 当前不会加入调用者的业务事务。domain 竞争、WAL、连接池和 vacuum 需要目标环境验证，
@@ -159,9 +159,9 @@ SDK 不启动后台任务。
 
 ## 默认动态策略与暂停
 
-破坏性迁移：原静态 `Allow` / `AllowOnce` / `Wait` 改为 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`；原动态 `AllowManaged` / `AllowManagedOnce` 改为默认 `Allow` / `AllowOnce`，`NamedCharge` 改为 `Charge`。原 `Bind` / `BoundLimiter` / `Quota.Charge` 改为 `BindStatic` / `StaticLimiter` / `Quota.StaticCharge`；绑定对象的方法仍为 `Allow` / `AllowOnce`。`ManagedAdmission` 改为默认 `Admission`；自定义 Driver 须实现必需的动态 `Admit(Admission)`，静态下沉为可选 `StaticDriver.AdmitStatic(StaticAdmission)`，`PolicyDriver` 不变且共享 `Lookup`。详见[迁移指南](docs/compatibility.md)。
+破坏性迁移：原静态 `Allow` / `AllowOnce` / `Wait` 改为 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`；原动态 `AllowManaged` / `AllowManagedOnce` 改为默认 `Allow` / `AllowOnce`，`NamedCharge` 改为 `Charge`。原 `Bind` / `BoundLimiter` / `Quota.Charge` 改为 `BindStatic` / `StaticLimiter` / `Quota.StaticCharge`；绑定对象的方法仍为 `Allow` / `AllowOnce`。`ManagedAdmission` 改为默认 `Admission`；自定义 Driver 须实现必需的动态 `Admit(Admission)`，静态下沉为可选 `StaticDriver.AdmitStatic(StaticAdmission)`，共享 `Lookup`。`UpdatePolicies` 改为 `UpdateQuotas`，`PolicyDriver` 改为 `QuotaDriver`，`PolicyUpdate` 改为 `QuotaUpdate`，旧公开名称移除；`Policy` 类型与纯计算辅助函数 `ApplyPolicies` 名称不变。详见[迁移指南](docs/compatibility.md)。
 
-控制面使用 `UpdatePolicies`，数据面使用 `Allow`。Redis 和 PostgreSQL
+控制面使用 `UpdateQuotas`，数据面使用 `Allow`。Redis 和 PostgreSQL
 将永久配置与可过期的 TAT（债务）分开存储。处理请求的实例只需要额度名和 cost，
 不需要本地策略、版本、binding 或配置 watcher：
 
@@ -170,7 +170,7 @@ SDK 不启动后台任务。
 q := pacelock.Quota{Name: "tenant:rpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 100, Period: time.Minute, Burst: 20,
 }}
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 
 // 数据面：调整速率、暂停、恢复时，这个 charge 都不需要修改。
 charge := pacelock.Charge{Name: "tenant:rpm", Cost: 1}
@@ -181,24 +181,24 @@ if !decision.Allowed { /* 拒绝或调度另一次尝试 */ }
 // 后续配置发布：不重置旧债，无需刷新请求节点。
 q.Policy.Revision = 2
 q.Policy.Rate = 200
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 q.Policy.Revision = 3
 q.Policy.Rate = 0 // 紧急暂停，新准入返回 ErrPaused
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 q.Policy.Revision = 4
 q.Policy.Rate = 100 // 恢复；暂停期间旧债随时间自然恢复
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 ```
 
 - 版本来自同一个权威配置源，不能由各进程独立递增。多实例可重复发布同一批配置：高版本生效，同版本同有效策略只读成功，旧版本或同版本冲突返回 `ErrPolicyMismatch`。回滚需以**更高版本**发布旧参数。同 scope 内最多 `MaxRules` 条配置原子更新。
-- 更新不读取、不重标定、不清零 TAT，也不缩短已有债务寿命。准入在同一原子边界内读取当前配置和债务；旧债超过新 burst 时，保留到自然恢复。
+- 额度配置变更不会补充容量或重置债务。更新不读取、不重标定、不清零 TAT，也不缩短已有债务寿命。准入在同一原子边界内读取当前配置和债务；旧债超过新 burst 时，保留到自然恢复。
 - Redis 每个动态 quota 使用永久 P3 配置 key 与 D3 债务 key，所有 key 显式传入且同 slot。`Allow` 一次脚本往返完成，不是客户端先 GET 再写。PostgreSQL 使用独立策略表与原有 scope 事务锁。不增加分布式锁 key。
 - `Rate=0` 时仍要求正的 Period 和 Burst。新准入返回 `ErrPaused` / `NotCharged`，不扣减、不写 receipt。配置不存在返回 `ErrPolicyMissing`，不能默认无限额度。cost 超过当前 burst 返回 `ErrInvalid`。本次不提供管理型阻塞 Wait，也不启动 SDK 轮询 goroutine；配置发布、重试调度与轮询由应用负责。
 - `AllowOnce(ctx, id, retention, charges...)` 保留普通允许/拒绝决策。指纹绑定有序名称、cost 和保留期，**不绑定策略版本**。同次尝试在策略更新或暂停后仍重放原结果，`Lookup` 可查两种 API 的回执。改变 cost 或跨静态/管理型 API 复用 ID 返回 `ErrConflict`；重放不授权再次执行模型请求。
 - `Prune` 可以清理过期债务和回执，但绝不删除配置/版本。需规划配置名称基数；删除配置会丢失版本防护。所有动态发布都应走 SDK/版本检查脚本，不能裸 SET。
 - 静态 `AllowStatic` / `WaitStatic` / `BindStatic` 继续使用 Revision=0 规则。一旦后端存在对应配置，该名称的新静态准入会返回 `ErrPolicyMismatch`，不能绕过动态策略；历史静态回执仍可恢复。不能将带版本的 Policy 传给静态 API，应使用名称/cost 准入。
 - PostgreSQL 必须在新版请求进程接流量前显式 `Migrate` 新增策略表，**静态流量也需要**。激活动态策略前，再确保**所有写入进程**已升级，不能混跑旧写入程序。配置更新与准入正常串行；耗时过长的 Lua 仍会阻塞其他 Redis 命令。
-- 传输/提交异常可能导致发布结果不确定；SDK 不自动重试，可显式重试**同一版本/策略**以收敛。动态 `Driver.Admit(Admission)` 是必需接口，`PolicyDriver` 负责发布配置；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 支持调用方策略。不支持的可选能力返回 `ErrUnsupported`，不修改状态。
+- 传输/提交异常可能导致发布结果不确定；SDK 不自动重试，可显式重试**同一版本/策略**以收敛。动态 `Driver.Admit(Admission)` 是必需接口，`QuotaDriver` 负责发布配置；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 支持调用方策略。不支持的可选能力返回 `ErrUnsupported`，不修改状态。
 
 可运行 SDK 示例：[管理型准入](driver/redis/examples/managed/main.go)。
 
@@ -267,13 +267,13 @@ decision, found, err := limiter.Lookup(recoveryCtx, admissionID)
 
 `NotCharged` 不会消除先前调用的未知状态。**任何错误**都应忽略返回的决策。仅凭 `ErrState` 不能认定未扣减：扣减后收到损坏的响应也会返回它。必须检查 `OutcomeOf(err)`；它对不认识的错误保守地返回 Unknown。
 
-`Validate(rules...)` 可离线检查静态规则。`NewWithOptions` 接受同步 `Observer`，每次动态或静态准入及 `Lookup` 各触发一次；`BindStatic` / `UpdatePolicies` 不触发事件。操作名为 `allow`、`allow_once`、`allow_static`、`allow_static_once`、`wait_static`、`lookup`。`StaticLimiter.Allow` / `.AllowOnce` 也发静态事件。`WaitStatic` 为整个等待产生一次事件，不另发内部尝试事件。事件不以字段暴露原始额度名或 ID，但错误可能包含标识，不可用作指标标签。回调须快速、并发安全；panic 向外传播。
+`Validate(rules...)` 可离线检查静态规则。`NewWithOptions` 接受同步 `Observer`，每次动态或静态准入及 `Lookup` 各触发一次；`BindStatic` / `UpdateQuotas` 不触发事件。操作名为 `allow`、`allow_once`、`allow_static`、`allow_static_once`、`wait_static`、`lookup`。`StaticLimiter.Allow` / `.AllowOnce` 也发静态事件。`WaitStatic` 为整个等待产生一次事件，不另发内部尝试事件。事件不以字段暴露原始额度名或 ID，但错误可能包含标识，不可用作指标标签。回调须快速、并发安全；panic 向外传播。
 
 ## 额度与运行契约
 
 - `Rate / Period` 是恢复速度；`Burst` 是总瞬时容量，不是额外容量。`0 < Cost <= Burst`；Period 和突发容量完全恢复的时间均不超过 24 小时。发射间隔向上取整到微秒，极高速率的有效速度会保守降低。
 - GCRA 约束速率与突发包络，不是精确的固定/滑动分钟计数器。需要明确建模供应商规则；已知输入 token 不控制输出 TPM；字符数、字节数和 SSE chunk 数不等于 token 数。
-- 静态策略（Revision=0）的身份为有效间隔和 Burst；活跃状态策略变化返回 `ErrPolicyMismatch`。动态策略通过 `UpdatePolicies` 显式管理，还要求匹配永久保留的 Revision。
+- 静态策略（Revision=0）的身份为有效间隔和 Burst；活跃状态策略变化返回 `ErrPolicyMismatch`。动态策略通过 `UpdateQuotas` 显式管理，还要求匹配永久保留的 Revision。
 - 一个 domain 占用一个 Redis Cluster 槽。共享全局额度可能让较大的原子判定域集中到一个分片；任意分片无法保留跨槽事务。
 - SDK 脚本命令通过 `NoRetry` 禁止不确定重放，无需禁用客户端重试；Cluster 可保留重定向。只在 `NOSCRIPT` 时从 `EVALSHA` 回退到 `EVAL`。构造检查不能替代对自定义客户端、hooks、工厂及代理的审计。
 - 派发前取消不扣减；派发后取消不能撤销 Redis 写入。SDK 不创建 goroutine，不设置隐藏超时。

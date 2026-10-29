@@ -14,7 +14,7 @@ time, synchronization, persistence, logical expiry and error classification.
 Mandatory `Driver.Admit(Admission)` receives a scope, ordered name/cost charges and
 an optional ID/retention, resolving current backend policies atomically. Optional
 `StaticDriver.AdmitStatic(StaticAdmission)` receives caller-owned Revision-0 rules.
-Optional `PolicyDriver` publishes revisioned permanent configurations; missing optional
+Optional `QuotaDriver` publishes revisioned permanent configurations; missing optional
 capabilities return `ErrUnsupported` without mutation. `Lookup` is shared. The
 whole operation is the atomic boundary: all quotas pass together or an ordinary
 denial debits none. `Driver.Lookup` recovers a retained result on the authoritative

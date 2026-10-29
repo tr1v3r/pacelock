@@ -38,7 +38,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := limiter.UpdatePolicies(ctx, rpm); err != nil {
+	if err := limiter.UpdateQuotas(ctx, rpm); err != nil {
 		log.Fatal(err)
 	}
 	// Keep names, costs and retention unchanged for retained-attempt recovery.

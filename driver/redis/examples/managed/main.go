@@ -39,7 +39,7 @@ func run() error {
 	// A caller-owned config poller may publish this snapshot when its source changes.
 	// Revisions must come from a durable monotonic source, not process-local counters.
 	q := pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Rate: 10, Period: time.Second, Burst: 10, Revision: 1}}
-	if err = limiter.UpdatePolicies(ctx, q); err != nil {
+	if err = limiter.UpdateQuotas(ctx, q); err != nil {
 		return err
 	}
 	// This application node needs neither q.Policy nor its revision to admit work.

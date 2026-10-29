@@ -29,7 +29,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	// In production a control-plane publisher supplies durable policy revisions.
-	if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil {
+	if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil {
 		log.Fatal(err)
 	}
 	d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})

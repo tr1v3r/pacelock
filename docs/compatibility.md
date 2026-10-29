@@ -4,7 +4,7 @@
 
 - Default `Allow(ctx, ...Charge{Name, Cost})` and `AllowOnce(ctx, id, retention, ...Charge)`
   resolve backend policies. First publish `Quota{Name, Policy{Revision: 1, ...}}` through
-  `UpdatePolicies`; request nodes do not refresh policies or carry revisions.
+  `UpdateQuotas`; request nodes do not refresh policies or carry revisions.
 - Former dynamic `AllowManaged` / `AllowManagedOnce` become `Allow` / `AllowOnce`;
   `NamedCharge` becomes public name/cost `Charge`. The old names are removed.
 - Former static `Allow` / `AllowOnce` become `AllowStatic` / `AllowStaticOnce`;
@@ -14,7 +14,12 @@
   `q.StaticCharge(cost)` returning encapsulated `StaticCharge`. Static revisions are 0.
 - Dynamic `Driver.Admit(Admission)` is mandatory (`ManagedAdmission` → `Admission`).
   Static support moves to optional `StaticDriver.AdmitStatic(StaticAdmission)`;
-  `PolicyDriver` is unchanged and `Lookup` is shared. Update custom drivers too.
+  `Lookup` is shared. Update custom drivers too.
+- `Limiter.UpdatePolicies` and driver `UpdatePolicies` become `UpdateQuotas`;
+  `PolicyDriver` becomes `QuotaDriver`, and `PolicyUpdate` becomes `QuotaUpdate`.
+  The old public names are removed. The `Policy` type and pure `ApplyPolicies`
+  helper keep their names. Configuration changes do not refill capacity or
+  reset/rescale debt: absolute TAT and retained receipts remain unchanged.
 - There is no default/dynamic Wait or automatic policy watcher. Pure `Evaluate` and
   `EvaluateManaged` remain available; the API rename itself does not reset debt.
 
@@ -112,7 +117,7 @@ for cleanup cursor semantics, ACLs and operational limits.
 
 ## Policy changes
 
-Default dynamic policy changes use `UpdatePolicies` with monotonically increasing
+Default dynamic policy changes use `UpdateQuotas` with monotonically increasing
 positive revisions (maximum 9007199254740991). Equivalent same-revision publications
 are read-only successes; stale/conflicting publications return `ErrPolicyMismatch`.
 Updates preserve absolute TAT without rescaling, reset or debt-expiry shortening.

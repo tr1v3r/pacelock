@@ -10,7 +10,7 @@ driver, err := redisdriver.New(client)
 if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-if err := limiter.UpdatePolicies(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
+if err := limiter.UpdateQuotas(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 60, Period: time.Minute, Burst: 10,
 }}); err != nil { return err }
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
@@ -36,7 +36,7 @@ responses, remain `Unknown`. A lost post-commit response can be recovered using
 the complete retained result. This does not promise crash/failover durability or
 upstream execution deduplication. Never blindly retry ordinary `Allow` or refund.
 
-By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
 
 Each static bound call accepts any nonempty subset of bound quotas, each selected quota exactly
 once with `0 < cost <= Burst`; omitted quotas are neither checked nor charged.
@@ -61,9 +61,10 @@ never an implicit replay. Retry/recovery decisions belong to the caller.
 ## Default dynamic policies
 
 Dynamic admission is the default. Publish positive, monotonically
-increasing revisions and `limiter.UpdatePolicies(ctx, quotas...)` (or the driver's
-`UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`). Each batch
+increasing revisions and `limiter.UpdateQuotas(ctx, quotas...)` (or the driver's
+`UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`). Each batch
 is atomic with admission, using one final MSET and the same NoRetry transport.
+Quota configuration changes do not refill capacity or reset/rescale debt.
 Updates preserve absolute TAT exactly, including debt above a reduced capacity.
 Same revision plus the same effective interval/burst is idempotent; lower revisions
 or same-revision conflicts return `ErrPolicyMismatch`. Roll back parameters only at

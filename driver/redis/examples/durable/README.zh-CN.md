@@ -1,6 +1,6 @@
 # 应用层持久化准入示例
 
-此示例显式选择静态调用方策略路径（AllowStaticOnce/Rule），便于固定版本规则与持久化恢复；不是默认动态准入快速开始。默认路径应先发布 UpdatePolicies，再提交名称/cost Charge。
+此示例显式选择静态调用方策略路径（AllowStaticOnce/Rule），便于固定版本规则与持久化恢复；不是默认动态准入快速开始。默认路径应先发布 UpdateQuotas，再提交名称/cost Charge。
 
 本示例在 Pacelock 外部管理单机、单次业务 attempt 的恢复，不新增 SDK 执行接口。
 完整命令见 [英文说明](README.md#run-against-disposable-redis)：构建后分别演示正常执行、

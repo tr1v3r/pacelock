@@ -20,7 +20,7 @@ import (
 type Driver struct{ client redis.Scripter }
 
 var _ pacelock.Driver = (*Driver)(nil)
-var _ pacelock.PolicyDriver = (*Driver)(nil)
+var _ pacelock.QuotaDriver = (*Driver)(nil)
 var _ pacelock.StaticDriver = (*Driver)(nil)
 
 // Admit reads authoritative policies and atomically admits named costs.
@@ -42,21 +42,21 @@ func (d *Driver) Admit(ctx context.Context, request pacelock.Admission) (paceloc
 	return l.AdmitManaged(ctx, request)
 }
 
-// UpdatePolicies atomically changes managed policies while preserving all debt.
+// UpdateQuotas atomically changes managed policies while preserving all debt.
 // Unknown failures may have committed; explicitly retrying the same revision and
 // effective policy is idempotent. The transport never retries ambiguous commands.
-func (d *Driver) UpdatePolicies(ctx context.Context, request pacelock.PolicyUpdate) error {
+func (d *Driver) UpdateQuotas(ctx context.Context, request pacelock.QuotaUpdate) error {
 	if err := request.Validate(); err != nil {
-		return inputError("update_policies", err)
+		return inputError("update_quotas", err)
 	}
 	if d == nil {
-		return inputError("update_policies", pacelock.ErrInvalid)
+		return inputError("update_quotas", pacelock.ErrInvalid)
 	}
 	l, err := engine.New(d.client, request.Namespace, request.Domain)
 	if err != nil {
-		return inputError("update_policies", err)
+		return inputError("update_quotas", err)
 	}
-	return l.UpdatePolicies(ctx, request.Quotas...)
+	return l.UpdateQuotas(ctx, request.Quotas...)
 }
 
 // New validates an initialized go-redis client without connecting or changing its
