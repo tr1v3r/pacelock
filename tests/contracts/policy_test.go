@@ -17,7 +17,7 @@ func dynamicQuota(rev, rate, burst int64) pacelock.Quota {
 }
 func updateQuota(t *testing.T, l *pacelock.Limiter, q pacelock.Quota) {
 	t.Helper()
-	if err := l.UpdatePolicies(context.Background(), q); err != nil {
+	if err := l.UpdateQuotas(context.Background(), q); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -131,7 +131,7 @@ func TestDynamicPolicies(t *testing.T) {
 			if _, found, err := l.Lookup(ctx, "paused-attempt"); err != nil || found {
 				t.Fatal("paused error persisted", found, err)
 			}
-			if err = l.UpdatePolicies(ctx, dynamicQuota(1, 1, 2)); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if err = l.UpdateQuotas(ctx, dynamicQuota(1, 1, 2)); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("stale update", err)
 			}
 			updateQuota(t, l, dynamicQuota(3, 0, 1))
@@ -168,7 +168,7 @@ func TestDynamicIdlePruneAndAtomicUpdate(t *testing.T) {
 			other.Name = "other"
 			updateQuota(t, l, other)
 			other.Policy.Revision = 2
-			if err := l.UpdatePolicies(ctx, dynamicQuota(2, 1, 2), other); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if err := l.UpdateQuotas(ctx, dynamicQuota(2, 1, 2), other); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal(err)
 			}
 			if _, err := l.Allow(ctx, c); !errors.Is(err, pacelock.ErrPaused) {
@@ -196,7 +196,7 @@ func TestDynamicDebtExpiryDoesNotDeletePolicy(t *testing.T) {
 			pruneManagedScope(t, b, domain)
 			old := q
 			old.Policy.Revision = 1
-			if err := l.UpdatePolicies(ctx, old); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if err := l.UpdateQuotas(ctx, old); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal("lost fence", err)
 			}
 			if d, err := l.Allow(ctx, c); err != nil || !d.Allowed {
@@ -243,7 +243,7 @@ func TestDynamicAtomicAdmissionAndRetainedDenial(t *testing.T) {
 			q := dynamicQuota(1, 1, 1)
 			other := q
 			other.Name = "other"
-			if err := l.UpdatePolicies(ctx, q, other); err != nil {
+			if err := l.UpdateQuotas(ctx, q, other); err != nil {
 				t.Fatal(err)
 			}
 			c := managedCharge()
@@ -282,7 +282,7 @@ func TestDynamicConcurrentUpdates(t *testing.T) {
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					err := ls[i%2].UpdatePolicies(ctx, dynamicQuota(int64(i+2), 1, 100))
+					err := ls[i%2].UpdateQuotas(ctx, dynamicQuota(int64(i+2), 1, 100))
 					if err != nil && !errors.Is(err, pacelock.ErrPolicyMismatch) {
 						t.Errorf("update: %v", err)
 					}
@@ -292,7 +292,7 @@ func TestDynamicConcurrentUpdates(t *testing.T) {
 				}(i)
 			}
 			wg.Wait()
-			if err := ls[1].UpdatePolicies(ctx, dynamicQuota(16, 1, 100)); !errors.Is(err, pacelock.ErrPolicyMismatch) {
+			if err := ls[1].UpdateQuotas(ctx, dynamicQuota(16, 1, 100)); !errors.Is(err, pacelock.ErrPolicyMismatch) {
 				t.Fatal(err)
 			}
 			updateQuota(t, ls[0], dynamicQuota(17, 1, 100))

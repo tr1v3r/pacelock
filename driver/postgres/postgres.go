@@ -27,7 +27,7 @@ import (
 type Driver struct{ db *sql.DB }
 
 var _ pacelock.Driver = (*Driver)(nil)
-var _ pacelock.PolicyDriver = (*Driver)(nil)
+var _ pacelock.QuotaDriver = (*Driver)(nil)
 var _ pacelock.StaticDriver = (*Driver)(nil)
 
 //go:embed schema.sql
@@ -258,14 +258,14 @@ func loadPolicy(ctx context.Context, tx *sql.Tx, scope, name string) (pacelock.Q
 	return s, err
 }
 
-// UpdatePolicies atomically installs managed configuration under the admission
+// UpdateQuotas atomically installs managed configuration under the admission
 // scope lock. It never reads or writes debt. Same-revision identical updates do
 // not rewrite configuration.
 // No automatic retry occurs. A commit error is Unknown: policies may have changed,
 // even though this control-plane operation never debits quota. Retry the identical
 // revisions explicitly to resolve uncertainty (a newer update may supersede them).
-func (d *Driver) UpdatePolicies(ctx context.Context, u pacelock.PolicyUpdate) error {
-	uncharged := func(err error) error { return fail("update_policies", pacelock.NotCharged, err) }
+func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaUpdate) error {
+	uncharged := func(err error) error { return fail("update_quotas", pacelock.NotCharged, err) }
 	if err := u.Validate(); err != nil {
 		return uncharged(err)
 	}
@@ -312,7 +312,7 @@ func (d *Driver) UpdatePolicies(ctx context.Context, u pacelock.PolicyUpdate) er
 		return nil
 	}
 	if err = tx.Commit(); err != nil {
-		return fail("update_policies", pacelock.Unknown, err)
+		return fail("update_quotas", pacelock.Unknown, err)
 	}
 	return nil
 }

@@ -44,7 +44,7 @@ func main() {
 	tokens := pacelock.Quota{Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000}}
 	// Publish from an application-owned monotonic configuration source.
 	// Admission callers need only names and costs, not policy snapshots.
-	if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil {
+	if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil {
 		log.Fatal(err)
 	}
 	d, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})

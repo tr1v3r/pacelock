@@ -138,8 +138,8 @@ func debtRead(s pacelock.QuotaState) sqlStep {
 func quota(rev, rate, burst int64) pacelock.Quota {
 	return pacelock.Quota{Name: "requests", Policy: pacelock.Policy{Revision: rev, Rate: rate, Period: time.Second, Burst: burst}}
 }
-func update(q ...pacelock.Quota) pacelock.PolicyUpdate {
-	return pacelock.PolicyUpdate{Scope: testScope, Quotas: q}
+func update(q ...pacelock.Quota) pacelock.QuotaUpdate {
+	return pacelock.QuotaUpdate{Scope: testScope, Quotas: q}
 }
 func managed(cost int64) pacelock.Admission {
 	return pacelock.Admission{Scope: testScope, Charges: []pacelock.Charge{{Name: "requests", Cost: cost}}}
@@ -167,7 +167,7 @@ func debtWrite(t *testing.T, want pacelock.QuotaState) sqlStep {
 		}
 	}}
 }
-func TestUpdatePoliciesTouchesConfigurationOnly(t *testing.T) {
+func TestUpdateQuotasTouchesConfigurationOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		old  pacelock.QuotaState
@@ -189,7 +189,7 @@ func TestUpdatePoliciesTouchesConfigurationOnly(t *testing.T) {
 			} else {
 				steps = append(steps, policyWrite(t, want), sqlStep{kind: "commit"})
 			}
-			if err := scripted(t, steps).UpdatePolicies(context.Background(), update(tc.q)); err != nil {
+			if err := scripted(t, steps).UpdateQuotas(context.Background(), update(tc.q)); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -214,7 +214,7 @@ func TestUpdateAtomicValidationAndWriteFailure(t *testing.T) {
 				steps = append(steps, policyRead(old))
 			}
 			steps = append(steps, sqlStep{kind: "rollback"})
-			err := scripted(t, steps).UpdatePolicies(context.Background(), update(q, other))
+			err := scripted(t, steps).UpdateQuotas(context.Background(), update(q, other))
 			if !errors.Is(err, want) || pacelock.OutcomeOf(err) != pacelock.NotCharged {
 				t.Fatalf("got %v", err)
 			}
@@ -224,7 +224,7 @@ func TestUpdateAtomicValidationAndWriteFailure(t *testing.T) {
 func TestUpdateCommitUnknown(t *testing.T) {
 	failure := errors.New("commit reply lost")
 	steps := append(lockedSteps(), policyRead(pacelock.QuotaState{}), sqlStep{kind: "exec", contains: "INSERT INTO pacelock_policies"}, sqlStep{kind: "commit", err: failure})
-	err := scripted(t, steps).UpdatePolicies(context.Background(), update(quota(1, 1, 3)))
+	err := scripted(t, steps).UpdateQuotas(context.Background(), update(quota(1, 1, 3)))
 	if !errors.Is(err, failure) || pacelock.OutcomeOf(err) != pacelock.Unknown {
 		t.Fatalf("got %v", err)
 	}
@@ -233,7 +233,7 @@ func TestCancelledBeforeDispatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	d := scripted(t, nil)
-	if err := d.UpdatePolicies(ctx, update(quota(1, 1, 1))); !errors.Is(err, context.Canceled) {
+	if err := d.UpdateQuotas(ctx, update(quota(1, 1, 1))); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if _, err := d.Admit(ctx, managed(1)); !errors.Is(err, context.Canceled) {

@@ -47,7 +47,7 @@ var (
 // a domain.
 type Policy struct {
 	// Revision is zero for static policies, or 1..MaxRevision for policies
-	// explicitly installed by UpdatePolicies. Managed revisions never expire.
+	// explicitly installed by UpdateQuotas. Managed revisions never expire.
 	Revision int64
 	// Rate is units replenished per Period. Zero pauses a managed policy.
 	Rate int64

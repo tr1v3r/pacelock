@@ -19,7 +19,7 @@ rpm := pacelock.Quota{
 tokens := pacelock.Quota{
     Name: "input-tokens", Policy: pacelock.Policy{Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000},
 }
-if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pacelock.Charge{Name: tokens.Name, Cost: 1500})
 // On error ignore decision and inspect pacelock.OutcomeOf(err).
 ```
@@ -34,19 +34,19 @@ and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
 schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-By default publish positive-revision policies with `UpdatePolicies`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is `BindStatic` → `StaticLimiter`: construct encapsulated `StaticCharge` values with `q.StaticCharge(cost)` and call its `Allow` / `AllowOnce`. Low-level caller-policy admission uses `Rule` with `AllowStatic` / `AllowStaticOnce` / `WaitStatic`, and requires Revision 0. There is no default dynamic Wait.
 
 ## Default dynamic policies
 
 The driver implements mandatory dynamic `pacelock.Driver`, optional
-`pacelock.PolicyDriver` and `pacelock.StaticDriver` interfaces. The control plane publishes configuration; the data plane sends **only
+`pacelock.QuotaDriver` and `pacelock.StaticDriver` interfaces. The control plane publishes configuration; the data plane sends **only
 names and costs** and uses the latest persisted configuration under the scope lock.
 No local policy refresh, new binding or SDK worker is needed on admission nodes.
 The caller owns polling its configuration source and publishing updates.
 
 ```go
 // Control plane: publish an authoritative version from your configuration source.
-err = limiter.UpdatePolicies(ctx, pacelock.Quota{
+err = limiter.UpdateQuotas(ctx, pacelock.Quota{
     Name: "requests",
     Policy: pacelock.Policy{Revision: 1, Rate: 60, Period: time.Minute, Burst: 10},
 })
@@ -67,7 +67,7 @@ TAT and debt expiry remain untouched, including during pause/resume. Higher revi
 replace configuration; identical revisions with equal effective interval/burst are
 read-only successes. Older revisions or same-version conflicts return
 `ErrPolicyMismatch`. Debt can exceed a newly reduced capacity and recovers naturally;
-changing configuration never resets it.
+quota configuration changes never refill capacity or reset/rescale debt.
 
 Managed admission fails closed with `ErrPolicyMissing` / `NotCharged` if any policy
 is absent. Costs above the current burst return `ErrInvalid`, not retryable denial.

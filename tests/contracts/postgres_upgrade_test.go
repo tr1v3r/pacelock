@@ -142,7 +142,7 @@ func TestPostgresLegacySchemaUpgrade(t *testing.T) {
 	}
 	beforeUpdate := readDebt()
 	q := pacelock.Quota{Name: rule.Name, Policy: pacelock.Policy{Revision: 1, Rate: 2, Period: time.Hour, Burst: 10}}
-	if err = l.UpdatePolicies(ctx, q); err != nil {
+	if err = l.UpdateQuotas(ctx, q); err != nil {
 		t.Fatal(err)
 	}
 	if got := readDebt(); got != beforeUpdate {

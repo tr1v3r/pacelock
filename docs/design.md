@@ -21,7 +21,7 @@ Redis 采用逻辑过期和单次 MSET 提交；PG 用 domain 行锁、服务端
 
 ```go
 New(driver Driver, namespace, domain string) (*Limiter, error)
-(*Limiter).UpdatePolicies(ctx context.Context, quotas ...Quota) error
+(*Limiter).UpdateQuotas(ctx context.Context, quotas ...Quota) error
 (*Limiter).Allow(ctx context.Context, charges ...Charge) (Decision, error)
 (*Limiter).AllowOnce(ctx context.Context, id string, retention time.Duration, charges ...Charge) (Receipt, error)
 (*Limiter).Lookup(ctx context.Context, id string) (Decision, bool, error)
@@ -36,13 +36,13 @@ New(driver Driver, namespace, domain string) (*Limiter, error)
 NewWithOptions(driver Driver, namespace, domain string, options Options) (*Limiter, error)
 ```
 
-默认路径是控制面用 `UpdatePolicies` 发布 `Quota{Name, Policy{Revision>0, ...}}`，数据面仅调用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce`。后端在同一原子边界读取最新策略与债务；请求节点不用携带 revision、刷新 binding 或轮询配置。Revision 为正且单调递增，最大 9007199254740991；同版本同有效策略只读成功，旧版本或冲突返回 `ErrPolicyMismatch`。更新永久配置，不读写、不重标定、不重置绝对 TAT；缩小 burst 后超过容量的债务仍自然恢复。`Rate=0` 暂停并返回 `ErrPaused` / `NotCharged`，更高 revision 恢复；缺失策略返回 `ErrPolicyMissing`，不是无限额度。没有默认动态 Wait，也没有后台轮询。
+默认路径是控制面用 `UpdateQuotas` 发布 `Quota{Name, Policy{Revision>0, ...}}`，数据面仅调用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce`。后端在同一原子边界读取最新策略与债务；请求节点不用携带 revision、刷新 binding 或轮询配置。Revision 为正且单调递增，最大 9007199254740991；同版本同有效策略只读成功，旧版本或冲突返回 `ErrPolicyMismatch`。更新永久配置，不读写、不重标定、不重置绝对 TAT；缩小 burst 后超过容量的债务仍自然恢复。`Rate=0` 暂停并返回 `ErrPaused` / `NotCharged`，更高 revision 恢复；缺失策略返回 `ErrPolicyMissing`，不是无限额度。没有默认动态 Wait，也没有后台轮询。
 
 显式静态路径要求 Revision=0。`BindStatic` 在本地校验并复制固定额度集合，返回 `StaticLimiter`，不访问后端。通过 `q.StaticCharge(cost)` 捕获额度快照和消耗。`Allow` / `AllowOnce` 每次接受已绑定额度的任意非空子集，每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。每次调用仅对选中额度保证原子性，多次独立调用合起来不具备原子性。空调用、重复、未知额度、零值 StaticCharge 或无效消耗在准入派发前返回 `ErrInvalid` / `NotCharged`。每个 StaticCharge 捕获的完整策略都须合法，名称、有效 `Interval`（按原有语义向上取整到微秒）和 `Burst` 须与绑定一致；合法且有效策略相同的不同 Rate/Period 写法可接受。不合法或与绑定不符的 StaticCharge 在本地被拒绝，不是后端 `ErrPolicyMismatch`。
 
 Charge 顺序不影响结果，选中额度按绑定顺序整理，用于阻塞额度和幂等参数。指纹只包含选中额度的名称、整理后的顺序、有效策略、消耗及保留期限；同一仍保留的 ID 改变子集或选中额度的相对绑定顺序返回 `ErrConflict`，未选中额度不影响指纹。绑定不可变且可并发复用；修改原 Quota 不影响先前生成的 StaticCharge 或已有绑定。修改策略需创建新绑定，已有后端债务和策略冲突保护保持不变。`Lookup` 按 namespace/domain 查询，不按绑定集合过滤。
 
-底层调用方策略保留 `Rule`，使用 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`。动态 `Driver.Admit(Admission)` 是必需契约；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 与 `PolicyDriver` 分别提供静态准入和配置发布，缺少可选能力时返回 `ErrUnsupported`。`Lookup` 共享。已配置动态策略的名称拒绝新静态准入，历史回执仍先重放。`Validate` / `Evaluate` / `EvaluateManaged` 保持纯计算。
+底层调用方策略保留 `Rule`，使用 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`。动态 `Driver.Admit(Admission)` 是必需契约；可选 `StaticDriver.AdmitStatic(StaticAdmission)` 与 `QuotaDriver` 分别提供静态准入和配置发布，缺少可选能力时返回 `ErrUnsupported`。`Lookup` 共享。已配置动态策略的名称拒绝新静态准入，历史回执仍先重放。`Validate` / `Evaluate` / `EvaluateManaged` 保持纯计算。
 
 本次真实后端、模糊测试与准入热路径基准结果见[本地验证记录](validation/quota-charge-local.md)。
 
@@ -97,7 +97,7 @@ configuration = P3|effective_interval_microseconds:Burst:Revision (permanent)
 
 长度前缀避免 namespace/domain 连接歧义；哈希避免调用者输入干扰 Cluster hash tag。相同 domain 中所有额度同槽，所以可一次脚本判定。不同 domain 相互独立，也不能跨 domain 原子准入。
 
-对于未命中已有准入记录的新尝试，脚本读取 Redis TIME，再读取并校验全部额度状态、计算全部候选值，全部通过后才写入额度；`AllowOnce` 的拒绝记录仍会保存。显式静态模式下，活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。上述静态校验仅在状态存在时有效；默认动态配置永久保留 revision 栅栏，策略变更使用 UpdatePolicies 并保留绝对 TAT。静态配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
+对于未命中已有准入记录的新尝试，脚本读取 Redis TIME，再读取并校验全部额度状态、计算全部候选值，全部通过后才写入额度；`AllowOnce` 的拒绝记录仍会保存。显式静态模式下，活跃状态的有效间隔或 Burst 不同会返回策略冲突，防止不同实例轮流用不同参数更新同一额度。有效速率相同的不同 Rate/Period 表达被视为同一策略。上述静态校验仅在状态存在时有效；默认动态配置永久保留 revision 栅栏，策略变更使用 UpdateQuotas 并保留绝对 TAT。静态配置迁移需要应用自行协调，不能用换名字的方式无缝继承旧债务。
 
 静态额度使用 `tat:interval:burst`，动态债务使用 `D3|tat`；债务均在 `tat <= now` 时逻辑过期，不依赖原生 TTL，表示容量已全部恢复，静态额度可采用新策略，动态配置身份永久保留。所有校验、候选值、JSON 和响应编码在写入前完成，最后仅一次 MSET 提交本次允许的全部额度和完整准入记录；拒绝只保存准入记录，普通 Allow 拒绝不写入。结果使用 `expires_us|fingerprint|decision_json`，按 Redis 时间加 retention 逻辑过期。重放不修改截止时间。
 

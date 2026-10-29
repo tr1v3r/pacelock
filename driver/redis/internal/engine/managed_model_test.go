@@ -20,7 +20,7 @@ func TestRedisManagedNumericBoundaries(t *testing.T) {
 	h := pacelock.MaxHorizon.Microseconds()
 	q := pacelock.Quota{Name: "max-revision", Policy: pacelock.Policy{Rate: 1, Period: time.Microsecond, Burst: h, Revision: pacelock.MaxRevision}}
 	for i := 0; i < 2; i++ {
-		if err := l.UpdatePolicies(ctx, q); err != nil {
+		if err := l.UpdateQuotas(ctx, q); err != nil {
 			t.Fatal(err)
 		}
 		if got := c.Get(ctx, l.policyKey(q.Name)).Val(); got != fmt.Sprintf("P3|1:%d:%d", h, pacelock.MaxRevision) {

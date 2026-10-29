@@ -83,7 +83,7 @@ tokens := pacelock.Quota{Name: "model-a:input-tpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 60000, Period: time.Minute, Burst: 12000,
 }}
 // Publish once from the control plane; requests send only names and costs.
-if err := limiter.UpdatePolicies(ctx, rpm, tokens); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, rpm, tokens); err != nil { return err }
 charges := []pacelock.Charge{{Name: rpm.Name, Cost: 1}, {Name: tokens.Name, Cost: 1500}}
 decision, err := limiter.Allow(ctx, charges...)
 if err != nil {
@@ -211,7 +211,7 @@ if err := driver.Migrate(ctx); err != nil { return err } // explicit setup, not 
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 ```
 
-Both drivers share `UpdatePolicies`, `Allow`, `AllowOnce`, `BindStatic`, `WaitStatic`, `Lookup`, outcomes and observers. PostgreSQL
+Both drivers share `UpdateQuotas`, `Allow`, `AllowOnce`, `BindStatic`, `WaitStatic`, `Lookup`, outcomes and observers. PostgreSQL
 locks one domain row, samples `clock_timestamp()` after locking, and commits every
 quota and retained result in one short transaction. Pre-commit failures roll back;
 commit errors are `Unknown`. This driver does not join a caller's business transaction.
@@ -225,9 +225,13 @@ backends does not transfer quota debt or retained IDs and is not automatic failo
 
 ## Default dynamic policies and pause
 
-This is a breaking pre-v1 rename: see the [migration map](docs/compatibility.md#dynamic-default-api-migration-breaking-pre-v1) for former static `Allow` / dynamic `AllowManaged`, `NamedCharge`, `Bind` and custom Driver changes.
+This is a breaking pre-v1 rename: `UpdatePolicies` → `UpdateQuotas`,
+`PolicyDriver` → `QuotaDriver`, and `PolicyUpdate` → `QuotaUpdate`; the old public
+names are removed. `Policy` and the pure `ApplyPolicies` helper keep their names.
+See the [migration map](docs/compatibility.md#dynamic-default-api-migration-breaking-pre-v1)
+for former static `Allow` / dynamic `AllowManaged`, `NamedCharge`, `Bind` and custom Driver changes.
 
-Use `UpdatePolicies` for the control plane and `Allow` for the data plane.
+Use `UpdateQuotas` for the control plane and `Allow` for the data plane.
 Redis and PostgreSQL store persistent configuration separately from expiring TAT
 (debt). Request processes need only quota names and costs, not local policies,
 revisions, bindings or configuration watchers:
@@ -237,7 +241,7 @@ revisions, bindings or configuration watchers:
 q := pacelock.Quota{Name: "tenant:rpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 100, Period: time.Minute, Burst: 20,
 }}
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 
 // Data plane: this charge stays identical across rate changes and pause/resume.
 charge := pacelock.Charge{Name: "tenant:rpm", Cost: 1}
@@ -248,13 +252,13 @@ if !decision.Allowed { /* reject or schedule another attempt */ }
 // Later configuration publication: no debt reset and no request-node refresh.
 q.Policy.Revision = 2
 q.Policy.Rate = 200
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 q.Policy.Revision = 3
 q.Policy.Rate = 0 // emergency pause; fresh requests return ErrPaused
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 q.Policy.Revision = 4
 q.Policy.Rate = 100 // resume; debt recovered naturally during the pause
-if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
+if err := limiter.UpdateQuotas(ctx, q); err != nil { return err }
 ```
 
 - Revisions come from one authoritative configuration source, not per-process
@@ -262,7 +266,8 @@ if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
   identical revision/effective policy is a read-only success, and stale or conflicting
   revisions return `ErrPolicyMismatch`. Rollback publishes old parameters at a NEW
   revision. A batch of up to `MaxRules` configurations updates atomically per scope.
-- Updates do not read, rescale, reset or shorten the lifetime of TAT. Admission
+- Quota configuration changes do not refill capacity or reset debt. Updates do
+  not read, rescale, reset or shorten the lifetime of TAT. Admission
   reads current configuration and debt under the same atomic boundary. Outstanding
   debt exceeding a newly reduced burst is retained until natural recovery.
 - Redis uses one persistent P3 configuration key and one D3 debt key per managed
@@ -293,7 +298,7 @@ if err := limiter.UpdatePolicies(ctx, q); err != nil { return err }
   serialize normally; slow Lua scripts would still block other Redis commands.
 - Transport/commit errors may leave publication uncertain. No automatic retry is
   performed; explicitly retry the SAME revision/policy to converge. Optional
-  `PolicyDriver` publishes configuration; dynamic `Driver.Admit(Admission)` is mandatory.
+  `QuotaDriver` publishes configuration; dynamic `Driver.Admit(Admission)` is mandatory.
   Optional `StaticDriver.AdmitStatic(StaticAdmission)` supports caller-policy admission;
   missing optional capabilities return `ErrUnsupported` without mutation.
 
@@ -400,7 +405,7 @@ unrecognized errors.
 
 `Validate(rules...)` checks static bounds offline. `NewWithOptions` accepts a
 synchronous `Observer`: one event per dynamic/static admission or `Lookup`;
-`BindStatic` and `UpdatePolicies` emit none. Operation names are `allow`, `allow_once`,
+`BindStatic` and `UpdateQuotas` emit none. Operation names are `allow`, `allow_once`,
 `allow_static`, `allow_static_once`, `wait_static` and `lookup`. `StaticLimiter.Allow`
 / `.AllowOnce` emit static operations. `WaitStatic` emits one event for the whole
 wait, not each internal attempt. Events expose counts, duration, result, replay,
@@ -419,7 +424,7 @@ panics propagate.
   character, byte and SSE chunk counts are not token counts.
 - Effective interval and burst identify a static (Revision=0) policy. Changing
   active static state returns `ErrPolicyMismatch`. Managed policies additionally
-  require the persistent revision installed explicitly through `UpdatePolicies`.
+  require the persistent revision installed explicitly through `UpdateQuotas`.
 - One domain occupies one Redis Cluster slot. A shared global quota can force a
   large atomicity domain onto one shard; arbitrary sharding cannot preserve a
   cross-slot transaction.

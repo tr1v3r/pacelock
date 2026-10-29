@@ -52,7 +52,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if _, err := l.AdmitManaged(ctx, req); !errors.Is(err, pacelock.ErrPolicyMissing) || OutcomeOf(err) != NotCharged {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	if c.Exists(ctx, l.key(r.Name)).Val() != 0 {
@@ -68,7 +68,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	r.Policy.Revision = 2
 	r.Policy.Burst = 1
 	r.Policy.Period = time.Minute
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
@@ -88,7 +88,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if err := c.PExpire(ctx, l.policyKey(r.Name), time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.UpdatePolicies(ctx, quotaOf(equivalent)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(equivalent)); err != nil {
 		t.Fatal(err)
 	}
 	if c.PTTL(ctx, l.policyKey(r.Name)).Val() <= 0 {
@@ -99,7 +99,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	fresh.Policy.Revision = 1
 	bad := r
 	bad.Policy.Burst = 2
-	if err := l.UpdatePolicies(ctx, quotaOf(fresh), quotaOf(bad)); !errors.Is(err, ErrPolicyMismatch) {
+	if err := l.UpdateQuotas(ctx, quotaOf(fresh), quotaOf(bad)); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatal(err)
 	}
 	if c.Exists(ctx, l.policyKey(fresh.Name)).Val() != 0 {
@@ -107,7 +107,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 	r.Policy.Revision = 3
 	r.Policy.Rate = 0
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	req.ID = "paused"
@@ -141,12 +141,12 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	if c.Exists(ctx, l.key(r.Name)).Val() != 0 || c.Get(ctx, l.policyKey(r.Name)).Val() != "P3|0:1:3" {
 		t.Fatal("prune failed separation")
 	}
-	if err := l.UpdatePolicies(ctx, quotaOf(equivalent)); !errors.Is(err, ErrPolicyMismatch) {
+	if err := l.UpdateQuotas(ctx, quotaOf(equivalent)); !errors.Is(err, ErrPolicyMismatch) {
 		t.Fatalf("stale after prune: %v", err)
 	}
 	r.Policy.Revision = 4
 	r.Policy.Rate = 1
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	req.Charges[0].Cost = 1
@@ -156,7 +156,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 	r.Policy.Revision = 5
 	r.Policy.Rate = 0
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	if d, err := l.AdmitManaged(ctx, req); err != nil || !d.Replayed || !d.Allowed {
@@ -167,7 +167,7 @@ func exerciseManaged(t *testing.T, l *Limiter, c redis.UniversalClient) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := l.UpdatePolicies(canceled, quotaOf(fresh)); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
+	if err := l.UpdateQuotas(canceled, quotaOf(fresh)); !errors.Is(err, context.Canceled) || OutcomeOf(err) != NotCharged {
 		t.Fatal(err)
 	}
 }
@@ -182,7 +182,7 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	debt := c.Get(ctx, l.key(r.Name)).Val()
 	r.Policy.Revision = 1
 	r.Policy.Rate = 0
-	if e := l.UpdatePolicies(ctx, quotaOf(r)); e != nil {
+	if e := l.UpdateQuotas(ctx, quotaOf(r)); e != nil {
 		t.Fatal(e)
 	}
 	if c.Get(ctx, l.key(r.Name)).Val() != debt {
@@ -203,7 +203,7 @@ func TestRedisManagedCurrentStaticDebtAndReplay(t *testing.T) {
 	r.Policy.Revision = 2
 	r.Policy.Rate = 1
 	r.Policy.Burst = 1
-	if e := l.UpdatePolicies(ctx, quotaOf(r)); e != nil {
+	if e := l.UpdateQuotas(ctx, quotaOf(r)); e != nil {
 		t.Fatal(e)
 	}
 	req.ID = "new"
@@ -219,7 +219,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	r.Policy.Revision = 1
 	for _, raw := range []string{"P3|0:1:0", "P3|0:1:9007199254740992", "P3|0:86400000001:1", "P3|1:0:1", "P3|0:1:1:extra", "D3|0"} {
 		c.Set(ctx, l.policyKey(r.Name), raw, 0)
-		if err := l.UpdatePolicies(ctx, quotaOf(r)); !errors.Is(err, ErrState) {
+		if err := l.UpdateQuotas(ctx, quotaOf(r)); !errors.Is(err, ErrState) {
 			t.Fatalf("%s update: %v", raw, err)
 		}
 		if _, err := l.AdmitManaged(ctx, managedRequest(r.Name, 1)); !errors.Is(err, ErrState) {
@@ -239,7 +239,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 		}
 	}
 	c.Del(ctx, l.policyKey(r.Name))
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	for _, raw := range []string{"D3|-1", "D3|9007199254740991", "D3|bad", "Q2|1:1:1", "P3|1:1:1", "E2|1|C1|removed"} {
@@ -250,7 +250,7 @@ func TestRedisManagedMalformed(t *testing.T) {
 	}
 	// Configuration writes must not read malformed debt.
 	r.Policy.Revision = 2
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -264,7 +264,7 @@ func TestRedisManagedConcurrentUpdates(t *testing.T) {
 			defer wg.Done()
 			r := rule("concurrent", 1, 1)
 			r.Policy.Revision = rev
-			if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil && !errors.Is(err, ErrPolicyMismatch) {
+			if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil && !errors.Is(err, ErrPolicyMismatch) {
 				t.Error(err)
 			}
 		}(rev)

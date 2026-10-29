@@ -10,7 +10,7 @@ driver, err := redisdriver.New(client)
 if err != nil { return err }
 limiter, err := pacelock.New(driver, "llm-service", "provider-account-a")
 if err != nil { return err }
-if err := limiter.UpdatePolicies(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
+if err := limiter.UpdateQuotas(ctx, pacelock.Quota{Name: "rpm", Policy: pacelock.Policy{
     Revision: 1, Rate: 60, Period: time.Minute, Burst: 10,
 }}); err != nil { return err }
 decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
@@ -22,7 +22,7 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域和名称，动态策略以后端配置为准；
 每次准入必须包含全部适用额度。
 
-默认先用 `UpdatePolicies` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是 `BindStatic` → `StaticLimiter`，通过 `q.StaticCharge(cost)` 构造封装的 `StaticCharge`，然后调用绑定对象的 `Allow` / `AllowOnce`。底层静态路径使用 `Rule` 与 `AllowStatic` / `AllowStaticOnce` / `WaitStatic`，Revision 必须为 0；没有默认动态 Wait。
 
 每次静态绑定调用接受已绑定额度的任意非空子集，
 每个选中额度仅提供一次消耗，且 `0 < cost <= Burst`；未传入额度既不检查也不扣减。
@@ -52,10 +52,10 @@ Lua 读取准入记录及本次涉及的额度，校验策略、计算 GCRA，�
 ## 默认动态策略
 
 动态准入是默认路径。通过正数、单调递增的 revision 和
-`limiter.UpdatePolicies(ctx, quotas...)` 发布配置，也可调用驱动的
-`UpdatePolicies(ctx, pacelock.PolicyUpdate{Scope: scope, Quotas: quotas})`。
+`limiter.UpdateQuotas(ctx, quotas...)` 发布配置，也可调用驱动的
+`UpdateQuotas(ctx, pacelock.QuotaUpdate{Scope: scope, Quotas: quotas})`。
 每批更新与准入原子串行，最后仅执行一次 MSET，复用 NoRetry 传输。
-更新精确保留原始 TAT，即使债务超过缩小后的容量也不重置。
+额度配置变更不会补充容量、重置或重标定债务；更新精确保留原始 TAT，即使债务超过缩小后的容量也不重置。
 同 revision、同有效 interval/burst 可幂等重试；较低 revision 或同 revision 不同策略
 返回 `ErrPolicyMismatch`。回滚参数必须发布更高 revision。`NotCharged` 描述额度扣减，
 不表示不确定更新一定失败；传输错误或响应丢失仍为 `Unknown`，需要时由调用者显式重试同版本。

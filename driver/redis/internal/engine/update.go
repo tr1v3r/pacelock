@@ -14,15 +14,15 @@ var updateSource string
 
 var updateScript = redis.NewScript(protocolSource + updateSource)
 
-// UpdatePolicies atomically installs managed policies without resetting debt.
+// UpdateQuotas atomically installs managed policies without resetting debt.
 // Transport ambiguity is Unknown; no implicit retries are performed.
-func (l *Limiter) UpdatePolicies(ctx context.Context, quotas ...pacelock.Quota) error {
-	const op = "update_policies"
+func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...pacelock.Quota) error {
+	const op = "update_quotas"
 	if err := l.ready(ctx); err != nil {
 		return failure(op, NotCharged, err)
 	}
 	// Scope was already validated by construction; validate the quota contract here.
-	request := pacelock.PolicyUpdate{Scope: pacelock.Scope{Namespace: "validated", Domain: "validated"}, Quotas: quotas}
+	request := pacelock.QuotaUpdate{Scope: pacelock.Scope{Namespace: "validated", Domain: "validated"}, Quotas: quotas}
 	if err := request.Validate(); err != nil {
 		return failure(op, NotCharged, err)
 	}

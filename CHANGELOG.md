@@ -5,7 +5,7 @@
 - Standard-library core with independent Redis and PostgreSQL drivers, shared
   atomic admission contracts, and explicit PostgreSQL schema setup via `Migrate`.
 - Backend-authoritative dynamic admission is the default: publish versioned
-  policies with `UpdatePolicies`, then call `Allow` / `AllowOnce` with names/costs.
+  policies with `UpdateQuotas`, then call `Allow` / `AllowOnce` with names/costs.
   Rate 0 pauses fresh admissions; updates preserve absolute debt and retained replay.
 - Explicit static `BindStatic` / `StaticLimiter` bindings and snapshot-based
   `Quota.StaticCharge(cost)` values validate nonempty subsets before dispatch.
@@ -28,6 +28,14 @@
   MOVED/ASK redirects. Constructors perform no I/O or client option mutation.
 - Synchronous observation, defensive validation, shared backend contracts, and
   model, concurrency, corruption, expiry, cleanup and fault-injection coverage.
+
+Breaking rename: `Limiter.UpdatePolicies` and driver `UpdatePolicies` become
+`UpdateQuotas`; `PolicyDriver` becomes `QuotaDriver`, and `PolicyUpdate` becomes
+`QuotaUpdate`. The old public names are removed; update callers and custom drivers.
+Update errors now report operation `update_quotas` instead of `update_policies`.
+`Policy` and the pure `ApplyPolicies` helper keep their names. This is an API-only
+rename: quota configuration changes never refill capacity or reset/rescale debt;
+absolute TAT and retained receipts remain unchanged.
 
 Breaking change: bound admission no longer rejects omitted quotas. Callers that
 relied on complete-set enforcement must validate required quotas themselves or

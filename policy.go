@@ -5,23 +5,23 @@ import (
 	"fmt"
 )
 
-// PolicyDriver is the optional, atomic policy-management extension to Driver.
+// QuotaDriver is the optional, atomic quota-configuration extension to Driver.
 // Implementations serialize updates with admission and preserve absolute TAT.
 // Revisions are permanent fences, not expiring debt. No automatic retries occur.
-type PolicyDriver interface {
-	UpdatePolicies(context.Context, PolicyUpdate) error
+type QuotaDriver interface {
+	UpdateQuotas(context.Context, QuotaUpdate) error
 }
 
-// PolicyUpdate installs an ordered batch of managed policies in one atomic scope.
+// QuotaUpdate installs an ordered batch of managed quota configurations in one atomic scope.
 // Revisions must increase; retrying an identical revision/effective policy is safe.
 // Same revision with different policy or a lower revision is ErrPolicyMismatch.
-type PolicyUpdate struct {
+type QuotaUpdate struct {
 	Scope
 	Quotas []Quota
 }
 
 // Validate checks the update without accessing backend state.
-func (u PolicyUpdate) Validate() error {
+func (u QuotaUpdate) Validate() error {
 	if err := u.Scope.Validate(); err != nil {
 		return err
 	}
@@ -38,7 +38,8 @@ func (u PolicyUpdate) Validate() error {
 	return Validate(rules...)
 }
 
-// UpdatePolicies installs policies without charging capacity or changing TAT.
+// UpdateQuotas installs quota configurations without charging or refilling capacity,
+// resetting debt, or changing TAT.
 // Higher revisions take effect atomically, even while a quota has outstanding debt.
 // A managed Rate=0 pauses new admissions; debt continues to recover with time.
 // Update all application binaries before activating managed policies. Managed
@@ -46,20 +47,20 @@ func (u PolicyUpdate) Validate() error {
 // On a transport/commit error the update may have committed; inspect OutcomeOf
 // and retry the SAME revision/policy explicitly if appropriate. Never lower a
 // revision for rollback: publish the old parameters at a higher revision.
-func (l *Limiter) UpdatePolicies(ctx context.Context, quotas ...Quota) error {
-	const op = "update_policies"
+func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...Quota) error {
+	const op = "update_quotas"
 	if err := l.ready(ctx); err != nil {
 		return failure(op, NotCharged, err)
 	}
-	u := PolicyUpdate{Scope: l.scope, Quotas: append([]Quota(nil), quotas...)}
+	u := QuotaUpdate{Scope: l.scope, Quotas: append([]Quota(nil), quotas...)}
 	if err := u.Validate(); err != nil {
 		return failure(op, NotCharged, err)
 	}
-	driver, ok := l.driver.(PolicyDriver)
+	driver, ok := l.driver.(QuotaDriver)
 	if !ok {
 		return failure(op, NotCharged, ErrUnsupported)
 	}
-	if err := driver.UpdatePolicies(ctx, u); err != nil {
+	if err := driver.UpdateQuotas(ctx, u); err != nil {
 		return driverFailure(op, err)
 	}
 	return nil
@@ -70,7 +71,7 @@ func (l *Limiter) UpdatePolicies(ctx context.Context, quotas ...Quota) error {
 // must be zero. Drivers serialize this with admission and persist configurations
 // separately from debt. This function neither reads nor modifies debt.
 func ApplyPolicies(now int64, quotas []Quota, states []QuotaState) ([]QuotaState, error) {
-	if err := (PolicyUpdate{Scope: Scope{Namespace: "validate", Domain: "validate"}, Quotas: quotas}).Validate(); err != nil {
+	if err := (QuotaUpdate{Scope: Scope{Namespace: "validate", Domain: "validate"}, Quotas: quotas}).Validate(); err != nil {
 		return nil, err
 	}
 	if len(states) != len(quotas) {

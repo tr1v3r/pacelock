@@ -17,7 +17,7 @@ func TestRedisManagedLostReplyNoRetry(t *testing.T) {
 	ctx := context.Background()
 	r := rule("q", 2, 1)
 	r.Policy.Revision = 1
-	if err := l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+	if err := l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 		t.Fatal(err)
 	}
 	loss := &replyLoss{}
@@ -74,14 +74,14 @@ func TestRedisUpdateLostReplyNoRetry(t *testing.T) {
 			defer c.Del(ctx, l.policyKey("q"))
 			r := rule("q", 1, 1)
 			r.Policy.Revision = 1
-			err = l.UpdatePolicies(ctx, quotaOf(r))
+			err = l.UpdateQuotas(ctx, quotaOf(r))
 			if !errors.Is(err, io.EOF) || OutcomeOf(err) != Unknown || loss.dropped.Load() != 1 {
 				t.Fatalf("lost reply: %v drops=%d", err, loss.dropped.Load())
 			}
 			if got := c.Get(ctx, l.policyKey("q")).Val(); got != "P3|3600000000:1:1" {
 				t.Fatalf("commit absent: %s", got)
 			}
-			if err = l.UpdatePolicies(ctx, quotaOf(r)); err != nil {
+			if err = l.UpdateQuotas(ctx, quotaOf(r)); err != nil {
 				t.Fatalf("explicit retry: %v", err)
 			}
 		})
