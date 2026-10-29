@@ -133,23 +133,10 @@ func (s *StaticLimiter) Wait(ctx context.Context, charges ...Charge) (err error)
 	if err != nil {
 		return failure("wait_static", NotCharged, err)
 	}
-	for {
-		receipt, attemptErr := core.admitStatic(ctx, "", 0, rules)
-		if attemptErr != nil {
-			return failure("wait_static", OutcomeOf(attemptErr), attemptErr)
-		}
-		decision = receipt.Decision
-		if decision.Allowed {
-			return nil
-		}
-		timer := time.NewTimer(decision.RetryAfter)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return failure("wait_static", NotCharged, ctx.Err())
-		case <-timer.C:
-		}
-	}
+	decision, err = waitAdmission(ctx, "wait_static", func() (Receipt, error) {
+		return core.admitStatic(ctx, "", 0, rules)
+	})
+	return err
 }
 
 // Lookup queries a retained result in the limiter's namespace/domain, including

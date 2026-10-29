@@ -22,7 +22,7 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: "rpm", Cost: 1})
 一个 domain 对应一个 Cluster 槽。所有调用者需使用相同作用域和名称，动态策略以后端配置为准；
 每次准入必须包含全部适用额度。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})`、`AllowOnce` 或 `Wait(ctx, charges...)` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；动态与静态 Limiter 均提供 `Wait(ctx, charges...) error`。
 
 每次静态调用以 `...Charge` 接受固定额度的任意非空子集，每个选中名称仅出现一次，
 且 `0 < Cost <= Burst`；未传入额度既不检查也不扣减。选中 Charge 按构造（绑定）顺序整理。
@@ -70,7 +70,18 @@ Lua 准入中读取后端最新策略，调用方无需刷新 binding 或传递 
 
 托管 `Rate=0` 返回 `ErrPaused` / `NotCharged`，不扣减、不写结果；即使消耗超过暂停额度的
 burst 也优先返回暂停。非暂停时超 burst 消耗返回 `ErrInvalid`。用更高 revision 恢复，债务
-随时间自然恢复。不提供动态 Wait；仅提供 `StaticLimiter.Wait`。结果先于当前策略校验重放，跨更新、暂停也不变；
+随时间自然恢复。
+
+`Limiter.Wait(ctx, charges...)` 在派发前只复制一次 Charge，每次普通尝试原子读取后端
+最新策略，不快照策略。仅在有效容量拒绝后按建议的 `RetryAfter` 重试；任何错误都停止，
+包括暂停、策略缺失、新 Burst 小于 Cost、传输错误（即使为 `NotCharged`）、`Unknown`、
+不支持的能力及无效 Driver 结果。两次尝试间取消为 `NotCharged`；调用期间保留不确定性，
+已确认成功不因并发取消变为失败。每次尝试使用空 ID、零保留期，不写回执、不自动调用
+`Lookup`。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
+唤醒休眠者，旧 RetryAfter 可能延迟使用放宽后的策略。不增加队列、worker、后台 goroutine、
+公平性或退款。请设置 context deadline，详见[阻塞等待准入](../../README.zh-CN.md#阻塞等待准入)。
+
+结果先于当前策略校验重放，跨更新、暂停也不变；
 历史允许结果**不代表可以再次执行上游请求**。托管 fingerprint 绑定有序名称、消耗和保留期，
 不包含策略版本。静态 fingerprint 编码有效规则，同 ID 的静态与托管请求冲突。
 

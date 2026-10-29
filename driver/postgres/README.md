@@ -34,7 +34,7 @@ and receipt schemas are unchanged, retaining all debt and receipts. Incompatible
 schemas are not supported. Use a trusted, stable search_path and
 consistent schema/primary routing for every caller. Do not use a read-replica pool.
 
-By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})` or `AllowOnce`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. There is no default dynamic Wait.
+By default publish positive-revision policies with `UpdateQuotas`, then call `Allow(ctx, ...Charge{Name, Cost})`, `AllowOnce` or `Wait(ctx, charges...)`; no local binding or policy refresh is required. The explicit static alternative is standalone `NewStatic(driver, namespace, domain, quotas...)` (or `NewStaticWithOptions`): it validates and copies fixed Revision-0 quotas, without a parent Limiter or backend I/O. Its `Allow` / `AllowOnce` / `Wait` take public `Charge{Name, Cost}` values; `Lookup` shares scope-based receipt recovery. `Rule` remains for low-level `StaticAdmission` and pure evaluation, not public rule-taking limiter methods. Both dynamic and static limiters expose `Wait(ctx, charges...) error`.
 
 ## Default dynamic policies
 
@@ -73,8 +73,21 @@ Managed admission fails closed with `ErrPolicyMissing` / `NotCharged` if any pol
 is absent. Costs above the current burst return `ErrInvalid`, not retryable denial.
 A managed `Rate: 0` pauses admission (positive Period/Burst still required):
 `ErrPaused` / `NotCharged` is returned before the over-burst check, without a debit
-or receipt write. Resume by publishing a higher positive-rate revision. There is
-no managed Wait API; caller retry/config polling remains outside the SDK.
+or receipt write. Resume by publishing a higher positive-rate revision.
+
+`Limiter.Wait(ctx, charges...)` copies charges once before dispatch and resolves the
+latest backend policies atomically on each ordinary attempt, without a policy
+snapshot. It retries only valid capacity denials after advisory `RetryAfter`; every
+error stops, including pause, missing policy, a new Burst below Cost, transport
+errors even when `NotCharged`, `Unknown`, unsupported capabilities and invalid
+driver results. Cancellation between attempts is `NotCharged`; in-flight uncertainty
+is preserved, and confirmed success stays success despite cancellation. Each attempt
+has an empty ID and zero retention, with no receipts or automatic `Lookup`. One
+`wait` observation covers the whole call; static Wait remains `wait_static`. Updates
+do not proactively wake sleepers, so an old RetryAfter may delay using relaxed policy.
+Sleeping holds no transaction, lock or connection. No queue, worker, background
+goroutine, fairness or refund is added. Use a context deadline; configuration-source
+polling/publication remains outside the SDK. See [blocking admission](../../README.md#blocking-admission).
 
 Existing retained receipts replay **before** current policy checks, unchanged by
 pauses or updates. Managed retries with the same names/costs replay across revisions.

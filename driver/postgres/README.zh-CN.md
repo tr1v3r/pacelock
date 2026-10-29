@@ -32,7 +32,7 @@ decision, err := limiter.Allow(ctx, pacelock.Charge{Name: rpm.Name, Cost: 1}, pa
 不支持不兼容的表结构。所有调用者需使用可信、稳定且一致的 search_path、schema 和主库，
 不能传入读副本连接池。
 
-默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})` 或 `AllowOnce` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；没有默认动态 Wait。
+默认先用 `UpdateQuotas` 发布正 revision 的策略，再用 `Allow(ctx, ...Charge{Name, Cost})`、`AllowOnce` 或 `Wait(ctx, charges...)` 准入。无需本地绑定或策略刷新。显式静态替代路径是独立的 `NewStatic(driver, namespace, domain, quotas...)`（或 `NewStaticWithOptions`），无需父 Limiter，在本地校验并复制 Revision=0 的固定额度，不访问后端。其 `Allow` / `AllowOnce` / `Wait` 均传公开的 `Charge{Name, Cost}`；`Lookup` 按作用域恢复回执。`Rule` 仅保留为底层 `StaticAdmission` 和纯计算的输入，不再通过公开 Limiter 方法提交；动态与静态 Limiter 均提供 `Wait(ctx, charges...) error`。
 
 ## 默认动态策略
 
@@ -66,7 +66,16 @@ _ = receipt
 消耗超过当前 Burst 返回 `ErrInvalid`，不是可以等待恢复的容量拒绝。
 托管策略的 `Rate: 0` 表示暂停（Period、Burst 仍须为正），先于超 Burst 检查返回
 `ErrPaused` / `NotCharged`，不扣减、不写准入记录。以更高版本和正速率恢复。
-本次不提供托管 Wait API，重试与配置轮询由调用者负责。
+
+`Limiter.Wait(ctx, charges...)` 在派发前只复制一次 Charge，每次普通尝试原子读取后端
+最新策略，不快照策略。仅在有效容量拒绝后按建议的 `RetryAfter` 重试；任何错误都停止，
+包括暂停、策略缺失、新 Burst 小于 Cost、传输错误（即使为 `NotCharged`）、`Unknown`、
+不支持的能力及无效 Driver 结果。两次尝试间取消为 `NotCharged`；调用期间保留不确定性，
+已确认成功不因并发取消变为失败。每次尝试使用空 ID、零保留期，不写回执、不自动调用
+`Lookup`。整次调用只产生一次 `wait` 观测，静态 Wait 仍为 `wait_static`。更新不会主动
+唤醒休眠者，旧 RetryAfter 可能延迟使用放宽后的策略。休眠不持有事务、锁或连接，
+不增加队列、worker、后台 goroutine、公平性或退款。请设置 context deadline；配置源
+轮询与发布仍由调用者负责。详见[阻塞等待准入](../../README.zh-CN.md#阻塞等待准入)。
 
 已有保留记录在当前策略检查**之前**重放，不因暂停或更新改变。托管请求的名称/消耗不变时，
 跨版本重试仍重放原决策。静态与托管请求复用同一 ID 会冲突。历史允许记录重放不代表可以再次执行上游。

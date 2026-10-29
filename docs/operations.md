@@ -11,8 +11,12 @@ maintenance process before activation; run PostgreSQL `Migrate` before upgraded
 binaries handle even static traffic. Static opt-in uses standalone `NewStatic` /
 `NewStaticWithOptions`, validating and copying fixed Revision-0 quotas locally.
 `StaticLimiter.Allow` / `AllowOnce` / `Wait` take name/cost `Charge` values; `Lookup`
-recovers scope-based receipts. There is no dynamic Wait or SDK
-configuration watcher. Publication/polling belongs to the application.
+recovers scope-based receipts. Dynamic `Limiter.Wait(ctx, charges...)` uses the latest
+backend policies atomically on each attempt, retrying only ordinary capacity denials
+after advisory `RetryAfter`; every error stops waiting. Updates do not proactively
+wake sleepers, so a relaxed policy may not be used until the previous delay expires.
+Set a context deadline. There is no SDK configuration watcher or background worker;
+configuration publication/polling belongs to the application.
 
 Keep configuration/revision fences permanent: `Prune` never deletes them. Updates
 preserve absolute TAT, even above a reduced burst; never rename/delete state to
