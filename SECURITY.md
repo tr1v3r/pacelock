@@ -17,7 +17,7 @@ synthetic identifiers, expected impact and any suggested mitigation privately.
 ## Deployment boundary
 
 Use authentication, TLS and private networking. Restrict keys to a dedicated
-application prefix. For standalone Redis, the admission/lookup command grants are
+application prefix. For standalone Redis, admission and policy-update command grants are
 `+evalsha +eval +get +mset +time`, plus the go-redis connection-handshake commands
 that your configuration uses (for example `HELLO`, `AUTH`, `CLIENT`, `PING` and
 `SELECT` when applicable).
@@ -29,19 +29,28 @@ sufficient for Cluster. Do not grant all of `+cluster` just to allow slot discov
 `COMMAND` is not required for Pacelock's current EVALSHA/EVAL routing path; only add
 permissions for other commands if your integration actually requires them.
 
-Admission/lookup do not need `ACL`, `CONFIG`, `FLUSHALL`, `KEYS`, `SCAN` or `DEL`.
+Admission and policy updates do not need `ACL`, `CONFIG`, `FLUSHALL`, `KEYS`,
+`SCAN` or `DEL`.
 Explicit cleanup additionally needs `+scan +del` and can use a separate identity.
 SCAN has node-wide key-name visibility; use dedicated trusted maintenance access.
 The SDK filters candidates by scope and rechecks expiry atomically. Other
 administrative privileges belong only to isolated test/operations tooling.
 
 Test the exact ACL in staging: script key permissions and commands invoked inside
-scripts are both checked. One final MSET commits all new quota/receipt changes;
-malformed receipts return `ErrState` / `Unknown`, never missing or a new admission.
-Keep noeviction, schedule
-bounded cleanup, and monitor memory and maintenance lag. Quota names in retained result records
-are plaintext; do not put secrets or unnecessary personal data in them. Redis key
-hashing is namespace isolation, not encryption, access control or anonymization.
+scripts are both checked. Admission reads authoritative policies and debt before
+one final MSET commits all accepted debt changes. Policy updates use a separate
+atomic MSET and preserve debt. Missing/paused policies or malformed policy/debt
+state fail closed; absent debt is valid for a new quota. An uncertain mutation is
+not automatically retried. Keep noeviction,
+schedule bounded cleanup, and monitor memory and maintenance lag. Cleanup can
+remove recovered debt, including legacy tuple debt, but preserves policy fences.
+
+There is no retained-result or lookup API. Existing legacy Redis attempt keys and
+PostgreSQL admission tables/rows are neither read nor validated by admission, and
+normal cleanup leaves them untouched. Legacy receipts may contain plaintext quota
+names; assess access, backups and explicit operator cleanup after retiring old
+consumers. Do not put secrets or unnecessary personal data in quota names. Redis
+key hashing is namespace isolation, not encryption, access control or anonymization.
 
 The SDK cannot enforce a rule the caller omits, prevent untrusted callers from
 choosing another domain, or compensate for external key deletion/eviction,

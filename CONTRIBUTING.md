@@ -13,7 +13,8 @@ concurrency ownership outside the core. Additional runtime dependencies require
 an explicit justification; instrumentation uses a callback, not a telemetry SDK.
 
 For correctness changes, add tests that exercise externally visible invariants:
-no debit on denial, no replay debit, bounded retention and uncertain outcomes on
+no debit on denial, no automatic replay of uncertain mutations, preserved debt
+and policy revision fences, bounded cleanup, and uncertain outcomes on
 transport/runtime failures. A fake Redis alone is not adequate Lua verification.
 Use deterministic seeds for model tests and preserve useful fuzz regressions.
 
@@ -27,9 +28,9 @@ docker compose up -d --wait
 PACELOCK_REDIS_ADDR=localhost:16379 \
 PACELOCK_REDIS_CLUSTER_ADDRS=localhost:17000,localhost:17001,localhost:17002 \
 PACELOCK_POSTGRES_DSN='postgres://pacelock:pacelock-test-only@localhost:15439/pacelock?sslmode=disable' \
+PACELOCK_REQUIRED_REDIS_BACKENDS=standalone,cluster \
 PACELOCK_REQUIRED_DRIVER_BACKENDS=redis,postgres sh scripts/check.sh
 (cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzInterval -fuzztime 20s .)
-(cd driver/redis/internal/engine && go test -run '^$' -fuzz FuzzRecord -fuzztime 20s .)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 docker compose down
 ```
@@ -55,7 +56,8 @@ executed code, not proof of correctness or a production SLA.
 
 - Review `CHANGELOG.md`, both READMEs, API docs and compatibility notes.
 - Confirm tests, minimum Go/Redis versions, Cluster, fuzz and security checks.
-- Review quota state and admission record migration; never reset debt silently.
+- Review debt/policy migration and preservation of legacy receipt storage; never
+  reset debt silently or delete legacy records automatically.
 - Check examples compile and execute against disposable Redis.
 - Review module dependency/license changes and `go mod verify`.
 - Publish measured limitations, remaining deployment checks and migration steps.

@@ -7,6 +7,10 @@ import (
 	"github.com/tr1v3r/pacelock"
 )
 
+type Policy = pacelock.Policy
+
+func OutcomeOf(err error) Outcome { return pacelock.OutcomeOf(err) }
+
 // Rules are fixture descriptions only. Runtime admission carries names and costs.
 func (l *Limiter) admitRules(ctx context.Context, rules ...Rule) (Decision, error) {
 	request := pacelock.Admission{Scope: pacelock.Scope{Namespace: "test", Domain: "test"}}

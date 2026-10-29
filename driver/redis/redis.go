@@ -83,8 +83,9 @@ type PruneResult = engine.PruneResult
 // on the scope's current primary. Limit must be 1..MaxPruneKeys. SCAN COUNT is a
 // hint, so discovery has no hard latency bound and overflow is buffered in Cursor.
 // Logically expired values are deleted only after an atomic recheck. Malformed
-// candidates abort the batch; active debt and legacy records are preserved. The application schedules
-// repeated cycles; constructors and admissions never start cleanup goroutines.
+// candidates abort the batch; active debt and legacy attempt receipts are preserved.
+// Recovered legacy tuple debt is prunable. The application schedules repeated cycles;
+// constructors and admissions never start cleanup goroutines.
 func (d *Driver) Prune(ctx context.Context, scope pacelock.Scope, cursor PruneCursor, limit int) (PruneResult, error) {
 	if err := scope.Validate(); err != nil {
 		return PruneResult{}, inputError("prune", err)

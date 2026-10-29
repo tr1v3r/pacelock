@@ -122,45 +122,6 @@ func TestOnlyNoScriptFallsBack(t *testing.T) {
 	}
 }
 
-func TestObserver(t *testing.T) {
-	var events []Event
-	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
-	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	l.admitRules(context.Background(), rule("q", 1, 1))
-	l.admitRules(context.Background())
-	s.reply = nil
-	s.err = redis.Nil
-	l.admitRules(context.Background(), rule("q", 1, 1))
-	if len(events) != 3 || events[0].Result != "allowed" || events[1].Result != "error" || events[2].Result != "error" || events[0].RuleCount != 1 {
-		t.Fatalf("%+v", events)
-	}
-	for _, e := range events {
-		if e.Duration < 0 {
-			t.Fatal(e)
-		}
-	}
-}
-
-func TestAdmissionObservers(t *testing.T) {
-	var events []Event
-	s := &stubScripter{reply: []interface{}{int64(1), int64(0), int64(0)}}
-	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
-	if _, err := l.Admit(context.Background(), managedRequest("q", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); err != nil {
-		t.Fatal(err)
-	}
-	if len(events) != 2 || events[0].Operation != "allow" || events[1].Operation != "allow" {
-		t.Fatalf("%+v", events)
-	}
-	for _, e := range events {
-		if e.Result != "allowed" || e.RuleCount != 1 {
-			t.Fatal(e)
-		}
-	}
-}
-
 func FuzzInterval(f *testing.F) {
 	f.Add(int64(3), int64(time.Second), int64(3), int64(2))
 	f.Add(int64(1<<62), int64(1), int64(1), int64(1))
@@ -181,24 +142,4 @@ func FuzzInterval(f *testing.F) {
 			t.Fatalf("step=%d expected=%s", step, expected)
 		}
 	})
-}
-
-func TestMalformedReplyAndObserverContext(t *testing.T) {
-	s := &stubScripter{reply: int64(1)}
-	var seen Event
-	l, _ := NewWithOptions(s, "a", "b", Options{Observer: func(ctx context.Context, e Event) {
-		if ctx == nil {
-			t.Fatal("nil observer context")
-		}
-		seen = e
-	}})
-	if _, err := l.admitRules(context.Background(), rule("q", 1, 1)); !errors.Is(err, ErrState) || OutcomeOf(err) != Unknown {
-		t.Fatal(err)
-	}
-	if seen.Result != "error" {
-		t.Fatal(seen)
-	}
-	if _, err := l.admitRules(nil, rule("q", 1, 1)); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
-	}
 }

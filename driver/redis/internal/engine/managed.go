@@ -13,10 +13,8 @@ func (l *Limiter) policyKey(name string) string {
 }
 
 // Admit resolves current backend policy in the same atomic admission.
-func (l *Limiter) Admit(ctx context.Context, request pacelock.Admission) (decision Decision, err error) {
+func (l *Limiter) Admit(ctx context.Context, request pacelock.Admission) (Decision, error) {
 	op := "allow"
-	finish := l.observe(ctx, op, len(request.Charges))
-	defer func() { finish(decision, err) }()
 	if err := l.ready(ctx); err != nil {
 		return Decision{}, failure(op, NotCharged, err)
 	}

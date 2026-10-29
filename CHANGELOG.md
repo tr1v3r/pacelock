@@ -32,6 +32,16 @@
 - Migrate shared backend contracts, runnable examples and bilingual documentation;
   retain rollback, commit-loss, concurrency, cancellation and Unknown coverage.
 
+### Maintenance
+
+- Align security/contribution guidance and error/prune comments with dynamic-only
+  admission; remove the retired receipt fuzz command.
+- Remove Redis engine observation plumbing duplicated by the public limiter and
+  the unreachable legacy-receipt prune branch. Legacy receipts remain untouched.
+- Validate driver decisions against the dispatched charge snapshot without
+  allocating synthetic rules. Keep structural validation and conservative
+  accounting for invalid driver responses.
+
 ### Other development-line API changes
 
 - Backend-authoritative dynamic admission is the default; publish revisioned

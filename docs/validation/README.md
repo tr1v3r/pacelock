@@ -2,6 +2,12 @@
 
 # Local fixture observations
 
+## Dynamic facade cleanup (2026-10-29)
+
+[Facade allocation cleanup](admission-cleanup-local.md): before/after samples
+show one fewer allocation per Allow call after removing synthetic rules. This is
+a fake-driver microbenchmark, not backend throughput evidence.
+
 ## Dynamic debt-format experiment (2026-10-29)
 
 [Dynamic D3 vs numeric debt comparison](dynamic-debt-format-local.md): report,

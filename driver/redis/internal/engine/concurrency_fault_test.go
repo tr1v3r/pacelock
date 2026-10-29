@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,16 +15,6 @@ import (
 func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	l := f.limiter(t)
 	publishRules(t, l, contentionRule("q", 200, 1))
-	var mu sync.Mutex
-	events := make(map[string]int)
-	l.observer = func(_ context.Context, e Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		events[e.Operation+"/"+e.Result]++
-		if e.Duration < 0 {
-			t.Error("negative observation duration")
-		}
-	}
 	var allowed atomic.Int64
 	contentionWave(t, 600, func(ctx context.Context, i int) {
 		current := f.caller(l, i)
@@ -75,16 +64,11 @@ func testContentionCancellation(t *testing.T, f *contentionFixture) {
 	if allowed.Load() != 200 {
 		t.Fatalf("admitted=%d want 200", allowed.Load())
 	}
-	want := map[string]int{"allow/allowed": 200, "allow/error": 400}
-	if !reflect.DeepEqual(events, want) {
-		t.Fatalf("observer events %v want %v", events, want)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if n, err := f.clients[0].Exists(ctx, l.key("untouched")).Result(); err != nil || n != 0 {
 		t.Fatalf("pre-dispatch errors wrote %d keys: %v", n, err)
 	}
-	l.observer = nil // All concurrent calls have joined.
 	requireDenied(t, l, contentionRule("q", 200, 1))
 }
 
