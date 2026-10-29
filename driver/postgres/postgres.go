@@ -340,7 +340,7 @@ func (d *Driver) Prune(ctx context.Context, s pacelock.Scope, limit int) (int64,
 	}
 	// Require recovered TAT as well as expiry: a premature expiry must
 	// never cause cleanup to erase active debt.
-	result, err := tx.ExecContext(ctx, `DELETE FROM pacelock_quotas WHERE scope_id=$1 AND quota_id IN (SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2 AND tat_us<=$2 ORDER BY quota_id LIMIT $3)`, id, now, limit)
+	result, err := tx.ExecContext(ctx, `DELETE FROM pacelock_quotas WHERE scope_id=$1 AND quota_id IN (SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND GREATEST(expires_us,tat_us)<=$2 ORDER BY GREATEST(expires_us,tat_us),quota_id LIMIT $3)`, id, now, limit)
 	if err != nil {
 		return 0, err
 	}

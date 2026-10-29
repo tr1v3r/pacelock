@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -222,5 +224,145 @@ func TestPostgresPrunePreservesActiveDebt(t *testing.T) {
 	var guards int
 	if err = db.QueryRow(`SELECT count(*) FROM pacelock_domains WHERE scope_id=$1`, pgScopeID(s)).Scan(&guards); err != nil || guards != 1 {
 		t.Fatal(guards, err)
+	}
+}
+
+// Active debt must not be scanned to find a bounded recovered batch. The same
+// expression also protects a corrupt early expiry from erasing active TAT.
+func TestPostgresPruneIndexedRecovery(t *testing.T) {
+	db, d, s, _ := postgresFixture(t)
+	ctx := context.Background()
+	scope := pgScopeID(s)
+	if _, err := db.ExecContext(ctx, `INSERT INTO pacelock_domains VALUES($1)`, scope); err != nil {
+		t.Fatal(err)
+	}
+	var now int64
+	if err := db.QueryRowContext(ctx, `SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint`).Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pacelock_quotas SELECT $1,md5(i::text),$2::bigint+3600000000,1,1,$2::bigint+3600000000 FROM generate_series(1,20000) i`, scope, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pacelock_quotas VALUES($1,'recovered',$2::bigint-1000,1,1,$2::bigint-1000),($1,'early-expiry',$2::bigint+3600000000,1,1,$2::bigint-1000)`, scope, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `ANALYZE pacelock_quotas`); err != nil {
+		t.Fatal(err)
+	}
+	baselineRows, err := db.QueryContext(ctx, `EXPLAIN (ANALYZE, BUFFERS) SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND expires_us<=$2 AND tat_us<=$2 ORDER BY quota_id LIMIT 1`, scope, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baselinePlan string
+	for baselineRows.Next() {
+		var line string
+		if err := baselineRows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		baselinePlan += line + "\n"
+	}
+	if err := baselineRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	baselineRows.Close()
+	t.Log("Previous candidate query:\n" + baselinePlan)
+	rows, err := db.QueryContext(ctx, `EXPLAIN (ANALYZE, BUFFERS) SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND GREATEST(expires_us,tat_us)<=$2 ORDER BY GREATEST(expires_us,tat_us),quota_id LIMIT 1`, scope, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	t.Log(plan)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	rows, err = tx.QueryContext(ctx, `EXPLAIN (ANALYZE, BUFFERS) DELETE FROM pacelock_quotas WHERE scope_id=$1 AND quota_id IN (SELECT quota_id FROM pacelock_quotas WHERE scope_id=$1 AND GREATEST(expires_us,tat_us)<=$2 ORDER BY GREATEST(expires_us,tat_us),quota_id LIMIT 1)`, scope, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletePlan string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		deletePlan += line + "\n"
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	t.Log(deletePlan)
+	if !strings.Contains(plan, "pacelock_quotas_recovered_idx") {
+		t.Fatalf("recovery index unused:\n%s", plan)
+	}
+	n, err := d.Prune(ctx, s, 1)
+	if err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	n, err = d.Prune(ctx, s, 1)
+	if err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+	var remaining int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pacelock_quotas WHERE scope_id=$1`, scope).Scan(&remaining); err != nil || remaining != 20001 {
+		t.Fatal(remaining, err)
+	}
+}
+
+func TestPostgresPruneConcurrentAdmission(t *testing.T) {
+	db, d, s, l := postgresFixture(t)
+	ctx := context.Background()
+	scope := pgScopeID(s)
+	q := pacelock.Quota{Name: "active", Policy: pacelock.Policy{Revision: 1, Rate: 1, Period: time.Hour, Burst: 20}}
+	if err := l.UpdateQuotas(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pacelock_quotas SELECT $1,md5(i::text),1,1,1,1 FROM generate_series(1,20) i`, scope); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 40)
+	var deleted atomic.Int64
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); n, err := d.Prune(ctx, s, 1); deleted.Add(n); errs <- err }()
+		go func() {
+			defer wg.Done()
+			decision, err := l.Allow(ctx, pacelock.Use("active", 1))
+			if err == nil && !decision.Allowed {
+				err = fmt.Errorf("unexpected denial: %+v", decision)
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deleted.Load() != 20 {
+		t.Fatal(deleted.Load())
+	}
+	decision, err := l.Allow(ctx, pacelock.Use("active", 1))
+	if err != nil || decision.Allowed {
+		t.Fatal(decision, err)
 	}
 }

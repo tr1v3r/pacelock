@@ -126,7 +126,7 @@ func TestDynamicWaitStopsOnEveryError(t *testing.T) {
 					return Decision{}, backendErr
 				}
 				var events []Event
-				l, _ := NewWithOptions(d, "app", "domain", Options{Observer: func(_ context.Context, e Event) { events = append(events, e) }})
+				l, _ := NewWithOptions(d, "app", "domain", Options{WaitBackoff: time.Second, Observer: func(_ context.Context, e Event) { events = append(events, e) }})
 				err := l.Wait(context.Background(), sampleCharge())
 				wantCalls := 1
 				if denyFirst {

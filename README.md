@@ -282,6 +282,16 @@ use of a relaxed policy. `RetryAfter` reserves no capacity; competing callers ca
 win repeatedly, so there is no FIFO or starvation guarantee. Bound waiting with a
 context deadline.
 
+For hot quotas with many concurrent waiters, opt into randomized exponential
+backoff with `NewWithOptions(driver, namespace, domain, Options{WaitBackoff:
+250 * time.Millisecond})`. `WaitBackoff` caps **additional** delay beyond each
+backend `RetryAfter` (valid range: zero through `MaxHorizon`). Zero keeps the
+existing exact-delay behavior. The jitter window starts at `min(RetryAfter,
+WaitBackoff)` and doubles after each denial up to that cap. This reduces repeated
+contention at the cost of longer completion latency; it does not guarantee fairness
+or eliminate worst-case contention. Cancellation remains prompt, and errors are
+never retried. Observer `RetryAfter` remains the backend advisory, excluding jitter.
+
 ## Admission boundary
 
 Admission is non-idempotent, with no retained results, request identity or result

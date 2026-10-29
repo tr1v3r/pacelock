@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"time"
 )
@@ -97,8 +98,13 @@ type Decision struct {
 	Limited []string
 }
 
-// Options holds optional integrations; zero values are valid.
+// Options holds optional observation and waiting behavior; zero values are valid.
 type Options struct {
+	// WaitBackoff caps additional randomized exponential delay after ordinary
+	// quota denials. Zero preserves exact RetryAfter sleeps. Values must be between
+	// zero and MaxHorizon. Enable for contended quotas to trade latency for fewer
+	// backend attempts; it adds no fairness, reservation or queue.
+	WaitBackoff time.Duration
 	// Observer is nil to disable synchronous observation.
 	Observer Observer
 }
@@ -157,9 +163,10 @@ type Limiter struct {
 
 // limiterCore holds transport, scope and observation for admission and updates.
 type limiterCore struct {
-	driver   Driver
-	scope    Scope
-	observer Observer
+	driver      Driver
+	scope       Scope
+	observer    Observer
+	waitBackoff time.Duration
 }
 
 // New constructs a dynamic limiter in a namespace/domain scope without backend access.
@@ -178,6 +185,9 @@ func NewWithOptions(driver Driver, namespace, domain string, options Options) (*
 }
 
 func newLimiterCore(driver Driver, namespace, domain string, options Options) (*limiterCore, error) {
+	if options.WaitBackoff < 0 || options.WaitBackoff > MaxHorizon {
+		return nil, fmt.Errorf("%w: WaitBackoff must be between zero and MaxHorizon", ErrInvalid)
+	}
 	scope := Scope{Namespace: namespace, Domain: domain}
 	if isNil(driver) {
 		return nil, fmt.Errorf("%w: driver is required", ErrInvalid)
@@ -185,7 +195,7 @@ func newLimiterCore(driver Driver, namespace, domain string, options Options) (*
 	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
-	return &limiterCore{driver: driver, scope: scope, observer: options.Observer}, nil
+	return &limiterCore{driver: driver, scope: scope, observer: options.Observer, waitBackoff: options.WaitBackoff}, nil
 }
 
 func isNil(v any) bool {
@@ -254,6 +264,7 @@ func validateDecision(d Decision, charges []Charge) error {
 // RetryAfter may delay observing a relaxed policy.
 //
 // Only ordinary quota denials are retried, after their advisory RetryAfter.
+// Options.WaitBackoff optionally adds capped randomized exponential delay.
 // Every error stops waiting, including missing or paused policies, a cost above
 // the current burst, and NotCharged backend errors. Unknown outcomes must not be
 // blindly retried. Cancellation between attempts is NotCharged; cancellation
@@ -271,7 +282,11 @@ func (l *Limiter) Wait(ctx context.Context, charges ...Charge) (err error) {
 	var decision Decision
 	defer func() { finish(decision, err) }()
 	charges = append([]Charge(nil), charges...)
-	decision, err = waitAdmission(ctx, "wait", func() (Decision, error) {
+	backoff := time.Duration(0)
+	if core != nil {
+		backoff = core.waitBackoff
+	}
+	decision, err = waitAdmission(ctx, "wait", backoff, func() (Decision, error) {
 		return core.admitManaged(ctx, charges)
 	})
 	return err
@@ -280,7 +295,8 @@ func (l *Limiter) Wait(ctx context.Context, charges ...Charge) (err error) {
 // waitAdmission retries only validated denials. Attempts validate context before
 // dispatch and return a validated decision or an accounting-aware error. Keep
 // the last decision for whole-call observation, including a canceled delay.
-func waitAdmission(ctx context.Context, op string, attempt func() (Decision, error)) (decision Decision, err error) {
+func waitAdmission(ctx context.Context, op string, maxBackoff time.Duration, attempt func() (Decision, error)) (decision Decision, err error) {
+	var window time.Duration
 	for {
 		result, attemptErr := attempt()
 		if attemptErr != nil {
@@ -290,7 +306,9 @@ func waitAdmission(ctx context.Context, op string, attempt func() (Decision, err
 		if decision.Allowed {
 			return decision, nil
 		}
-		timer := time.NewTimer(decision.RetryAfter)
+		window = growWaitBackoff(window, decision.RetryAfter, maxBackoff)
+		delay := waitDelay(decision.RetryAfter, window)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -298,4 +316,28 @@ func waitAdmission(ctx context.Context, op string, attempt func() (Decision, err
 		case <-timer.C:
 		}
 	}
+}
+
+// growWaitBackoff doubles the per-call jitter window after each denial, bounded
+// before arithmetic. RetryAfter remains a minimum, independent of this window.
+func growWaitBackoff(previous, retry, limit time.Duration) time.Duration {
+	if limit == 0 {
+		return 0
+	}
+	if previous == 0 {
+		return min(retry, limit)
+	}
+	if previous >= limit-previous {
+		return limit
+	}
+	return previous * 2
+}
+
+// waitDelay adds only nonnegative jitter. Validated retry/window values are each
+// at most MaxHorizon, so their sum and the random bound cannot overflow.
+func waitDelay(retry, window time.Duration) time.Duration {
+	if window == 0 {
+		return retry
+	}
+	return retry + time.Duration(rand.Int64N(int64(window)+1))
 }

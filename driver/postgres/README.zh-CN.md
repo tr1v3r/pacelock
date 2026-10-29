@@ -126,3 +126,9 @@ PostgreSQL 使用核心 EvaluateManaged 转换；Redis 的等价计算在 Lua �
 
 核心、两个运行时 Driver、可选的 pgx 示例和集成测试模块统一要求 Go 1.26+。
 生产应用应使用仍在维护的 Go 分支及其最新修补版。
+
+Prune 使用 `(scope_id, GREATEST(expires_us, tat_us), quota_id)` 索引并按恢复时间
+选择候选，避免持 domain 锁遍历全部活跃额度。LIMIT 限制已恢复候选数量，不保证硬性
+延迟上限（仍受 MVCC 可见性、锁和存储影响）。已有当前版本 schema 需在受控初始化
+阶段运行 `Migrate` 添加索引；创建索引可能阻塞写入并消耗磁盘，应安排停流量窗口，
+或在 Migrate 之外并发创建等价索引。额外索引也增加债务写入维护成本，需按部署测量。
