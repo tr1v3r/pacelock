@@ -217,7 +217,7 @@ func (d *Driver) UpdateQuotas(ctx context.Context, u pacelock.QuotaBatch) error 
 		}
 	}
 
-	next, err := pacelock.ApplyPolicies(now, u.Quotas, states)
+	next, err := pacelock.ApplyQuotas(now, u.Quotas, states)
 	if err != nil {
 		return uncharged(err)
 	}

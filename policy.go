@@ -149,11 +149,11 @@ func (l *Limiter) UpdateQuotas(ctx context.Context, quotas ...Quota) error {
 	return nil
 }
 
-// ApplyPolicies calculates an all-or-none configuration update without I/O.
+// ApplyQuotas calculates an all-or-none configuration update without I/O.
 // states contains configuration only (Interval, Burst, Revision); TAT and ExpiresAt
 // must be zero. Drivers serialize this with admission and persist configurations
 // separately from debt. This function neither reads nor modifies debt.
-func ApplyPolicies(now int64, quotas []Quota, states []QuotaState) ([]QuotaState, error) {
+func ApplyQuotas(now int64, quotas []Quota, states []QuotaState) ([]QuotaState, error) {
 	if err := (QuotaBatch{Scope: Scope{Namespace: "validate", Domain: "validate"}, Quotas: quotas}).Validate(); err != nil {
 		return nil, err
 	}
